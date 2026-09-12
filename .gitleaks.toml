@@ -22,4 +22,8 @@ regexes = [
   # AWS documentation sample account IDs used by tests
   '''111122223333''',
   '''123456789012''',
+  # Synthetic key-shaped fixtures in bin/verify-user-provider-keys.sh.
+  # Plumbing and secrecy assertions only; never real credentials.
+  '''sk-verify-[A-Za-z0-9]+''',
+  '''sk-or-v1-verify-[A-Za-z0-9]+''',
 ]

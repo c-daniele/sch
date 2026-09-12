@@ -55,6 +55,16 @@ ROOT_DOCS = ["README.md", "MANIFESTO.md", "AGENTS.md", "CONTRIBUTING.md", "SECUR
 print("== 1. Verifying relative link resolution ==")
 link_sources = ROOT_DOCS + [".backlog/masterplan/MASTERPLAN.md"] + glob.glob("docs/**/*.md", recursive=True)
 
+# Backlog runtime dirs that are legitimately absent in a fresh clone when the
+# board, journal, or brainstorming area is empty: git does not track empty
+# directories, so a checkout never creates them until the tooling does.
+ALLOWED_MISSING_DIRS = {
+    ".backlog/tasks",
+    ".backlog/docs",
+    ".backlog/docs/journal",
+    ".backlog/brainstorming",
+}
+
 link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
 
 for src in sorted(link_sources):
@@ -83,8 +93,10 @@ for src in sorted(link_sources):
         # Unquote URL-encoded chars (e.g. %20)
         target_path = urllib.parse.unquote(target_path)
         resolved = os.path.normpath(os.path.join(src_dir, target_path))
-        
+
         if not os.path.exists(resolved):
+            if resolved in ALLOWED_MISSING_DIRS:
+                continue
             errors.append(f"Broken relative link in {src}: [{text}]({target}) -> {resolved}")
 
 print(f"Checked {len(link_sources)} files for relative links.")
