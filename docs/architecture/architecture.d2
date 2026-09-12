@@ -1,0 +1,83 @@
+direction: down
+
+classes: {
+  band: {style: {border-radius: 8; font-size: 20; bold: true}}
+  store: {shape: cylinder}
+  session: {style: {stroke: "#1565C0"; stroke-width: 2; font-color: "#1565C0"}}
+  durability: {style: {stroke: "#2E7D32"; stroke-width: 2; stroke-dash: 3; font-color: "#2E7D32"}}
+  provision: {style: {stroke: "#9E9E9E"; font-color: "#757575"}}
+}
+
+operator: "Operator workstation" {
+  class: band
+  style.fill: "#FAFAFA"
+  style.stroke: "#616161"
+
+  cli: "sch CLI\nbin/sch · bin/sch.ps1 → cli/sch (stdlib Python)"
+  surfaces: "Local surfaces\nshell · attach TUI · web · ACP"
+  deploy: "infra/deploy.sh\nbuildx (local) / CodeBuild (arm64)"
+  index: "~/.config/sch\nworkspace index" {shape: page}
+
+  cli -> index
+}
+
+aws: "AWS account — one region (default eu-west-1)" {
+  class: band
+  style.fill: "#FFF8F0"
+  style.stroke: "#E65100"
+
+  cfn: "CloudFormation\necr + runtime stacks"
+  ecr: "Amazon ECR\npinned linux/arm64 image"
+  iam: "Execution role\nleast-privilege IAM"
+
+  runtime: "Amazon Bedrock AgentCore Runtime" {
+    style.fill: "#FFFFFF"
+    style.stroke: "#B71C1C"
+
+    front: "SigV4 front door\ninvoke · login PTY · WebSocket · stop"
+
+    vm: "microVM — 1 per session (idle 15 min · max 8 h)" {
+      style.fill: "#FFF3E0"
+      style.stroke: "#E65100"
+
+      shim: "Python shim :8080\ncheckpoint · task · serve-ensure · restore"
+      harness: "Harness dispatcher\nopencode | claude | pi (mutually exclusive)"
+      disk: "Ephemeral disk\nlive agent state" {class: store}
+      l1: "L1 — AgentCore session storage\n/mnt/workspace · survives stop/resume" {class: store}
+
+      shim -> harness
+      harness -> disk
+      shim <-> l1 {class: durability}
+    }
+
+    front -> vm.shim {class: session}
+  }
+
+  s3: "L2 — S3 checkpoint bucket\nversioned · DeletionPolicy Retain" {class: store}
+  bedrock: "Amazon Bedrock\nClaude models · Mantle (GPT family)"
+  cw: "CloudWatch\nlogs + metrics"
+}
+
+ext: "External — public egress from the microVM" {
+  class: band
+  style.fill: "#F3F7FA"
+  style.stroke: "#546E7A"
+  remote: "AWS docs · Context7 · OpenCode backend · git remotes"
+}
+
+operator.cli -> aws.runtime.front: "SigV4 invoke" {class: session}
+operator.surfaces -> aws.runtime.front: "PTY / WebSocket tunnel" {class: session}
+
+operator.deploy -> aws.cfn: deploy {class: provision}
+aws.cfn -> aws.ecr {class: provision}
+aws.cfn -> aws.runtime {class: provision}
+aws.cfn -> aws.s3 {class: provision}
+aws.cfn -> aws.iam {class: provision}
+aws.ecr -> aws.runtime.vm: "image pull at start" {class: provision}
+
+aws.runtime.vm.shim -> aws.s3: "checkpoint / restore" {class: durability}
+operator.cli -> aws.s3: "offline status reads" {class: durability}
+
+aws.runtime.vm.harness -> aws.bedrock: "model calls" {class: session}
+aws.runtime -> aws.cw {class: provision}
+aws.runtime.vm.harness -> ext.remote: "MCP / git / docs" {style.stroke-dash: 3}

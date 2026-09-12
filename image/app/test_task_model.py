@@ -1,0 +1,376 @@
+"""Offline tests for the task action's per-invocation model handling
+(add-task-model-flag: submit-time validation, ack echo, argv mapping,
+status-object fields)."""
+
+from __future__ import annotations
+
+import __future__
+import asyncio
+import importlib.util
+import json
+import os
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+class FakeApp:
+    def entrypoint(self, func):
+        return func
+
+    def websocket(self, func):
+        return func
+
+    def add_async_task(self, *_args, **_kwargs):
+        return object()
+
+    def complete_async_task(self, *_args, **_kwargs):
+        return None
+
+    def run(self, *_args, **_kwargs):
+        return None
+
+
+def load_main():
+    app_dir = Path(__file__).parent
+    sys.path.insert(0, str(app_dir))
+    bedrock = types.ModuleType("bedrock_agentcore")
+    bedrock.BedrockAgentCoreApp = FakeApp
+    boto3 = types.ModuleType("boto3")
+    boto3.client = lambda *_args, **_kwargs: None
+    module_name = "sch_task_model_main"
+    spec = importlib.util.spec_from_file_location(module_name, app_dir / "main.py")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    with patch.dict(
+        sys.modules,
+        {module_name: module, "bedrock_agentcore": bedrock, "boto3": boto3},
+    ), patch("threading.Thread"):
+        source = (app_dir / "main.py").read_text(encoding="utf-8")
+        code = compile(
+            source,
+            str(app_dir / "main.py"),
+            "exec",
+            flags=__future__.annotations.compiler_flag,
+            dont_inherit=True,
+        )
+        exec(code, module.__dict__)
+    return module
+
+
+main = load_main()
+
+# Hermetic spool dir (add-task-liveness-safety, task 4.4): _telegram_notify
+# now falls back to the notifier's spool dir when the singleton does not exist
+# yet, and this module submits/finishes tasks with no notifier registered. In a
+# real microVM (SCH_TELEGRAM_* set) those events would otherwise land in the
+# LIVE shim's spool and be delivered for real.
+_SPOOL_TMP = None
+_SPOOL_SAVED = None
+
+
+def setUpModule():
+    global _SPOOL_TMP, _SPOOL_SAVED  # noqa: PLW0603
+    _SPOOL_TMP = tempfile.TemporaryDirectory()
+    _SPOOL_SAVED = main.telegram_notifier.SPOOL_DIR
+    main.telegram_notifier.SPOOL_DIR = Path(_SPOOL_TMP.name) / "spool"
+
+
+def tearDownModule():
+    main.telegram_notifier.SPOOL_DIR = _SPOOL_SAVED
+    _SPOOL_TMP.cleanup()
+
+MODEL = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+class FakeThread:
+    """Records constructor args and never runs the target."""
+
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        self.args = kwargs.get("args", ())
+        self.kwargs = kwargs
+        FakeThread.instances.append(self)
+
+    def start(self):
+        return None
+
+    def join(self, *_args, **_kwargs):
+        return None
+
+
+class TaskModelTests(unittest.TestCase):
+    def setUp(self):
+        main._HARNESS["value"] = "opencode"
+        main._WORKSPACE_NAME["value"] = "workspace"
+        main._SESSION_EPOCH["value"] = 0
+        main._STORAGE_BACKEND["value"] = "session"
+        main.CHECKPOINT_BUCKET = ""
+        self._reset_slot()
+        FakeThread.instances = []
+        self.uploads = []
+
+        patches = [
+            patch.object(main.threading, "Thread", FakeThread),
+            patch.object(
+                main, "_upload_task_status",
+                side_effect=lambda ws, status: self.uploads.append(dict(status)) or True,
+            ),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _reset_slot(self):
+        with main._TASK_LOCK:
+            main._TASK_STATE.update({
+                "task_id": None,
+                "state": "idle",
+                "prompt": None,
+                "harness": None,
+                "model": None,
+                "thread": None,
+                "async_task_handle": None,
+            })
+        main._TASK_STATUS.clear()
+        main._TASK_STATUS["state"] = "none"
+
+    def submit(self, **updates):
+        payload = {
+            "action": "task",
+            "workspace": "workspace",
+            "harness": "opencode",
+            "prompt": "build and test",
+        }
+        payload.update(updates)
+        return main.invoke(payload)
+
+    # --- submit-time validation (spec: "Malformed model field rejected
+    # without effects") ---------------------------------------------------------
+
+    def test_malformed_model_rejected_without_any_mutation(self):
+        for model in ("", "model with spaces", "provider/model$id", 123, None):
+            with self.subTest(model=model):
+                response = self.submit(model=model)
+                self.assertEqual(response["status"], "error")
+                self.assertIn("model", response["message"])
+                # No slot mutation, no S3 upload, no worker thread.
+                self.assertEqual(main._TASK_STATE["state"], "idle")
+                self.assertIsNone(main._TASK_STATE["task_id"])
+                self.assertEqual(self.uploads, [])
+                self.assertEqual(FakeThread.instances, [])
+
+    def test_slot_stays_free_for_subsequent_correct_submit(self):
+        rejected = self.submit(model="bad model")
+        self.assertEqual(rejected["status"], "error")
+
+        accepted = self.submit(model=MODEL)
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertTrue(accepted["task_id"])
+
+    # --- valid model: ack echo + state/status propagation --------------------
+
+    def test_valid_model_is_echoed_and_recorded(self):
+        response = self.submit(model=MODEL)
+
+        self.assertEqual(response["status"], "accepted")
+        self.assertEqual(response["model"], MODEL)
+        self.assertEqual(response["harness"], "opencode")
+        self.assertEqual(main._TASK_STATE["model"], MODEL)
+        # Initial S3 status object carries the model.
+        self.assertEqual(len(self.uploads), 1)
+        self.assertEqual(self.uploads[0]["model"], MODEL)
+        self.assertEqual(main._TASK_STATUS["model"], MODEL)
+        # Worker thread receives the model as its last positional arg.
+        self.assertEqual(len(FakeThread.instances), 1)
+        self.assertEqual(FakeThread.instances[0].args[-1], MODEL)
+
+    def test_running_info_surface_includes_model(self):
+        self.submit(model=MODEL)
+        info = main._task_info_field()
+        self.assertEqual(info["state"], "running")
+        self.assertEqual(info["model"], MODEL)
+
+    # --- cold-boot submit (add-task-liveness-safety, task 4.4) ---------------
+
+    def test_submit_before_the_notifier_exists_spools_the_event(self):
+        # The `task` action is answered while _bootstrap is still restoring the
+        # mount, i.e. before _start_telegram_notifier ran: the submit
+        # notification must land in the spool instead of being dropped (spec:
+        # 'No lifecycle event lost at cold boot').
+        spool = main.telegram_notifier.SPOOL_DIR
+        if spool.is_dir():
+            for stale in spool.iterdir():
+                stale.unlink()
+        main._TELEGRAM["notifier"] = None
+        with patch.dict(os.environ, {
+            "SCH_TELEGRAM_BOT_TOKEN": "tok", "SCH_TELEGRAM_CHAT_ID": "-100999",
+        }):
+            response = self.submit(model=MODEL)
+        self.assertEqual(response["status"], "accepted")
+        events = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(spool.iterdir())
+        ]
+        self.assertEqual([event["type"] for event in events], ["task-submitted"])
+        self.assertEqual(events[0]["workspace"], "workspace")
+        self.assertEqual(events[0]["payload"]["harness"], "opencode")
+        self.assertEqual(events[0]["payload"]["model"], MODEL)
+
+    # --- absent model: byte-identical behavior -------------------------------
+
+    def test_absent_model_keeps_ack_and_status_free_of_model(self):
+        response = self.submit()
+
+        self.assertEqual(response["status"], "accepted")
+        self.assertNotIn("model", response)
+        self.assertIsNone(main._TASK_STATE["model"])
+        self.assertEqual(len(self.uploads), 1)
+        self.assertNotIn("model", self.uploads[0])
+        self.assertNotIn("model", main._TASK_STATUS)
+        self.assertIsNone(FakeThread.instances[0].args[-1])
+        info = main._task_info_field()
+        self.assertNotIn("model", info)
+
+    def test_stale_model_from_previous_task_is_dropped(self):
+        self.submit(model=MODEL)
+        self._reset_slot()
+        main._TASK_STATUS["model"] = MODEL  # simulate leftover terminal record
+
+        self.submit()
+        self.assertNotIn("model", main._TASK_STATUS)
+
+    def test_stale_notification_fields_from_previous_task_are_dropped(self):
+        # TASK-28: the delivery fields describe the previous terminal record;
+        # a new running task must not inherit them through dict.update.
+        self._reset_slot()
+        main._TASK_STATUS.update({
+            "notification_status": "delivered",
+            "notified_utc": "2026-09-06T10:00:00Z",
+            "notified_by": "shim",
+        })
+
+        self.submit()
+        for field in ("notification_status", "notified_utc", "notified_by"):
+            self.assertNotIn(field, main._TASK_STATUS)
+            self.assertNotIn(field, self.uploads[0])
+
+    # --- argv mapping (design D3) --------------------------------------------
+
+    def test_opencode_argv_includes_discrete_model_pair(self):
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+            argv = main._build_headless_argv("opencode", "oc-session", "prompt", MODEL)
+        self.assertEqual(
+            argv,
+            [
+                "/bin/opencode", "run", "--session", "oc-session",
+                "--model", MODEL, "--agent", main._TASK_AGENT,
+                *main._TASK_AUTO_APPROVE_FLAGS, "prompt",
+            ],
+        )
+
+    def test_claude_argv_includes_discrete_model_pair(self):
+        argv = main._build_headless_argv("claude", "session-id", "prompt", MODEL)
+        self.assertEqual(
+            argv,
+            [
+                "claude", "-p", "--resume", "session-id", "--model", MODEL,
+                "--agent", main._TASK_AGENT,
+                "--dangerously-skip-permissions", "prompt",
+            ],
+        )
+
+    def test_argv_unchanged_when_model_absent(self):
+        for model in (None, ""):
+            with self.subTest(model=model):
+                with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+                    self.assertEqual(
+                        main._build_headless_argv("opencode", None, "p", model),
+                        main._build_headless_argv("opencode", None, "p"),
+                    )
+                self.assertEqual(
+                    main._build_headless_argv("claude", None, "p", model),
+                    main._build_headless_argv("claude", None, "p"),
+                )
+
+    # --- heartbeat and terminal record ---------------------------------------
+
+    def test_heartbeat_preserves_model_field(self):
+        self.submit(model=MODEL)
+        task_id = main._TASK_STATE["task_id"]
+
+        class OneIterationStop:
+            """is_set: False for the first loop iteration, True afterwards."""
+
+            def __init__(self):
+                self.checks = 0
+
+            def is_set(self):
+                self.checks += 1
+                # Loop guard (False), post-wait check (False), then stop.
+                return self.checks > 2
+
+            def wait(self, _timeout):
+                return None
+
+        calls = []
+        with patch.object(
+            main, "_download_task_status",
+            return_value={"state": "running", "task_id": task_id},
+        ), patch.object(
+            main, "_upload_task_status",
+            side_effect=lambda ws, s: calls.append(dict(s)) or True,
+        ):
+            main._run_task_heartbeat(
+                "workspace", task_id, OneIterationStop(), "opencode", MODEL,
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["model"], MODEL)
+        self.assertEqual(calls[0]["harness"], "opencode")
+
+    def test_finish_task_terminal_record_includes_model_only_when_requested(self):
+        import threading as real_threading
+
+        for model, expect_key in ((MODEL, True), (None, False)):
+            with self.subTest(model=model):
+                self.uploads.clear()
+                stop = real_threading.Event()
+                thread = real_threading.Thread(target=lambda: None)
+                thread.start()
+                with patch.object(main, "_do_checkpoint", return_value={
+                    "status": "ok", "manifest_written": True, "db_backup": "ok",
+                }):
+                    main._finish_task(
+                        task_id="t-1",
+                        prompt="p",
+                        started=main._utcnow(),
+                        started_ts=0.0,
+                        harness="opencode",
+                        harness_session_id=None,
+                        state="succeeded",
+                        exit_code=0,
+                        error=None,
+                        output="done",
+                        output_truncated=False,
+                        workspace="workspace",
+                        async_handle=None,
+                        heartbeat_stop=stop,
+                        heartbeat_thread=thread,
+                        model=model,
+                    )
+                self.assertEqual(len(self.uploads), 1)
+                if expect_key:
+                    self.assertEqual(self.uploads[0]["model"], MODEL)
+                else:
+                    self.assertNotIn("model", self.uploads[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

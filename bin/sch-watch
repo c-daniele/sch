@@ -1,0 +1,112 @@
+#!/bin/bash
+# sch-watch — external liveness watchdog for a headless sch task.
+#
+# WHY THIS EXISTS (incident 2026-08-21): `sch status` reports the raw
+# `state` field persisted on S3. When the microVM is killed abruptly
+# (infrastructure reap, not an application error) nothing ever rewrites
+# that field, so a dead task keeps reporting `state: running` forever.
+# Both in-VM stall detectors are structurally unable to catch this case:
+#   - the heartbeat-staleness check runs INSIDE the heartbeat loop
+#     (image/app/main.py:2472), which stops running when the VM dies;
+#   - the milestone-staleness check needs harness milestones, which a
+#     headless claude task never emits before the end of the turn.
+# So liveness MUST be judged from outside, by heartbeat freshness: the
+# shim rewrites task-status.json every ~30s while the task really runs.
+#
+# The staleness THRESHOLD is not defined here: `sch status` owns the single
+# client-side definition of staleness and reports it through its exit code
+# (3 = running but stale, add-task-liveness-safety task 1.4). This script
+# only polls, renders and reacts.
+#
+# usage: bin/sch-watch <workspace> [interval_s]
+set -uo pipefail
+
+WS="${1:-}"
+INTERVAL="${2:-60}"
+
+if [ -z "${WS}" ]; then
+    echo "usage: bin/sch-watch <workspace> [interval_s]" >&2
+    exit 1
+fi
+
+if [ -n "${3:-}" ]; then
+    echo "sch-watch: note: the staleness threshold is no longer configurable here;" >&2
+    echo "sch-watch: 'sch status' defines it (exit code 3). Argument '${3}' ignored." >&2
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "sch-watch: workspace '${WS}', poll ${INTERVAL}s"
+echo "sch-watch: the heartbeat ticks every ~30s; staleness is classified by 'sch status' (exit 3)"
+
+while :; do
+    raw="$("${SCRIPT_DIR}/sch" status "${WS}" --json 2>/dev/null)"
+    status_rc=$?
+
+    # The env assignment must apply to python3 itself, so feed the payload
+    # with a here-string instead of a pipeline (in `VAR=v cmd1 | cmd2` the
+    # assignment reaches cmd1 only).
+    SCH_STATUS_RC="${status_rc}" python3 -c '
+import datetime, json, os, sys
+
+TERMINAL = ("succeeded", "failed", "timed-out", "interrupted")
+
+# Classification delegated to `sch status`: 3 == running but stale.
+stale = os.environ.get("SCH_STATUS_RC", "0") == "3"
+now = datetime.datetime.now(datetime.timezone.utc)
+stamp = now.strftime("%H:%M:%SZ")
+
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(stamp + "  status non leggibile (S3/credenziali?)")
+    sys.exit(0)
+
+state = d.get("state", "?")
+task = (d.get("task_id") or "")[:8]
+hb = d.get("heartbeat_utc")
+age = None
+if hb:
+    try:
+        ts = datetime.datetime.strptime(hb, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+        age = (now - ts).total_seconds()
+    except ValueError:
+        pass
+
+line = "{}  state={:<12} task={:<8}".format(stamp, state, task or "-")
+if age is not None:
+    line += " heartbeat={:.0f}s".format(age)
+
+if state == "running":
+    if stale:
+        line += "  *** STALE: il task NON sta girando (VM morta) ***"
+    else:
+        line += "  vivo"
+elif state in TERMINAL:
+    line += "  <- stato terminale, watch finito"
+
+print(line, flush=True)
+if state in TERMINAL:
+    sys.exit(10)
+if stale:
+    sys.exit(11)
+' <<<"${raw}"
+    rc=$?
+    case "${rc}" in
+        10)
+            printf '\a'
+            echo "sch-watch: task finished — retrieve the work with: bin/sch fetch ${WS}"
+            exit 0
+            ;;
+        11)
+            printf '\a'
+            echo "sch-watch: 'sch status' classifies the task as STALE: the microVM is dead."
+            echo "sch-watch: 1) bin/sch fetch ${WS}          # retrieve the completed work"
+            echo "sch-watch: 2) bin/sch reset-session ${WS}  # if the problem recurs"
+            exit 1
+            ;;
+    esac
+    sleep "${INTERVAL}"
+done

@@ -1,0 +1,1776 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  SCH — Bedrock AgentCore Runtime with managed session storage (Preview)
+  mounted at /mnt/workspace, parametric lifecycle, a least-privilege
+  execution role (Bedrock inference profiles + CloudWatch logs), and an L2
+  durability checkpoint bucket (S3, versioned, retained) scoped write access
+  for the runtime's own workspace backups.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project Name
+    Default: sch
+    AllowedPattern: ^[a-z][a-z0-9]{2,7}$
+  Environment:
+    Type: String
+    Description: Deployment Environment
+    Default: dev
+    AllowedValues:
+      - dev
+      - stg
+      - prd
+  ApplicationVersion:
+    Type: String
+    Description: Image tag to deploy (WARNING - updating the runtime version resets ALL session storage)
+    Default: v1
+  ImageDigest:
+    Type: String
+    Description: >-
+      sha256 digest of the image behind ApplicationVersion, resolved by
+      deploy.sh from ECR after the push (TASK-30). AgentCore resolves a tag
+      once, when it creates a runtime version, so a tag-only ContainerUri
+      never picks up a rebuild of the same tag; pinning the digest makes
+      every rebuild a new runtime version (which resets ALL session storage,
+      restored from the L2 checkpoints). Empty = tag only, kept for stacks
+      deployed before the parameter existed and for stack-only deploys.
+    Default: ''
+    AllowedPattern: ^(sha256:[0-9a-f]{64})?$
+  IdleRuntimeSessionTimeoutSeconds:
+    Type: Number
+    Description: Seconds a runtime session may stay idle before the microVM is stopped
+    Default: 900
+    MinValue: 60
+    MaxValue: 28800
+  MaxLifetimeSeconds:
+    Type: Number
+    Description: Maximum lifetime in seconds of a runtime session microVM
+    Default: 28800
+    MinValue: 60
+    MaxValue: 28800
+  MainInferenceProfileId:
+    Type: String
+    Description: Bedrock inference profile ID for the main model (see docs/history/implementation-findings.md, preflight)
+    Default: eu.anthropic.claude-sonnet-4-6
+  SmallInferenceProfileId:
+    Type: String
+    Description: Bedrock inference profile ID for the small/fast model (see docs/history/implementation-findings.md, preflight)
+    Default: eu.anthropic.claude-haiku-4-5-20251001-v1:0
+  CheckpointRetentionDays:
+    Type: Number
+    Description: >-
+      Retention (days) for non-current versions of workspace checkpoints on
+      the S3 bucket (design D5) — versioning keeps checkpoint history, the
+      lifecycle rule below reclaims storage after this many days.
+    Default: 30
+    MinValue: 1
+  WorkspaceRegistryPackageKey:
+    Type: String
+    Description: Content-addressed S3 key for the workspace registry Lambda package
+    Default: registry/workspace-registry-handler.zip
+  WorkspaceRegistryPackageVersion:
+    Type: String
+    Description: S3 object version for the workspace registry Lambda package
+    Default: ''
+  EnableWorkspaceRegistry:
+    Type: String
+    Description: Create the optional IAM-authenticated workspace registry control plane
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  EnableSessionImageRebuild:
+    Type: String
+    Description: >-
+      Create the optional CodeBuild-backed image rebuild capability
+      (add-codebuild-image-rebuild, design D6). Default 'false': no build
+      project, no build role, and NO additional permissions on the runtime
+      execution role — identical security posture to a deployment without
+      this feature.
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  BuildSourceRetentionDays:
+    Type: Number
+    Description: >-
+      Retention (days) for the throwaway build sources uploaded by sessions
+      under the builds/ prefix of the checkpoint bucket (design D10).
+    Default: 7
+    MinValue: 1
+  TelegramBotToken:
+    Type: String
+    Description: >-
+      Optional Telegram bot token for push notifications
+      (add-telegram-notifications). Empty (default) = feature off: the
+      runtime behaves exactly as before the feature existed. NoEcho keeps
+      the value out of describe-stacks output; basic secret handling
+      (design D6 documents the SSM upgrade path).
+    Default: ''
+    NoEcho: true
+  TelegramChatId:
+    Type: String
+    Description: >-
+      Optional Telegram chat id (ideally a supergroup with Topics enabled)
+      receiving the notifications. Both TelegramBotToken and TelegramChatId
+      must be set for the feature to activate.
+    Default: ''
+  EnableTelegramInteraction:
+    Type: String
+    Description: >-
+      Create the optional inbound Telegram interaction router
+      (add-telegram-interaction): webhook Lambda + API Gateway route +
+      DynamoDB command/routing tables. Requires the Telegram notification
+      parameters above to be set too — with either missing the feature is
+      entirely absent and the stack is identical to a deployment without it.
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  TelegramWebhookSecret:
+    Type: String
+    Description: >-
+      Secret token registered with Telegram setWebhook and verified by the
+      webhook Lambda on every request (X-Telegram-Bot-Api-Secret-Token).
+      Generated by deploy.sh when the interaction feature is enabled.
+    Default: ''
+    NoEcho: true
+  TelegramWebhookPackageKey:
+    Type: String
+    Description: S3 key for the Telegram webhook Lambda package
+    Default: telegram/telegram-webhook-handler.zip
+  TelegramWebhookPackageVersion:
+    Type: String
+    Description: S3 object version for the Telegram webhook Lambda package
+    Default: ''
+  TelegramCommandTtlSeconds:
+    Type: Number
+    Description: >-
+      Expiry (seconds) for inbound Telegram commands (design D3): a command
+      not consumed by the workspace microVM within this window is discarded
+      with a notification instead of being applied hours later.
+    Default: 900
+    MinValue: 60
+  # add-task-liveness-safety (design D2): the external task watchdog. Enabled
+  # by default — it is the only component able to observe the death of a
+  # microVM (it is the only one that does not live inside it) and the direct
+  # mitigation of the 2026-08-21 incident.
+  EnableTaskWatchdog:
+    Type: String
+    Description: >-
+      Create the external task watchdog: a Lambda on a 2-minute EventBridge
+      schedule that reconciles orphaned `running` task statuses to
+      `interrupted` and notifies the operator when Telegram is configured.
+      'false' deploys a stack entirely without it — also used by deploy.sh for
+      the bootstrap deployment that creates the checkpoint bucket hosting the
+      Lambda package (chicken-and-egg on a brand new account).
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  TaskWatchdogPackageKey:
+    Type: String
+    Description: S3 key for the task watchdog Lambda package
+    Default: watchdog/task-watchdog-handler.zip
+  TaskWatchdogPackageVersion:
+    Type: String
+    Description: S3 object version for the task watchdog Lambda package
+    Default: ''
+  TaskWatchdogStaleSeconds:
+    Type: Number
+    Description: >-
+      Heartbeat age (seconds) beyond which the watchdog rewrites a `running`
+      task status to `interrupted` (design D1: 600s = 20 missed beats).
+      Deliberately far more tolerant than the 150s `sch status` uses to
+      *render* a suspect state: this threshold guards a remote WRITE and must
+      not false-positive on a transient S3 error, a credential refresh or
+      clock skew.
+    Default: 600
+    MinValue: 120
+  TaskWatchdogNotifyAfterSeconds:
+    Type: Number
+    Description: >-
+      Grace (seconds) after a task's finished_utc before the watchdog re-sends
+      a terminal Telegram notification the microVM did not confirm as delivered
+      (TASK-28). The in-VM notifier normally delivers within seconds and a 429
+      back-off within a minute or two; a smaller value trades a few duplicates
+      for faster recovery. Worst-case recovery delay is this value plus one
+      2-minute tick.
+    Default: 300
+    MinValue: 60
+  PiDefaultModel:
+    Type: String
+    Description: >-
+      Optional fully-qualified default model ID seeded for Pi. Empty derives
+      the geography-appropriate Claude Sonnet profile from the deploy region.
+    Default: ''
+  # --- Runtime capability tuning (docs/specs/security/runtime-capability-tuning.md) --
+  # Operator-facing shaping of the AgentRuntimeRole below: additive opt-in
+  # AI enrichment capabilities, restrictive Bedrock/ReadOnlyAccess toggles,
+  # and a raw policy-JSON escape hatch. ALL defaults are inert: with every
+  # parameter at its default the execution role is byte-identical to a
+  # deployment of this template without these parameters (spec R1/I1).
+  RuntimeCapabilities:
+    Type: String
+    Description: >-
+      Comma-separated opt-in AI enrichment capabilities. Valid entries:
+      transcribe, textract, rekognition, polly, comprehend (validated by
+      deploy.sh). Empty (default) attaches no capability policy.
+    Default: ''
+  RuntimeBedrockAccess:
+    Type: String
+    Description: >-
+      'true' (default) keeps the Bedrock model invocation grants; 'false'
+      strips EVERY Bedrock grant on both planes (classic bedrock:Invoke* and
+      bedrock-mantle:*) regardless of the allow-list — the shape for a
+      deployment that runs inference exclusively on per-user provider keys.
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  RuntimeBedrockModelAllowlist:
+    Type: String
+    Description: >-
+      Comma-separated Bedrock model / inference-profile ID patterns (IAM
+      wildcards allowed, e.g. *anthropic.claude-sonnet*). Each entry is
+      inserted verbatim into BOTH ARN forms (inference-profile and
+      foundation-model), region-wildcarded. Empty (default) = all models
+      (the broad grant). A non-empty list without an OpenAI-family entry
+      (marker text 'openai.' or 'gpt') also drops the bedrock-mantle plane.
+      Misspelled entries silently match nothing — IAM denies at runtime
+      (spec R12); debug with iam:SimulatePrincipalPolicy.
+    Default: ''
+  RuntimeAwsApiRead:
+    Type: String
+    Description: >-
+      'true' (default) keeps the ReadOnlyAccess managed policy backing the
+      aws-api MCP server; 'false' removes it — aws-api read operations then
+      fail unless back-filled via RuntimeExtraPolicyJson (operator warning:
+      this is deliberate scope reduction, not a curated replacement).
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  RuntimeDataBucketArn:
+    Type: String
+    Description: >-
+      Optional S3 bucket ARN for the async legs of Transcribe/Textract:
+      enabled capabilities may GetObject the bucket's objects and PutObject
+      under transcribe/ and textract/. Empty (default) = no S3 grant in the
+      capability policies; sync (inline-bytes) APIs work without it.
+    Default: ''
+  RuntimeExtraPolicyJson:
+    Type: String
+    Description: >-
+      Escape hatch: one extra IAM policy document (JSON) attached to the
+      runtime execution role, on top of all other tuning. Operator-owned
+      trust decision — CloudFormation validates its JSON syntax, nothing
+      else is checked. Empty (default) attaches nothing.
+    Default: ''
+  # Derived parameters (computed by infra/deploy.sh, defaults inert).
+  # CloudFormation condition functions cannot test whether a comma list
+  # contains an entry, nor match substrings — so deploy.sh evaluates those
+  # two heuristics and passes the results as booleans. Deploying this
+  # template directly (without deploy.sh) requires setting them consistently
+  # with RuntimeCapabilities / RuntimeBedrockModelAllowlist.
+  RuntimeCapTranscribeEnabled:
+    Type: String
+    Description: "Derived by deploy.sh: 'transcribe' present in RuntimeCapabilities"
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  RuntimeCapTextractEnabled:
+    Type: String
+    Description: "Derived by deploy.sh: 'textract' present in RuntimeCapabilities"
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  RuntimeCapRekognitionEnabled:
+    Type: String
+    Description: "Derived by deploy.sh: 'rekognition' present in RuntimeCapabilities"
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  RuntimeCapPollyEnabled:
+    Type: String
+    Description: "Derived by deploy.sh: 'polly' present in RuntimeCapabilities"
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  RuntimeCapComprehendEnabled:
+    Type: String
+    Description: "Derived by deploy.sh: 'comprehend' present in RuntimeCapabilities"
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  RuntimeBedrockAllowlistHasOpenAIFamily:
+    Type: String
+    Description: >-
+      Derived by deploy.sh: some allow-list entry is OpenAI-family (its text
+      contains 'openai.' or 'gpt', case-insensitive, wildcards included).
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  # add-user-provider-keys (design D5, BREAKING): the four provider API key
+  # parameters (AnthropicApiKey / OpencodeApiKey / OpenrouterApiKey /
+  # KiloApiKey) are GONE. The keys are a per-USER property now: `sch` reads them
+  # from the caller's ~/.sch/env and forwards them in the payload of every
+  # invoke, and the shim stages them on tmpfs for the session. This stack
+  # therefore holds no provider secret, and Bedrock via the execution role stays
+  # the only global provider. Side effect worth having: rotating a key no longer
+  # changes the runtime EnvironmentVariables, so it no longer creates a new
+  # runtime version nor resets any session storage.
+
+Conditions:
+  # TASK-30: the runtime references the image by digest whenever the deploy
+  # resolved one, so a rebuild under an unchanged tag still changes the
+  # ContainerUri (CloudFormation sees a property change, AgentCore creates a
+  # new runtime version running the new image).
+  ImageDigestPinned: !Not [!Equals [!Ref ImageDigest, '']]
+  WorkspaceRegistryEnabled: !Equals [!Ref EnableWorkspaceRegistry, 'true']
+  SessionImageRebuildEnabled: !Equals [!Ref EnableSessionImageRebuild, 'true']
+  TelegramConfigured: !And
+    - !Not [!Equals [!Ref TelegramBotToken, '']]
+    - !Not [!Equals [!Ref TelegramChatId, '']]
+  # add-telegram-interaction (design D1): the inbound router only makes sense
+  # on top of a configured notification channel (topics, notifier, hooks).
+  TelegramInteractionEnabled: !And
+    - !Equals [!Ref EnableTelegramInteraction, 'true']
+    - !Condition TelegramConfigured
+  # add-task-liveness-safety (design D2): the state reconciliation is active
+  # regardless of Telegram — the notification is the optional half, gated
+  # inside the handler by the same two env vars the notifier uses.
+  TaskWatchdogEnabled: !Equals [!Ref EnableTaskWatchdog, 'true']
+  # --- Runtime capability tuning conditions (all inert at defaults) ---------
+  RuntimeAwsApiReadEnabled: !Equals [!Ref RuntimeAwsApiRead, 'true']
+  RuntimeBedrockAccessEnabled: !Equals [!Ref RuntimeBedrockAccess, 'true']
+  RuntimeBedrockAllowlistSet: !Not [!Equals [!Ref RuntimeBedrockModelAllowlist, '']]
+  RuntimeBedrockAllowlistHasOpenAI: !Equals [!Ref RuntimeBedrockAllowlistHasOpenAIFamily, 'true']
+  RuntimeDataBucketSet: !Not [!Equals [!Ref RuntimeDataBucketArn, '']]
+  RuntimeExtraPolicySet: !Not [!Equals [!Ref RuntimeExtraPolicyJson, '']]
+  RuntimeCapTranscribeOn: !Equals [!Ref RuntimeCapTranscribeEnabled, 'true']
+  RuntimeCapTextractOn: !Equals [!Ref RuntimeCapTextractEnabled, 'true']
+  RuntimeCapRekognitionOn: !Equals [!Ref RuntimeCapRekognitionEnabled, 'true']
+  RuntimeCapPollyOn: !Equals [!Ref RuntimeCapPollyEnabled, 'true']
+  RuntimeCapComprehendOn: !Equals [!Ref RuntimeCapComprehendEnabled, 'true']
+  # R6: with an allow-list set, the classic plane grants ONLY the expanded
+  # entries; with it unset (and access on), today's broad grant stands.
+  RuntimeBedrockBroadGrant: !And
+    - !Condition RuntimeBedrockAccessEnabled
+    - !Not [!Condition RuntimeBedrockAllowlistSet]
+  RuntimeBedrockAllowlistGrant: !And
+    - !Condition RuntimeBedrockAccessEnabled
+    - !Condition RuntimeBedrockAllowlistSet
+  # R8 Mantle gating. The OpenAI-family marker heuristic ('openai.' or 'gpt'
+  # in an entry's text, case-insensitive, wildcard patterns included) is
+  # evaluated by infra/deploy.sh and passed as
+  # RuntimeBedrockAllowlistHasOpenAIFamily — CloudFormation condition
+  # functions cannot match substrings. Here it composes with the toggle and
+  # the allow-list: the Mantle plane is granted when Bedrock access is on
+  # AND (the allow-list is empty — every model, as today — OR it contains an
+  # OpenAI-family entry). A claude-only list therefore drops Mantle.
+  RuntimeBedrockMantleGrant: !And
+    - !Condition RuntimeBedrockAccessEnabled
+    - !Or
+      - !Not [!Condition RuntimeBedrockAllowlistSet]
+      - !Condition RuntimeBedrockAllowlistHasOpenAI
+
+Resources:
+  AgentRuntimeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/bedrock/agentcore/${ProjectName}-${Environment}-runtime'
+      RetentionInDays: 7
+
+  # L2 durability checkpoint bucket (design D1/D5/D6): per-workspace S3
+  # checkpoints of worktree + OpenCode state + config, keyed by workspace
+  # name (checkpoints/<workspace>/...), independent of runtimeSessionId
+  # rotation. Retain on stack update/delete: teardown of the runtime
+  # stack MUST NOT destroy checkpoint data (the most severe warning in the
+  # documentation up to now — see deploy.sh and docs/deploy.md rollback notes).
+  CheckpointBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-checkpoints-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          # Fixed keys + versioning (D5): checkpoint history lives in the
+          # non-current versions; this rule expires them after
+          # CheckpointRetentionDays, and cleans up interrupted multipart
+          # uploads (e.g. a microVM killed mid-upload) after 1 day.
+          - Id: ExpireNonCurrentCheckpointVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref CheckpointRetentionDays
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          - Id: ExpireUnpublishedCheckpointCandidates
+            Status: Enabled
+            Prefix: checkpoint-generations/
+            TagFilters:
+              - Key: active
+                Value: candidate
+            ExpirationInDays: 1
+          # add-codebuild-image-rebuild (design D10): the build sources a
+          # session uploads under builds/ are throwaway inputs for CodeBuild,
+          # not durable state — expire them (current AND non-current versions,
+          # the bucket is versioned) after BuildSourceRetentionDays. Kept on
+          # this bucket rather than a new one: same posture (SSE, public block,
+          # versioning) and there is already precedent for non-checkpoint
+          # artifacts here (registry/ hosts the registry Lambda zip).
+          - Id: ExpireBuildSources
+            Status: Enabled
+            Prefix: builds/
+            ExpirationInDays: !Ref BuildSourceRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-checkpoints'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  WorkspaceRegistryTable:
+    Type: AWS::DynamoDB::Table
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      TableName: !Sub '${ProjectName}-${Environment}-workspace-registry'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: logicalWorkspace
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ownerId
+          KeyType: HASH
+        - AttributeName: logicalWorkspace
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  WorkspaceRegistryRole:
+    Type: AWS::IAM::Role
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-workspace-registry-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RegistryTableAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt WorkspaceRegistryTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:ListBucketVersions
+                  - s3:DeleteObjectVersion
+                Resource:
+                  - !GetAtt CheckpointBucket.Arn
+                  - !Sub '${CheckpointBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:StopRuntimeSession
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+  WorkspaceRegistryFunction:
+    Type: AWS::Lambda::Function
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-workspace-registry'
+      Runtime: python3.12
+      Handler: workspace_registry_handler.handler
+      Role: !GetAtt WorkspaceRegistryRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          WORKSPACE_REGISTRY_TABLE: !Ref WorkspaceRegistryTable
+          CHECKPOINT_BUCKET: !Ref CheckpointBucket
+          RUNTIME_ARN: !GetAtt AgentRuntime.AgentRuntimeArn
+          # add-pi-harness (design D12): MUST match the CLI default
+          # (cli/sch/config.py DEFAULT_HARNESS = opencode). It used to be
+          # `claude`, so a workspace created without an explicit harness got a
+          # different harness depending on whether the registry or the local
+          # index materialized it first (spec: harness-selection, "Default
+          # harness coerente tra client e registry"). The CLI always sends an
+          # explicit harness today, which is why the divergence was a latent
+          # trap rather than a visible bug.
+          DEFAULT_HARNESS: opencode
+          DEFAULT_STORAGE: s3
+      Code:
+        S3Bucket: !Ref CheckpointBucket
+        S3Key: !Ref WorkspaceRegistryPackageKey
+        S3ObjectVersion: !Ref WorkspaceRegistryPackageVersion
+
+  WorkspaceRegistryApi:
+    Type: AWS::ApiGateway::RestApi
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-workspace-registry'
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  WorkspaceRegistryWorkspacesResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      ParentId: !GetAtt WorkspaceRegistryApi.RootResourceId
+      PathPart: workspaces
+
+  WorkspaceRegistryNameResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      ParentId: !Ref WorkspaceRegistryWorkspacesResource
+      PathPart: '{name}'
+
+  WorkspaceRegistryResolveResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      ParentId: !Ref WorkspaceRegistryNameResource
+      PathPart: resolve
+
+  WorkspaceRegistryRotateResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      ParentId: !Ref WorkspaceRegistryNameResource
+      PathPart: rotate-session
+
+  WorkspaceRegistryDeleteMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      AuthorizationType: AWS_IAM
+      ResourceId: !Ref WorkspaceRegistryNameResource
+      HttpMethod: DELETE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WorkspaceRegistryFunction.Arn}/invocations'
+
+  WorkspaceRegistryResolveMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      AuthorizationType: AWS_IAM
+      ResourceId: !Ref WorkspaceRegistryResolveResource
+      HttpMethod: POST
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WorkspaceRegistryFunction.Arn}/invocations'
+
+  WorkspaceRegistryRotateMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      AuthorizationType: AWS_IAM
+      ResourceId: !Ref WorkspaceRegistryRotateResource
+      HttpMethod: POST
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WorkspaceRegistryFunction.Arn}/invocations'
+
+  WorkspaceRegistryListMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      AuthorizationType: AWS_IAM
+      ResourceId: !Ref WorkspaceRegistryWorkspacesResource
+      HttpMethod: GET
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WorkspaceRegistryFunction.Arn}/invocations'
+
+  WorkspaceRegistryBulkDeleteMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      AuthorizationType: AWS_IAM
+      ResourceId: !Ref WorkspaceRegistryWorkspacesResource
+      HttpMethod: DELETE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WorkspaceRegistryFunction.Arn}/invocations'
+
+  WorkspaceRegistryLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Condition: WorkspaceRegistryEnabled
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WorkspaceRegistryFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WorkspaceRegistryApi}/*/*'
+
+  WorkspaceRegistryDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Condition: WorkspaceRegistryEnabled
+    DependsOn:
+      - WorkspaceRegistryListMethod
+      - WorkspaceRegistryResolveMethod
+      - WorkspaceRegistryRotateMethod
+      - WorkspaceRegistryDeleteMethod
+      - WorkspaceRegistryBulkDeleteMethod
+    Properties:
+      RestApiId: !Ref WorkspaceRegistryApi
+      StageName: v1
+
+  # =========================================================================
+  # Telegram inbound interaction router (add-telegram-interaction, design D1)
+  # -------------------------------------------------------------------------
+  # The Telegram Bot API allows ONE update consumer per token, so the inbound
+  # direction needs a central router: webhook -> Lambda -> DynamoDB, on the
+  # exact pattern of the workspace registry above (conditional, IAM as the
+  # boundary, zero always-on compute). The Lambda validates the webhook
+  # secret and the single allowed chat id, resolves message_thread_id ->
+  # workspace via the routing table, and enqueues the command; every
+  # microVM polls ITS workspace's commands (design D3) — no inbound
+  # connections toward AgentCore, ever.
+  # =========================================================================
+  TelegramCommandsTable:
+    Type: AWS::DynamoDB::Table
+    Condition: TelegramInteractionEnabled
+    Properties:
+      TableName: !Sub '${ProjectName}-${Environment}-telegram-commands'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: workspace
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: workspace
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      # TTL is the garbage collector for commands never consumed (microVM
+      # off). Expiry SEMANTICS (discard + notify) are enforced by the
+      # consumer via the expiresAt attribute itself — DynamoDB TTL deletion
+      # is lazy and only reclaims storage.
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  TelegramRoutingTable:
+    Type: AWS::DynamoDB::Table
+    Condition: TelegramInteractionEnabled
+    Properties:
+      TableName: !Sub '${ProjectName}-${Environment}-telegram-routing'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: threadId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: threadId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  TelegramWebhookRole:
+    Type: AWS::IAM::Role
+    Condition: TelegramInteractionEnabled
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-telegram-webhook-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TelegramTablesAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Design D6: the Lambda can ONLY enqueue commands and read the
+              # routing mapping — it never executes anything and never
+              # touches other tables.
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt TelegramCommandsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt TelegramRoutingTable.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+  TelegramWebhookFunction:
+    Type: AWS::Lambda::Function
+    Condition: TelegramInteractionEnabled
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-telegram-webhook'
+      Runtime: python3.12
+      Handler: telegram_webhook_handler.handler
+      Role: !GetAtt TelegramWebhookRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          TELEGRAM_COMMANDS_TABLE: !Ref TelegramCommandsTable
+          TELEGRAM_ROUTING_TABLE: !Ref TelegramRoutingTable
+          TELEGRAM_WEBHOOK_SECRET: !Ref TelegramWebhookSecret
+          # The bot token is used ONLY for courtesy replies on the discard
+          # path (sendMessage/answerCallbackQuery, design D6) — the Lambda
+          # never needs nor gets Telegram-side permissions from AWS.
+          TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
+          TELEGRAM_CHAT_ID: !Ref TelegramChatId
+          COMMAND_TTL_SECONDS: !Ref TelegramCommandTtlSeconds
+      Code:
+        S3Bucket: !Ref CheckpointBucket
+        S3Key: !Ref TelegramWebhookPackageKey
+        S3ObjectVersion: !Ref TelegramWebhookPackageVersion
+
+  TelegramWebhookApi:
+    Type: AWS::ApiGateway::RestApi
+    Condition: TelegramInteractionEnabled
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-telegram-webhook'
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  TelegramWebhookResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: TelegramInteractionEnabled
+    Properties:
+      RestApiId: !Ref TelegramWebhookApi
+      ParentId: !GetAtt TelegramWebhookApi.RootResourceId
+      PathPart: telegram-webhook
+
+  # AuthorizationType NONE is deliberate: Telegram cannot sign SigV4. The
+  # authentication is the webhook secret token header, verified inside the
+  # Lambda on every request (design D6); everything else gets an empty 200.
+  TelegramWebhookMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: TelegramInteractionEnabled
+    Properties:
+      RestApiId: !Ref TelegramWebhookApi
+      AuthorizationType: NONE
+      ResourceId: !Ref TelegramWebhookResource
+      HttpMethod: POST
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TelegramWebhookFunction.Arn}/invocations'
+
+  TelegramWebhookLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Condition: TelegramInteractionEnabled
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TelegramWebhookFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${TelegramWebhookApi}/*/*'
+
+  TelegramWebhookDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Condition: TelegramInteractionEnabled
+    DependsOn:
+      - TelegramWebhookMethod
+    Properties:
+      RestApiId: !Ref TelegramWebhookApi
+      StageName: v1
+
+  # The extra capabilities the SESSION gets with the interaction feature on
+  # (design D6), kept in a separate conditional policy like the image-rebuild
+  # one so the base execution role stays byte-identical with the feature off:
+  # consume the commands of its own scope (Query is already granted by
+  # ReadOnlyAccess; DeleteItem is the consumption fence) and publish the
+  # thread->workspace routing mapping written next to the topic creation.
+  TelegramInteractionSessionPolicy:
+    Type: AWS::IAM::Policy
+    Condition: TelegramInteractionEnabled
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-telegram-interaction-session-policy'
+      Roles:
+        - !Ref AgentRuntimeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ConsumeOwnCommands
+            Effect: Allow
+            Action:
+              - dynamodb:Query
+              - dynamodb:DeleteItem
+            Resource: !GetAtt TelegramCommandsTable.Arn
+          - Sid: PublishTopicRouting
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+            Resource: !GetAtt TelegramRoutingTable.Arn
+
+  # --- External task watchdog (add-task-liveness-safety, design D2) -----------
+  # A persisted `running` task status is rewritten only by the shim that owns
+  # it, so a microVM killed by the platform (incident 2026-08-21: instance
+  # superseded by a runtime version update) leaves `running` behind forever.
+  # This Lambda is the only observer that survives that death, because it is
+  # the only one that does not live inside the microVM.
+  TaskWatchdogRole:
+    Type: AWS::IAM::Role
+    Condition: TaskWatchdogEnabled
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-task-watchdog-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CheckpointTaskStatusAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Minimal by construction: enumerate the workspace prefixes,
+              # then touch exactly the two objects this component knows about.
+              # Notably NOT granted: the worktree archives living next to them
+              # (the operator's source code), the checkpoint manifests, the
+              # writer claims, the build sources, any delete, and any runtime
+              # API (probing liveness through InvokeAgentRuntime would wake
+              # the dead sessions this Lambda exists to observe).
+              - Sid: ListWorkspacePrefixes
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${CheckpointBucket}'
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - 'checkpoints/'
+                      - 'checkpoints/*'
+              - Sid: ReconcileTaskStatus
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${CheckpointBucket}/checkpoints/*/task-status.json'
+              - Sid: ReadTelegramTopicMapping
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${CheckpointBucket}/checkpoints/*/telegram-topic.json'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+  TaskWatchdogFunction:
+    Type: AWS::Lambda::Function
+    Condition: TaskWatchdogEnabled
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-task-watchdog'
+      Runtime: python3.12
+      Handler: task_watchdog_handler.handler
+      Role: !GetAtt TaskWatchdogRole.Arn
+      # One S3 list + two small GETs per workspace, sequentially: generous even
+      # for a few hundred workspaces. Two sweeps overlapping (slow tick + slow
+      # sweep) would be harmless anyway — the ETag fence lets only one of them
+      # write, so the notification stays at-most-once per transition.
+      Timeout: 120
+      MemorySize: 256
+      Environment:
+        Variables:
+          SCH_CHECKPOINT_BUCKET: !Ref CheckpointBucket
+          SCH_WATCHDOG_STALE_S: !Ref TaskWatchdogStaleSeconds
+          SCH_WATCHDOG_NOTIFY_AFTER_S: !Ref TaskWatchdogNotifyAfterSeconds
+          # Notification half: the SAME opt-in parameters the runtime notifier
+          # consumes (the per-workspace topic mapping is read from the same
+          # checkpoint prefix). Empty = reconciliation only, silently.
+          SCH_TELEGRAM_BOT_TOKEN: !If [TelegramConfigured, !Ref TelegramBotToken, '']
+          SCH_TELEGRAM_CHAT_ID: !If [TelegramConfigured, !Ref TelegramChatId, '']
+      Code:
+        S3Bucket: !Ref CheckpointBucket
+        S3Key: !Ref TaskWatchdogPackageKey
+        S3ObjectVersion: !Ref TaskWatchdogPackageVersion
+
+  # rate(2 minutes): the reconciliation threshold (600s) dominates the
+  # detection latency, so the schedule only has to be small compared to it —
+  # worst case death-to-notification is threshold + one tick.
+  TaskWatchdogSchedule:
+    Type: AWS::Events::Rule
+    Condition: TaskWatchdogEnabled
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-task-watchdog-schedule'
+      Description: Periodic sweep of checkpoints/*/task-status.json for orphaned running tasks
+      ScheduleExpression: 'rate(2 minutes)'
+      State: ENABLED
+      Targets:
+        - Id: TaskWatchdogFunction
+          Arn: !GetAtt TaskWatchdogFunction.Arn
+
+  TaskWatchdogSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: TaskWatchdogEnabled
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TaskWatchdogFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TaskWatchdogSchedule.Arn
+
+  AgentRuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # NOTE: the role name MUST contain "BedrockAgentCore" — the deploying
+      # user's iam:PassRole permission (managed policy BedrockAgentCoreFullAccess)
+      # is scoped to arn:aws:iam::*:role/*BedrockAgentCore*.
+      RoleName: !Sub '${ProjectName}-${Environment}-BedrockAgentCore-role'
+      Description: !Sub 'Execution role for the ${ProjectName} AgentCore Runtime (least privilege)'
+      # ReadOnlyAccess (AWS managed) backs the aws-api MCP server (design D4):
+      # IAM is the real security boundary (READ_OPERATIONS_ONLY on the MCP
+      # server side is UX only, a clean rejection instead of AccessDenied).
+      # No write/mutate permissions are granted beyond what the runtime already
+      # required (Bedrock invoke, logs, ECR pull).
+      # Runtime capability tuning (spec R9): RuntimeAwsApiRead='false'
+      # detaches it — aws-api read then fails unless back-filled via
+      # RuntimeExtraPolicyJson (deliberate scope reduction, not a curated
+      # replacement; the curated least-privilege read is a Hardening item).
+      ManagedPolicyArns: !If
+        - RuntimeAwsApiReadEnabled
+        - - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - !Ref AWS::NoValue
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*'
+      Policies:
+        - PolicyName: !Sub '${ProjectName}-${Environment}-agentcore-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # --- Pull the runtime image from ECR ---
+              - Sid: EcrAuth
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: EcrPull
+                Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource:
+                  - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-${Environment}'
+              # --- CloudWatch logs (AgentCore runtime log groups) ---
+              - Sid: LogsCreate
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*'
+              - Sid: LogsDescribe
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+              - Sid: LogsWrite
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*'
+              # --- Observability (AgentCore emits metrics in this namespace) ---
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: bedrock-agentcore
+              # --- Bedrock model invocation. Runtime capability tuning
+              #     (spec R6/R7): three exclusive shapes, selected with
+              #     Fn::If so the rendered policy is byte-identical to the
+              #     pre-tuning one at defaults.
+              #     (a) Broad grant (access on, allow-list empty): all
+              #         inference profiles and foundation models, in any
+              #         region — cross-region profiles such as eu.*/us.*/
+              #         global.* route to underlying foundation-model ARNs
+              #         in destination regions, so granting both resource
+              #         types with a region wildcard avoids per-model/
+              #         per-region IAM maintenance as models are added.
+              #     (b) Allow-listed (access on, allow-list set): each
+              #         comma-separated entry is inserted verbatim into
+              #         BOTH ARN forms — entries may carry IAM wildcards
+              #         ('*anthropic.claude-sonnet*' = every Sonnet version,
+              #         every regional profile prefix, both planes). A
+              #         misspelled entry silently matches nothing; IAM
+              #         denies at runtime (spec R12). MainInferenceProfileId/
+              #         SmallInferenceProfileId remain informational defaults
+              #         (docs/mcp-and-bedrock.md, seeded OpenCode config) but never scope
+              #         these grants.
+              #     (c) Access off: no classic-plane statement at all.
+              - !If
+                - RuntimeBedrockBroadGrant
+                - Sid: BedrockInferenceProfiles
+                  Effect: Allow
+                  Action:
+                    - bedrock:InvokeModel
+                    - bedrock:InvokeModelWithResponseStream
+                  Resource:
+                    - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
+                    - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:application-inference-profile/*'
+                    - 'arn:aws:bedrock:*::foundation-model/*'
+                - !Ref AWS::NoValue
+              - !If
+                - RuntimeBedrockAllowlistGrant
+                - Sid: BedrockInferenceProfilesAllowlisted
+                  Effect: Allow
+                  Action:
+                    - bedrock:InvokeModel
+                    - bedrock:InvokeModelWithResponseStream
+                  # Per-entry prefixing with Fn::Join (per-entry ARN prefix must
+                  # be a literal — Join rejects intrinsic delimiters) forces a
+                  # wildcarded ACCOUNT segment on the inference-profile form;
+                  # harmless: Bedrock model invocation cannot cross accounts.
+                  # The entries interpolate into the prefix-bearing string per
+                  # form, then Fn::Split cuts it back into individual ARNs.
+                  Resource: !Split
+                    - ','
+                    - !Join
+                      - ','
+                      - - !Join
+                          - ''
+                          - - 'arn:aws:bedrock:*:*:inference-profile/'
+                            - !Join
+                              - ',arn:aws:bedrock:*:*:inference-profile/'
+                              - !Split [',', !Ref RuntimeBedrockModelAllowlist]
+                        - !Join
+                          - ''
+                          - - 'arn:aws:bedrock:*::foundation-model/'
+                            - !Join
+                              - ',arn:aws:bedrock:*::foundation-model/'
+                              - !Split [',', !Ref RuntimeBedrockModelAllowlist]
+                - !Ref AWS::NoValue
+              # --- Bedrock "Mantle" OpenAI-compatible inference plane
+              #     (bedrock-mantle.<region>.api.aws): REQUIRED for OpenAI-family
+              #     models (e.g. GPT-5.5) selected in OpenCode. These models are
+              #     NOT served by the classic bedrock-runtime (InvokeModel/
+              #     InvokeModelWithResponseStream) plane above — they route
+              #     through a Mantle "project" resource authorized by the
+              #     distinct bedrock-mantle:* action namespace. Without this,
+              #     GPT-5.5 fails with AccessDenied on
+              #     bedrock-mantle:CreateInference (project/default) while
+              #     Claude/etc. on the classic plane keep working. Scoped to the
+              #     default project in the deploy region (least privilege).
+              #     Runtime capability tuning (spec R7/R8): granted only when
+              #     RuntimeBedrockAccess='true' AND (allow-list empty OR it
+              #     contains an OpenAI-family entry — condition
+              #     RuntimeBedrockMantleGrant; the marker heuristic lives in
+              #     deploy.sh, see the Conditions section). With access 'false'
+              #     this statement is absent whatever the allow-list says.
+              - !If
+                - RuntimeBedrockMantleGrant
+                - Sid: BedrockMantleInference
+                  Effect: Allow
+                  Action:
+                    - bedrock-mantle:CreateInference
+                    - bedrock-mantle:GetInference
+                    - bedrock-mantle:CancelInference
+                    - bedrock-mantle:DeleteInference
+                    - bedrock-mantle:ListModels
+                    - bedrock-mantle:GetModel
+                  Resource:
+                    - !Sub 'arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/default'
+                - !Ref AWS::NoValue
+              # --- L2 checkpoint durability (design D6): write/read scoped to
+              #     the checkpoints/* prefix of the dedicated bucket only —
+              #     the single exception to the "no mutation" principle
+              #     (proposal), accepted because it is the agent's own backup
+              #     space. No s3:DeleteObject: retention is delegated to the
+              #     bucket's lifecycle policy so neither a compromised agent
+              #     nor an errant aws-api command can destroy checkpoints
+              #     (versioning preserves prior overwrites regardless).
+              - Sid: CheckpointBucketReadWrite
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:AbortMultipartUpload
+                  - s3:PutObjectTagging
+                Resource:
+                  - !Sub '${CheckpointBucket.Arn}/checkpoints/*'
+                  - !Sub '${CheckpointBucket.Arn}/checkpoint-generations/*'
+                  - !Sub '${CheckpointBucket.Arn}/workspace-writers/*'
+              - Sid: CheckpointBucketList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt CheckpointBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - 'checkpoints/*'
+                      - 'checkpoint-generations/*'
+                      - 'workspace-writers/*'
+
+  # =========================================================================
+  # Runtime capability tuning (docs/specs/security/runtime-capability-tuning.md)
+  # -------------------------------------------------------------------------
+  # One dedicated conditional policy per enabled capability (spec R3), on the
+  # same pattern as the Telegram/image-rebuild session policies: with the
+  # capability off the resource does not exist and the role is unchanged.
+  # Service API actions on Resource '*' (spec R4) — these services do not
+  # support resource-level permissions. When RuntimeDataBucketArn is set,
+  # every enabled capability policy additionally carries the async S3 legs
+  # (spec R5): GetObject on the bucket's objects, PutObject under transcribe/
+  # and textract/ only. All action sets verified against the AWS service
+  # authorization reference (2026-08-29).
+  # =========================================================================
+  RuntimeTranscribeCapabilityPolicy:
+    Type: AWS::IAM::Policy
+    Condition: RuntimeCapTranscribeOn
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-transcribe'
+      Roles:
+        - !Ref AgentRuntimeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: TranscribeApi
+            Effect: Allow
+            Action:
+              - transcribe:StartTranscriptionJob
+              - transcribe:GetTranscriptionJob
+              - transcribe:ListTranscriptionJobs
+              - transcribe:CreateVocabulary
+              - transcribe:GetVocabulary
+              - transcribe:ListVocabularies
+              - transcribe:UpdateVocabulary
+              - transcribe:DeleteVocabulary
+            Resource: '*'
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: TranscribeDataBucketRead
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub '${RuntimeDataBucketArn}/*'
+            - !Ref AWS::NoValue
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: TranscribeDataBucketWrite
+              Effect: Allow
+              Action: s3:PutObject
+              Resource:
+                - !Sub '${RuntimeDataBucketArn}/transcribe/*'
+                - !Sub '${RuntimeDataBucketArn}/textract/*'
+            - !Ref AWS::NoValue
+
+  RuntimeTextractCapabilityPolicy:
+    Type: AWS::IAM::Policy
+    Condition: RuntimeCapTextractOn
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-textract'
+      Roles:
+        - !Ref AgentRuntimeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: TextractApi
+            Effect: Allow
+            Action:
+              - textract:DetectDocumentText
+              - textract:AnalyzeDocument
+              - textract:AnalyzeExpense
+              - textract:StartDocumentTextDetection
+              - textract:GetDocumentTextDetection
+              - textract:StartDocumentAnalysis
+              - textract:GetDocumentAnalysis
+              - textract:StartExpenseAnalysis
+              - textract:GetExpenseAnalysis
+            Resource: '*'
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: TextractDataBucketRead
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub '${RuntimeDataBucketArn}/*'
+            - !Ref AWS::NoValue
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: TextractDataBucketWrite
+              Effect: Allow
+              Action: s3:PutObject
+              Resource:
+                - !Sub '${RuntimeDataBucketArn}/transcribe/*'
+                - !Sub '${RuntimeDataBucketArn}/textract/*'
+            - !Ref AWS::NoValue
+
+  RuntimeRekognitionCapabilityPolicy:
+    Type: AWS::IAM::Policy
+    Condition: RuntimeCapRekognitionOn
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-rekognition'
+      Roles:
+        - !Ref AgentRuntimeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RekognitionApi
+            Effect: Allow
+            Action:
+              - rekognition:DetectLabels
+              - rekognition:DetectModerationLabels
+              - rekognition:DetectText
+              - rekognition:DetectFaces
+              - rekognition:RecognizeCelebrities
+              - rekognition:StartLabelDetection
+              - rekognition:GetLabelDetection
+              - rekognition:StartTextDetection
+              - rekognition:GetTextDetection
+              - rekognition:StartContentModeration
+              - rekognition:GetContentModeration
+              - rekognition:StartFaceDetection
+              - rekognition:GetFaceDetection
+            Resource: '*'
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: RekognitionDataBucketRead
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub '${RuntimeDataBucketArn}/*'
+            - !Ref AWS::NoValue
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: RekognitionDataBucketWrite
+              Effect: Allow
+              Action: s3:PutObject
+              Resource:
+                - !Sub '${RuntimeDataBucketArn}/transcribe/*'
+                - !Sub '${RuntimeDataBucketArn}/textract/*'
+            - !Ref AWS::NoValue
+
+  RuntimePollyCapabilityPolicy:
+    Type: AWS::IAM::Policy
+    Condition: RuntimeCapPollyOn
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-polly'
+      Roles:
+        - !Ref AgentRuntimeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PollyApi
+            Effect: Allow
+            Action:
+              - polly:SynthesizeSpeech
+              - polly:DescribeVoices
+            Resource: '*'
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: PollyDataBucketRead
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub '${RuntimeDataBucketArn}/*'
+            - !Ref AWS::NoValue
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: PollyDataBucketWrite
+              Effect: Allow
+              Action: s3:PutObject
+              Resource:
+                - !Sub '${RuntimeDataBucketArn}/transcribe/*'
+                - !Sub '${RuntimeDataBucketArn}/textract/*'
+            - !Ref AWS::NoValue
+
+  RuntimeComprehendCapabilityPolicy:
+    Type: AWS::IAM::Policy
+    Condition: RuntimeCapComprehendOn
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-comprehend'
+      Roles:
+        - !Ref AgentRuntimeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ComprehendApi
+            Effect: Allow
+            Action:
+              - comprehend:DetectDominantLanguage
+              - comprehend:DetectEntities
+              - comprehend:DetectKeyPhrases
+              - comprehend:DetectPiiEntities
+              - comprehend:DetectSentiment
+              - comprehend:DetectSyntax
+              - comprehend:DetectTargetedSentiment
+              - comprehend:DetectToxicContent
+              - comprehend:ClassifyDocument
+              - comprehend:ListDocumentClassifiers
+              - comprehend:DescribeDocumentClassifier
+            Resource: '*'
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: ComprehendDataBucketRead
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub '${RuntimeDataBucketArn}/*'
+            - !Ref AWS::NoValue
+          - !If
+            - RuntimeDataBucketSet
+            - Sid: ComprehendDataBucketWrite
+              Effect: Allow
+              Action: s3:PutObject
+              Resource:
+                - !Sub '${RuntimeDataBucketArn}/transcribe/*'
+                - !Sub '${RuntimeDataBucketArn}/textract/*'
+            - !Ref AWS::NoValue
+
+  # Escape hatch (spec R10): ONE extra operator-owned policy, on top of all
+  # other tuning. CloudFormation validates the JSON syntax; no semantic
+  # validation is performed — this is a trust decision made at deploy time.
+  RuntimeExtraPolicy:
+    Type: AWS::IAM::Policy
+    Condition: RuntimeExtraPolicySet
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-extra-policy'
+      Roles:
+        - !Ref AgentRuntimeRole
+      PolicyDocument: !Ref RuntimeExtraPolicyJson
+
+  # =========================================================================
+  # Session-driven image rebuild (add-codebuild-image-rebuild)
+  # -------------------------------------------------------------------------
+  # A microVM cannot build container images (non-root uid 1000, no Docker
+  # daemon, no privileges to run one, container-in-container not supported by
+  # AgentCore Runtime). These resources delegate the build to CodeBuild: the
+  # session zips image/ , uploads it under builds/ and calls StartBuild; only
+  # CodeBuild's OWN role can push to ECR (design D5) — the execution role
+  # never gets push permissions.
+  #
+  # All of this is gated on SessionImageRebuildEnabled (design D6): with the
+  # default 'false' nothing below exists and the execution role is byte-for-
+  # byte the role of a deployment without this feature.
+  #
+  # SECURITY (design R1, accepted): codebuild:StartBuild accepts
+  # buildspecOverride/environmentVariablesOverride and IAM has no condition
+  # keys to forbid them, so whoever can start this project can run arbitrary
+  # commands with ImageRebuildRole's credentials. The containment is therefore
+  # ImageRebuildRole's perimeter (push to ONE repository, read ONE S3 prefix,
+  # own logs) — not the buildspec. Enable only where the agent is inside the
+  # trust boundary.
+  # =========================================================================
+  ImageRebuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: SessionImageRebuildEnabled
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}-${Environment}-image-rebuild'
+      RetentionInDays: 7
+
+  # CodeBuild service role — the ONLY principal in this stack allowed to push
+  # images. Deliberately has: no checkpoints/* access, no Bedrock, no IAM, no
+  # S3 writes, no ability to read any S3 prefix other than builds/.
+  ImageRebuildRole:
+    Type: AWS::IAM::Role
+    Condition: SessionImageRebuildEnabled
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-image-rebuild-role'
+      Description: !Sub 'CodeBuild service role for session-driven image rebuilds (${ProjectName}/${Environment})'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: !Sub '${ProjectName}-${Environment}-image-rebuild-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # ECR: auth token is account-wide by API design; the actual push
+              # actions are scoped to the single project repository.
+              - Sid: EcrAuth
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: EcrPushProjectRepository
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource:
+                  - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-${Environment}'
+              # Build source only. NOT checkpoints/*, NOT the whole bucket.
+              - Sid: ReadBuildSources
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub '${CheckpointBucket.Arn}/builds/*'
+              # GetAtt Arn on a LogGroup already ends in ':*', so build the
+              # stream-level ARN explicitly (same shape as the LogsWrite
+              # statement of the execution role above) instead of appending.
+              - Sid: OwnLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ImageRebuildLogGroup}:log-stream:*'
+
+  ImageRebuildProject:
+    Type: AWS::CodeBuild::Project
+    Condition: SessionImageRebuildEnabled
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-image-rebuild'
+      Description: !Sub 'Builds the ${ProjectName}/${Environment} runtime image (image/ build context) from a session-provided S3 source'
+      ServiceRole: !GetAtt ImageRebuildRole.Arn
+      TimeoutInMinutes: 30
+      Artifacts:
+        Type: NO_ARTIFACTS
+      # ARM_CONTAINER is mandatory, not a preference: AgentCore Runtime only
+      # accepts linux/arm64 images, and cross-building arm64 on x86 via QEMU
+      # would be unusably slow for this image (~440MB model + npm/uv installs).
+      # PrivilegedMode is required for the Docker daemon used by docker build.
+      # OQ-CB-IMAGE: amazonlinux-aarch64-standard:3.0 is the current AL2023
+      # AArch64 standard image and ships Docker (no runtime-versions needed).
+      Environment:
+        Type: ARM_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/amazonlinux-aarch64-standard:3.0
+        PrivilegedMode: true
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref ImageRebuildLogGroup
+      # S3 source: the default location is a placeholder — sch-build-image
+      # always passes --source-location-override with the per-workspace key it
+      # just uploaded (design D2). Overrides cannot be restricted via IAM, so
+      # the effective bound is ImageRebuildRole's read scope: builds/* only.
+      Source:
+        Type: S3
+        Location: !Sub '${CheckpointBucket}/builds/placeholder/source.zip'
+        # Buildspec lives HERE, in the template, not in the zipped source
+        # (design D3): a buildspec inside the source would be session-owned,
+        # and with it the destination tag and every command run with this
+        # role. Everything runs as ONE shell script in a single phase because
+        # CodeBuild does not guarantee variable persistence across commands
+        # and phases. The tag is derived from the clock and the build number
+        # and NEVER from client input (design D4), so the sessionbuild-*
+        # namespace cannot collide with ApplicationVersion tags like v1.
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            exported-variables:
+              - SCH_IMAGE_URI
+          phases:
+            build:
+              commands:
+                - |
+                  set -eu
+                  REGISTRY="${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com"
+                  REPO_URI="${!REGISTRY}/${ProjectName}-${Environment}"
+                  IMAGE_TAG="sessionbuild-$(date -u +%Y%m%d%H%M%S)-${!CODEBUILD_BUILD_NUMBER}"
+                  test -f ./Dockerfile || { echo "no Dockerfile at the source root"; exit 1; }
+                  aws ecr get-login-password --region ${AWS::Region} \
+                    | docker login --username AWS --password-stdin "${!REGISTRY}"
+                  # The project runs on a native ARM CodeBuild image. Do not
+                  # request an emulated platform: it can leave the Docker
+                  # daemon unable to execute /bin/sh during RUN instructions.
+                  docker build -f ./Dockerfile \
+                    --build-arg SCH_IMAGE_VERSION="${!IMAGE_TAG}" \
+                    -t "${!REPO_URI}:${!IMAGE_TAG}" .
+                  test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${!REPO_URI}:${!IMAGE_TAG}")" = linux/arm64
+                  docker push "${!REPO_URI}:${!IMAGE_TAG}"
+                  export SCH_IMAGE_URI="${!REPO_URI}:${!IMAGE_TAG}"
+                  echo "SCH_IMAGE_URI=${!SCH_IMAGE_URI}"
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-image-rebuild'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # The three (and only three) extra capabilities the SESSION gets. Kept in a
+  # separate conditional policy instead of Fn::If inside the role's inline
+  # policy so that with the feature disabled the existing policy document is
+  # untouched and trivially diffable (design D6).
+  ImageRebuildSessionPolicy:
+    Type: AWS::IAM::Policy
+    Condition: SessionImageRebuildEnabled
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-image-rebuild-session-policy'
+      Roles:
+        - !Ref AgentRuntimeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Upload the build source. Second (and last) write exception to the
+          # read-only principle, next to checkpoints/*. No s3:GetObject: the
+          # session does not need to read back what it just uploaded, and no
+          # s3:DeleteObject — the lifecycle rule reclaims builds/.
+          - Sid: UploadBuildSources
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:AbortMultipartUpload
+            Resource:
+              - !Sub '${CheckpointBucket.Arn}/builds/*'
+          # Start and observe ONLY this project. No CreateProject/
+          # UpdateProject/DeleteProject: the session cannot widen its own
+          # build perimeter, and no iam:PassRole either.
+          - Sid: StartImageRebuild
+            Effect: Allow
+            Action:
+              - codebuild:StartBuild
+              - codebuild:BatchGetBuilds
+            Resource:
+              - !GetAtt ImageRebuildProject.Arn
+          # Explicit ARN, not '${ImageRebuildLogGroup.Arn}:*': GetAtt Arn on a
+          # LogGroup already carries a ':*' suffix. Largely redundant with the
+          # ReadOnlyAccess managed policy, kept explicit so the capability is
+          # self-contained and auditable.
+          - Sid: ReadImageRebuildLogs
+            Effect: Allow
+            Action:
+              - logs:GetLogEvents
+              - logs:FilterLogEvents
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ImageRebuildLogGroup}:*'
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ImageRebuildLogGroup}:log-stream:*'
+
+  AgentRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub '${ProjectName}_${Environment}_runtime'
+      Description: !Sub 'SCH runtime — coding agents in AgentCore microVMs (${ProjectName}/${Environment})'
+      RoleArn: !GetAtt AgentRuntimeRole.Arn
+      AgentRuntimeArtifact:
+        ContainerConfiguration:
+          # <repo>@sha256:<digest> when the deploy resolved the digest (every
+          # image-building deploy), <repo>:<tag> otherwise. Digest-only on
+          # purpose: the CloudFormation pattern also admits <repo>:<tag>@<digest>,
+          # but AgentCore then fails to start the microVM (502 on every invoke,
+          # no container log — verified live, TASK-30). The tag remains in the
+          # ApplicationVersion parameter and in SCH_IMAGE_VERSION inside the image.
+          ContainerUri: !If
+            - ImageDigestPinned
+            - !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-${Environment}@${ImageDigest}'
+            - !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-${Environment}:${ApplicationVersion}'
+      NetworkConfiguration:
+        NetworkMode: PUBLIC
+      # Managed session storage (Preview): per-session persistent filesystem,
+      # survives stop/resume; deleted after 14 idle days or on version update.
+      FilesystemConfigurations:
+        - SessionStorage:
+            MountPath: /mnt/workspace
+      LifecycleConfiguration:
+        IdleRuntimeSessionTimeout: !Ref IdleRuntimeSessionTimeoutSeconds
+        MaxLifetime: !Ref MaxLifetimeSeconds
+      EnvironmentVariables:
+        LOG_LEVEL: INFO
+        AGENT_PORT: '8080'
+        PROJECT_NAME: !Ref ProjectName
+        ENVIRONMENT: !Ref Environment
+        SCH_CHECKPOINT_BUCKET: !Ref CheckpointBucket
+        # TASK-30: the digest this runtime version was created from. The image
+        # tag (SCH_IMAGE_VERSION, baked at build time) no longer identifies a
+        # build once the same tag is rebuilt; `printenv SCH_IMAGE_DIGEST` in a
+        # session does. Derived from the same parameter as the ContainerUri, so
+        # it never causes a version bump on its own.
+        SCH_IMAGE_DIGEST: !If
+          - ImageDigestPinned
+          - !Ref ImageDigest
+          - !Ref AWS::NoValue
+        # add-codebuild-image-rebuild: consumed by /usr/local/bin/sch-build-image.
+        # Absent when the capability is disabled — the command then fails fast
+        # with "capability not enabled" and makes no AWS call at all.
+        SCH_IMAGE_REBUILD_PROJECT: !If
+          - SessionImageRebuildEnabled
+          - !Ref ImageRebuildProject
+          - !Ref AWS::NoValue
+        # add-telegram-notifications (design D6): both variables absent when
+        # the feature is off — the shim's opt-in gate requires BOTH non-empty.
+        # Outbound HTTPS to api.telegram.org only; no new IAM permissions.
+        SCH_TELEGRAM_BOT_TOKEN: !If
+          - TelegramConfigured
+          - !Ref TelegramBotToken
+          - !Ref AWS::NoValue
+        SCH_TELEGRAM_CHAT_ID: !If
+          - TelegramConfigured
+          - !Ref TelegramChatId
+          - !Ref AWS::NoValue
+        # add-telegram-interaction (design D3): the presence of BOTH table
+        # names activates the shim's inbound command poll + decision broker;
+        # absent when the feature is off — behavior identical to the
+        # notification-only deployment.
+        SCH_TELEGRAM_COMMANDS_TABLE: !If
+          - TelegramInteractionEnabled
+          - !Ref TelegramCommandsTable
+          - !Ref AWS::NoValue
+        SCH_TELEGRAM_ROUTING_TABLE: !If
+          - TelegramInteractionEnabled
+          - !Ref TelegramRoutingTable
+          - !Ref AWS::NoValue
+        SCH_PI_DEFAULT_MODEL: !Ref PiDefaultModel
+        # add-user-provider-keys (design D5, BREAKING): NO provider API key is
+        # exposed here any more. The SCH_*_API_KEY names stay the canonical
+        # inert spelling the dispatcher recognizes, but their source is the
+        # per-session tmpfs file the shim writes from the invoke payload
+        # (/run/sch/provider-keys.env) — never this environment, which is
+        # deployment-wide and would put one shared secret in every session.
+      Tags:
+        Name: !Sub '${ProjectName}-${Environment}-runtime'
+        Environment: !Ref Environment
+        Project: !Ref ProjectName
+        ManagedBy: CloudFormation
+
+Outputs:
+  RuntimeArn:
+    Description: ARN of the AgentCore Runtime
+    Value: !GetAtt AgentRuntime.AgentRuntimeArn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-runtime-arn'
+  RuntimeId:
+    Description: ID of the AgentCore Runtime
+    Value: !GetAtt AgentRuntime.AgentRuntimeId
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-runtime-id'
+  RuntimeVersion:
+    Description: Version of the AgentCore Runtime (updates reset session storage!)
+    Value: !GetAtt AgentRuntime.AgentRuntimeVersion
+  ExecutionRoleArn:
+    Description: ARN of the runtime execution role
+    Value: !GetAtt AgentRuntimeRole.Arn
+  LogGroupName:
+    Description: CloudWatch log group for the runtime
+    Value: !Ref AgentRuntimeLogGroup
+  CheckpointBucketName:
+    Description: S3 bucket for L2 workspace checkpoints (SCH_CHECKPOINT_BUCKET)
+    Value: !Ref CheckpointBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-checkpoint-bucket'
+  WorkspaceRegistryUrl:
+    Condition: WorkspaceRegistryEnabled
+    Description: IAM-authenticated workspace registry endpoint for SCH_WORKSPACE_REGISTRY_URL
+    Value: !Sub 'https://${WorkspaceRegistryApi}.execute-api.${AWS::Region}.amazonaws.com/v1'
+  WorkspaceRegistryInvokeArn:
+    Condition: WorkspaceRegistryEnabled
+    Description: Grant execute-api:Invoke on this ARN to each registry caller
+    Value: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WorkspaceRegistryApi}/v1/*/*'
+  WorkspaceRegistryTableName:
+    Condition: WorkspaceRegistryEnabled
+    Description: DynamoDB table used by the workspace registry
+    Value: !Ref WorkspaceRegistryTable
+  ImageRebuildProjectName:
+    Condition: SessionImageRebuildEnabled
+    Description: CodeBuild project that rebuilds the runtime image (SCH_IMAGE_REBUILD_PROJECT)
+    Value: !Ref ImageRebuildProject
+  ImageRebuildRoleArn:
+    Condition: SessionImageRebuildEnabled
+    Description: CodeBuild service role — the only principal allowed to push images to the project ECR repository
+    Value: !GetAtt ImageRebuildRole.Arn
+  ImageRebuildLogGroupName:
+    Condition: SessionImageRebuildEnabled
+    Description: CloudWatch log group holding the image rebuild build logs
+    Value: !Ref ImageRebuildLogGroup
+  TelegramWebhookUrl:
+    Condition: TelegramInteractionEnabled
+    Description: Endpoint to register with Telegram setWebhook (deploy.sh does it automatically)
+    Value: !Sub 'https://${TelegramWebhookApi}.execute-api.${AWS::Region}.amazonaws.com/v1/telegram-webhook'
+  TelegramCommandsTableName:
+    Condition: TelegramInteractionEnabled
+    Description: DynamoDB table holding the inbound Telegram commands
+    Value: !Ref TelegramCommandsTable
+  TelegramRoutingTableName:
+    Condition: TelegramInteractionEnabled
+    Description: DynamoDB table mapping message_thread_id to workspace
+    Value: !Ref TelegramRoutingTable
+  TaskWatchdogFunctionName:
+    Condition: TaskWatchdogEnabled
+    Description: Lambda reconciling orphaned running task statuses (its log group is /aws/lambda/<name>)
+    Value: !Ref TaskWatchdogFunction

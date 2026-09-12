@@ -1,0 +1,108 @@
+name: CI
+
+# Fast, offline checks only. Nothing here touches AWS: the unit suites inject
+# fakes (docs/coding-standards.md), and the end-to-end capability checks
+# (bin/verify-*.sh) stay a deliberate, credentialed, manual step.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python suites (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the interpreter inside the runtime image, 3.12 the Lambda
+        # runtime (infra/agent_runtime.yaml). Keep both green.
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the CLI package with the dev extra
+        run: python -m pip install --quiet -e ".[dev]"
+      - name: CLI suite
+        working-directory: cli
+        run: python -m unittest discover -s tests
+      - name: Infra (Lambda handlers, templates, deploy helpers) suite
+        working-directory: infra
+        run: python -m unittest discover
+      - name: Installed console script answers
+        run: sch --help
+
+  tunnel:
+    name: Tunnel suite (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: tunnel/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          # mirror-reconnect.test.js drives image/app/fs_sync_worker.py, the
+          # image-side worker: same interpreter as the image.
+          python-version: "3.11"
+      - name: Install tunnel dependencies
+        working-directory: tunnel
+        run: npm ci --no-audit --no-fund
+      - name: Tunnel suite
+        working-directory: tunnel
+        run: npm test
+
+  docs:
+    name: Documentation and hygiene checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Links, spec structure, account IDs, personal paths, language
+        run: bash bin/verify-docs.sh
+      - name: Shell shims and verification scripts parse
+        run: |
+          for f in bin/sch bin/sch-cleanup bin/sch-watch bin/*.sh infra/deploy.sh image/scripts/*.sh; do
+            bash -n "$f"
+          done
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # On pull_request events the action lists the PR's commits through the
+      # API; without this it fails with "Resource not accessible by
+      # integration" before scanning anything (seen on the first Dependabot PRs).
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the scan covers every commit in the push/PR range.
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          # Findings are reported in the job summary and the SARIF artifact;
+          # PR comments would need write access, which Dependabot-triggered
+          # runs never have.
+          GITLEAKS_ENABLE_COMMENTS: "false"

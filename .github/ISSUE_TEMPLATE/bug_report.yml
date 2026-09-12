@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a problem with SCH (CLI, runtime, tunnel, infra)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please redact secrets, AWS
+        account IDs, and tokens — issues are public.
+  - type: textarea
+    id: what-ran
+    attributes:
+      label: What did you run?
+      description: Exact command(s) and any relevant config.
+      placeholder: sch run my-project --harness claude
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What actually happened?
+      description: Include error output and `sch status --json` if relevant.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, CLI version, harness (opencode / claude / pi), storage class
+      placeholder: macOS 15, sch <version>, harness claude, storage s3
+    validations:
+      required: true

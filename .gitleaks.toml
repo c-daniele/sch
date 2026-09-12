@@ -1,0 +1,25 @@
+# gitleaks configuration (used by the CI secret scan and by `gitleaks detect`
+# locally). Extends the default rule set; the allow-list below covers the
+# deliberately fake credentials the unit tests use as fixtures. Anything that
+# looks like a real key outside those files fails the scan.
+title = "sch"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and documented placeholders"
+paths = [
+  '''cli/tests/test_userenv\.py''',
+  '''image/app/test_provider_api_keys\.py''',
+  '''image/app/test_user_provider_keys\.py''',
+  '''image/app/test_github_access\.py''',
+  '''tunnel/package-lock\.json''',
+]
+regexes = [
+  # Telegram token placeholder shown in docs/telegram-setup.md
+  '''123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx''',
+  # AWS documentation sample account IDs used by tests
+  '''111122223333''',
+  '''123456789012''',
+]

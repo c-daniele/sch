@@ -1,0 +1,5 @@
+.dockerignore
+Dockerfile
+test-local.sh
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,67 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# --- Node (local tooling only; runtime deps live inside the image) ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- IDE / editors ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- Environment / secrets ---
+.env
+.env.*
+.env.*.local
+.aws/
+.ssh/
+*.pem
+*.key
+*.crt
+secrets.json
+
+# --- Logs / runtime artifacts ---
+*.log
+logs/
+sch-verify-*.state
+
+# --- Docker ---
+docker-compose.override.yml
+
+# --- Kilo / OpenCode AI tooling ---
+/.kilo
+/.kilocode
+/.opencode
+
+infra/setenv.sh

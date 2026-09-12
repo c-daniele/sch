@@ -1,0 +1,18 @@
+#!/bin/bash
+# sch — Serverless Coding Harness client (POSIX shim).
+#
+# This file intentionally contains no application logic: it locates a
+# python3 interpreter and delegates the entire invocation, with arguments
+# and exit code propagated unchanged, to the cross-platform implementation
+# in cli/sch/ (see docs/specs/access-surfaces/cli-cross-platform.md).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "sch: python3 (>= 3.8) is required but was not found on PATH" >&2
+    exit 1
+fi
+
+exec python3 "${REPO_ROOT}/cli/sch/__main__.py" "$@"

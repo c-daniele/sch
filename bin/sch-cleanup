@@ -1,0 +1,110 @@
+#!/bin/bash
+# Stop every locally indexed SCH session and remove local SCH runtime state.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCH="${SCRIPT_DIR}/sch"
+CONFIG_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}/sch"
+TMP_ROOT="${TMPDIR:-/tmp}"
+APPLY=false
+
+usage() {
+    cat <<'EOF'
+Usage: sch-cleanup [--yes]
+
+Without --yes, prints a dry run. With --yes:
+  - stops every runtime session in the local SCH workspace index;
+  - terminates local sync/acp/attach processes launched from this repository;
+  - removes SCH workspace mappings, sync baselines/bindings, mirrors, and
+    $TMPDIR/sch-* test/runtime artifacts.
+
+It preserves repositories, runtime/bucket caches, and S3 checkpoints.
+EOF
+}
+
+case "${1:-}" in
+    "") ;;
+    --yes) APPLY=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
+
+workspace_names() {
+    [ -d "${CONFIG_ROOT}/workspaces" ] || return 0
+    for path in "${CONFIG_ROOT}/workspaces"/*; do
+        [ -f "${path}" ] || continue
+        basename "${path}"
+    done
+}
+
+tunnel_pids() {
+    ps -axo pid=,command= | while read -r pid command; do
+        case "${command}" in
+            *"${REPO_ROOT}/tunnel/sync.js"*|*"${REPO_ROOT}/tunnel/acp.js"*|*"${REPO_ROOT}/tunnel/attach.js"*)
+                printf '%s\n' "${pid}"
+                ;;
+        esac
+    done
+}
+
+WORKSPACES="$(workspace_names)"
+PIDS="$(tunnel_pids)"
+
+echo "SCH cleanup scope:"
+if [ -n "${WORKSPACES}" ]; then
+    echo "  workspaces to stop:"
+    printf '%s\n' "${WORKSPACES}" | while IFS= read -r workspace; do
+        printf '    %s\n' "${workspace}"
+    done
+else
+    echo "  workspaces to stop: none"
+fi
+if [ -n "${PIDS}" ]; then
+    printf '  local tunnel PIDs: %s\n' "$(printf '%s\n' "${PIDS}" | tr '\n' ' ')"
+else
+    echo "  local tunnel PIDs: none"
+fi
+echo "  remove: ${CONFIG_ROOT}/{workspaces,sync,mirrors}"
+echo "  remove: ${TMP_ROOT}/sch-*"
+echo "  preserve: ${CONFIG_ROOT}/{runtime-arn,checkpoint-bucket} and S3 checkpoints"
+
+if [ "${APPLY}" != true ]; then
+    echo "Dry run only. Re-run with --yes to apply."
+    exit 0
+fi
+
+FAILED=0
+while IFS= read -r workspace; do
+    [ -n "${workspace}" ] || continue
+    echo "Stopping workspace '${workspace}'..."
+    if ! "${SCH}" stop "${workspace}"; then
+        echo "WARNING: failed to stop '${workspace}'; continuing cleanup" >&2
+        FAILED=$((FAILED + 1))
+    fi
+done <<< "${WORKSPACES}"
+
+if [ -n "${PIDS}" ]; then
+    while IFS= read -r pid; do
+        [ -n "${pid}" ] && kill "${pid}" 2>/dev/null || true
+    done <<< "${PIDS}"
+    sleep 2
+    REMAINING="$(tunnel_pids)"
+    while IFS= read -r pid; do
+        [ -n "${pid}" ] && kill -KILL "${pid}" 2>/dev/null || true
+    done <<< "${REMAINING}"
+fi
+
+rm -rf \
+    "${CONFIG_ROOT}/workspaces" \
+    "${CONFIG_ROOT}/sync" \
+    "${CONFIG_ROOT}/mirrors"
+
+for path in "${TMP_ROOT}"/sch-*; do
+    [ -e "${path}" ] || continue
+    rm -rf "${path}"
+done
+
+echo "Cleanup complete (${FAILED} session stop failure(s))."
+[ "${FAILED}" -eq 0 ]

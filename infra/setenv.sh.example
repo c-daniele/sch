@@ -1,0 +1,38 @@
+
+#!/bin/bash
+
+# This script sets environment variables for the project.
+# It should be sourced, not executed, to ensure the variables are set in the current shell.
+# Usage:
+#  source infra/setenv.sh
+#  infra/deploy.sh ...
+
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# --- Provider API keys: NOT deploy variables any more -------------------------
+# add-user-provider-keys (BREAKING): the four provider API keys used to live
+# here and were injected into the runtime environment at deploy time — one
+# shared secret for every user, every workspace and every session, rotatable
+# only with a redeploy (which resets the session storage of every session).
+#
+# They are now a per-USER property. Each user creates their own file, outside any
+# repository, readable only by them:
+#
+#   mkdir -p ~/.sch && touch ~/.sch/env && chmod 600 ~/.sch/env
+#   cat > ~/.sch/env <<'EOF'
+#   ANTHROPIC_API_KEY=
+#   OPENCODE_API_KEY=
+#   OPENROUTER_API_KEY=
+#   KILO_API_KEY=
+#   EOF
+#
+# `sch` reads that file at every command and forwards only those four names in
+# the invoke payload; the shim stages them on tmpfs for the session and the
+# harness dispatcher maps them onto the canonical provider names exactly as
+# before (additive for opencode/pi, Bedrock -> Anthropic API switch for claude).
+# See docs/cli.md, "Provider API keys (per-user)".
+#
+# Nothing else changes here: the deployment still owns the Telegram credentials
+# above (and any other `deploy.sh` variable) — those ARE per-deployment. Provider
+# key variables left over in this file are simply ignored by deploy.sh.

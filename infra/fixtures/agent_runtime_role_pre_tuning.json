@@ -1,0 +1,196 @@
+{
+ "Type": "AWS::IAM::Role",
+ "Properties": {
+  "RoleName": {
+   "Fn::Sub": "${ProjectName}-${Environment}-BedrockAgentCore-role"
+  },
+  "Description": {
+   "Fn::Sub": "Execution role for the ${ProjectName} AgentCore Runtime (least privilege)"
+  },
+  "ManagedPolicyArns": [
+   "arn:aws:iam::aws:policy/ReadOnlyAccess"
+  ],
+  "AssumeRolePolicyDocument": {
+   "Version": "2012-10-17",
+   "Statement": [
+    {
+     "Effect": "Allow",
+     "Principal": {
+      "Service": "bedrock-agentcore.amazonaws.com"
+     },
+     "Action": "sts:AssumeRole",
+     "Condition": {
+      "StringEquals": {
+       "aws:SourceAccount": {
+        "Ref": "AWS::AccountId"
+       }
+      },
+      "ArnLike": {
+       "aws:SourceArn": {
+        "Fn::Sub": "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "Policies": [
+   {
+    "PolicyName": {
+     "Fn::Sub": "${ProjectName}-${Environment}-agentcore-policy"
+    },
+    "PolicyDocument": {
+     "Version": "2012-10-17",
+     "Statement": [
+      {
+       "Sid": "EcrAuth",
+       "Effect": "Allow",
+       "Action": [
+        "ecr:GetAuthorizationToken"
+       ],
+       "Resource": "*"
+      },
+      {
+       "Sid": "EcrPull",
+       "Effect": "Allow",
+       "Action": [
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+       ],
+       "Resource": [
+        {
+         "Fn::Sub": "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-${Environment}"
+        }
+       ]
+      },
+      {
+       "Sid": "LogsCreate",
+       "Effect": "Allow",
+       "Action": [
+        "logs:DescribeLogStreams",
+        "logs:CreateLogGroup"
+       ],
+       "Resource": [
+        {
+         "Fn::Sub": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+        }
+       ]
+      },
+      {
+       "Sid": "LogsDescribe",
+       "Effect": "Allow",
+       "Action": [
+        "logs:DescribeLogGroups"
+       ],
+       "Resource": [
+        {
+         "Fn::Sub": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+        }
+       ]
+      },
+      {
+       "Sid": "LogsWrite",
+       "Effect": "Allow",
+       "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+       ],
+       "Resource": [
+        {
+         "Fn::Sub": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
+        }
+       ]
+      },
+      {
+       "Sid": "CloudWatchMetrics",
+       "Effect": "Allow",
+       "Action": "cloudwatch:PutMetricData",
+       "Resource": "*",
+       "Condition": {
+        "StringEquals": {
+         "cloudwatch:namespace": "bedrock-agentcore"
+        }
+       }
+      },
+      {
+       "Sid": "BedrockInferenceProfiles",
+       "Effect": "Allow",
+       "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+       ],
+       "Resource": [
+        {
+         "Fn::Sub": "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+        },
+        {
+         "Fn::Sub": "arn:aws:bedrock:*:${AWS::AccountId}:application-inference-profile/*"
+        },
+        "arn:aws:bedrock:*::foundation-model/*"
+       ]
+      },
+      {
+       "Sid": "BedrockMantleInference",
+       "Effect": "Allow",
+       "Action": [
+        "bedrock-mantle:CreateInference",
+        "bedrock-mantle:GetInference",
+        "bedrock-mantle:CancelInference",
+        "bedrock-mantle:DeleteInference",
+        "bedrock-mantle:ListModels",
+        "bedrock-mantle:GetModel"
+       ],
+       "Resource": [
+        {
+         "Fn::Sub": "arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/default"
+        }
+       ]
+      },
+      {
+       "Sid": "CheckpointBucketReadWrite",
+       "Effect": "Allow",
+       "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:AbortMultipartUpload",
+        "s3:PutObjectTagging"
+       ],
+       "Resource": [
+        {
+         "Fn::Sub": "${CheckpointBucket.Arn}/checkpoints/*"
+        },
+        {
+         "Fn::Sub": "${CheckpointBucket.Arn}/checkpoint-generations/*"
+        },
+        {
+         "Fn::Sub": "${CheckpointBucket.Arn}/workspace-writers/*"
+        }
+       ]
+      },
+      {
+       "Sid": "CheckpointBucketList",
+       "Effect": "Allow",
+       "Action": [
+        "s3:ListBucket"
+       ],
+       "Resource": [
+        {
+         "Fn::GetAtt": "CheckpointBucket.Arn"
+        }
+       ],
+       "Condition": {
+        "StringLike": {
+         "s3:prefix": [
+          "checkpoints/*",
+          "checkpoint-generations/*",
+          "workspace-writers/*"
+         ]
+        }
+       }
+      }
+     ]
+    }
+   }
+  ]
+ }
+}

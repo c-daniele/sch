@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sch"
+version = "0.1.0"
+description = "SCH — Serverless Coding Harness client CLI"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Carmelo Daniele" }]
+keywords = ["aws", "bedrock", "agentcore", "coding-agent", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development",
+]
+
+# The CLI is stdlib-only by design (see docs/coding-standards.md): no
+# install-time or runtime dependencies on any platform.
+dependencies = []
+
+[project.optional-dependencies]
+# Development only: the infra test suite loads the CloudFormation templates
+# (pyyaml) and imports the Lambda handlers, which use the boto3 the Lambda
+# runtime provides. Never needed by `sch` users.
+#   uv venv .venv && uv pip install -e ".[dev]"     (or: pip install -e ".[dev]")
+dev = [
+    "pyyaml>=6.0",
+    "boto3>=1.34",
+]
+
+[project.scripts]
+sch = "sch.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/c-daniele/sch"
+
+[tool.setuptools]
+# The package lives in cli/ in the repository (bin/sch and the tests import
+# it in place); map it into the wheel without moving files.
+package-dir = { "" = "cli" }
+packages = ["sch", "sch.commands"]

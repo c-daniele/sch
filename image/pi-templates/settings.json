@@ -1,0 +1,9 @@
+{
+  "$comment": "SCH global Pi settings — seeded by init-workspace.sh (add-pi-harness, design D8/D10). NEVER overwritten once present: edit freely, deleting the file re-seeds the current image version at the next boot. defaultModel is substituted at seed time with the Bedrock inference-profile ID matching the deployment region.",
+  "defaultProvider": "amazon-bedrock",
+  "defaultModel": "__SCH_BEDROCK_MODEL__",
+  "defaultProjectTrust": "always",
+  "enableInstallTelemetry": false,
+  "enableAnalytics": false,
+  "quietStartup": true
+}

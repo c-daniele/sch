@@ -1,0 +1,26 @@
+{
+  "name": "@sch/tunnel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local end of the sch-remote-ui-tunnel byte bridge (sch attach / sch acp). Invoked by bin/sch, not published.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node framing.test.js && node transport.test.js && node websocket-stream-channel.test.js && node tcp-bridge.test.js && node acp-path-map.test.js && node acp-mediation.test.js && node sync-files.test.js && node sync-plan.test.js && node sync.test.js && node bundle.test.js && node mirror.test.js && node mirror-reconnect.test.js"
+  },
+  "bin": {
+    "sch-tunnel-acp": "./acp.js",
+    "sch-tunnel-attach": "./attach.js",
+    "sch-tunnel-web": "./web.js",
+    "sch-tunnel-sync": "./sync.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.1",
+    "@smithy/signature-v4": "^5.6.6",
+    "@smithy/protocol-http": "^5.5.10",
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/credential-providers": "^3.1090.0"
+  }
+}

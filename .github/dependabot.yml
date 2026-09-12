@@ -1,0 +1,22 @@
+# Keep the few third-party inputs current. Runtime tool versions inside the
+# image (image/Dockerfile) are pinned on purpose and bumped by hand -- a bump
+# is a new runtime version, reviewed as such -- so Docker is deliberately not
+# listed here.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /tunnel
+    schedule:
+      interval: weekly
+    groups:
+      tunnel-dependencies:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(tunnel)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(ci)"

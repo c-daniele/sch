@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an improvement to SCH
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [MANIFESTO](https://github.com/c-daniele/sch/blob/main/MANIFESTO.md)
+        first — SCH has deliberate boundaries (not a PaaS, not CI, AWS-only).
+        Features outside those boundaries will be declined.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to achieve, and what blocks you today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should happen, from the user's point of view?
+    validations:
+      required: true
+  - type: checkboxes
+    id: cli-first
+    attributes:
+      label: Surface hierarchy check
+      description: See MANIFESTO — CLI is the foundation; Telegram is never a control plane.
+      options:
+        - label: This feature is reachable from the `sch` CLI (or should be)
+          required: true

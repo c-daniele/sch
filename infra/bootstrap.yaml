@@ -1,0 +1,289 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  SCH (Serverless Coding Harness) bootstrap stack — the base resources a deploy
+  needs BEFORE the runtime exists: the ECR repository that holds the runtime
+  image, the ARM CodeBuild project that builds it, and the throwaway bucket the
+  build reads its source from. Deployed first; the runtime stack
+  (agent_runtime.yaml) is deployed last, once the image it points at exists.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Project Name
+    Default: sch
+    AllowedPattern: ^[a-z][a-z0-9]{2,7}$
+  Environment:
+    Type: String
+    Description: Deployment Environment
+    Default: dev
+    AllowedValues:
+      - dev
+      - stg
+      - prd
+  BuildSourceRetentionDays:
+    Type: Number
+    Description: Days after which an uploaded build source zip is expired
+    Default: 7
+    MinValue: 1
+    MaxValue: 90
+
+Resources:
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ProjectName}-${Environment}
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      # ImageTagMutability stays MUTABLE: deploy.sh re-pushes the same tag
+      # (e.g. v1) on every deploy. add-codebuild-image-rebuild OQ-TAG-GUARD:
+      # IMMUTABLE_WITH_EXCLUSION (excluding sessionbuild-*) would prevent a
+      # session-triggered build from ever overwriting a deployed tag, but it
+      # would force a new tag per deploy — deliberately NOT adopted for now
+      # (risk R2 accepted, see the change's design.md).
+      ImageTagMutability: MUTABLE
+      # Two rules (add-codebuild-image-rebuild, design D10): images built from
+      # a session carry the reserved sessionbuild- prefix and are capped on
+      # their own, so a burst of session builds cannot evict the images the
+      # deploy pipeline pushed. Rule 2 is the original catch-all.
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 session-built images (sessionbuild-*)",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["sessionbuild-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # --- Image build infrastructure -------------------------------------------
+  # Why it lives HERE and not in the runtime stack: the runtime stack contains
+  # the AgentRuntime, which points at an image tag that must ALREADY exist when
+  # the stack is deployed. If the project that builds that image also lived
+  # there, a first deploy could never succeed — the build would need the stack
+  # and the stack would need the build. Owning the build project in the stack
+  # that is deployed FIRST makes the deploy strictly linear:
+  #     bootstrap stack -> image build -> runtime stack.
+  # The session-driven rebuild project (agent_runtime.yaml, opt-in via
+  # EnableSessionImageRebuild) is a different resource with a different name and
+  # a different trust story: it may be started from INSIDE a microVM, so it
+  # derives its own sessionbuild-* tag. This one is operator-only: the tag is an
+  # input, because the caller already holds deploy credentials.
+
+  # Throwaway source transport: deploy.sh zips image/ and uploads it here.
+  # Nothing durable lives in this bucket, hence the expiry rule and the absence
+  # of versioning or a retain policy.
+  BuildSourcesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-build-sources-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireBuildSources
+            Status: Enabled
+            Prefix: builds/
+            ExpirationInDays: !Ref BuildSourceRetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ImageBuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectName}-${Environment}-image-build'
+      RetentionInDays: 14
+
+  # CodeBuild service role: push to THIS repository, read THIS bucket, write
+  # its own log stream. Nothing else — no Bedrock, no IAM, no other S3.
+  ImageBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-image-build-role'
+      Description: !Sub 'CodeBuild service role for deploy-time image builds (${ProjectName}/${Environment})'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: !Sub '${ProjectName}-${Environment}-image-build-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # The auth token API is account-wide by design; the push actions
+              # below are what actually scope this role to one repository.
+              - Sid: EcrAuth
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: EcrPushProjectRepository
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource:
+                  - !GetAtt ECRRepository.Arn
+              - Sid: ReadBuildSources
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub '${BuildSourcesBucket.Arn}/builds/*'
+              - Sid: OwnLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ImageBuildLogGroup}:log-stream:*'
+
+  ImageBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-image-build'
+      Description: !Sub 'Builds the ${ProjectName}/${Environment} runtime image (image/ build context) for a deploy'
+      ServiceRole: !GetAtt ImageBuildRole.Arn
+      TimeoutInMinutes: 60
+      Artifacts:
+        Type: NO_ARTIFACTS
+      # ARM_CONTAINER is mandatory, not a preference: AgentCore Runtime only
+      # accepts linux/arm64 images, and cross-building this image on x86 via
+      # QEMU is unusably slow (~440MB of model + npm/uv installs).
+      # PrivilegedMode is required for the Docker daemon `docker build` needs.
+      Environment:
+        Type: ARM_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/amazonlinux-aarch64-standard:3.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: SCH_ECR_REGISTRY
+            Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'
+          - Name: SCH_REPO_URI
+            Value: !GetAtt ECRRepository.RepositoryUri
+          # deploy.sh overrides this per build with the tag it is deploying.
+          - Name: SCH_DEPLOY_TAG
+            Value: unset
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref ImageBuildLogGroup
+      Source:
+        Type: S3
+        # Placeholder: deploy.sh always passes the key it just uploaded via
+        # --source-location-override. The effective bound is this role's read
+        # scope (builds/* of the build-sources bucket).
+        Location: !Sub '${BuildSourcesBucket}/builds/placeholder/source.zip'
+        # Inline, in the template, so a deploy needs no --buildspec-override:
+        # one definition, versioned with the stack. The image must come out
+        # linux/arm64 (AgentCore rejects anything else) — the build runs on a
+        # native ARM container, so no --platform/QEMU here, and the result is
+        # asserted before the push.
+        BuildSpec: |
+          version: 0.2
+          env:
+            exported-variables:
+              - SCH_IMAGE_URI
+          phases:
+            build:
+              commands:
+                - |
+                  set -eu
+                  : "${SCH_DEPLOY_TAG:?SCH_DEPLOY_TAG must be provided by the caller}"
+                  test "${SCH_DEPLOY_TAG}" != unset || { echo "SCH_DEPLOY_TAG was not overridden"; exit 1; }
+                  test -f ./Dockerfile || { echo "no Dockerfile at the source root"; exit 1; }
+                  aws ecr get-login-password --region "${AWS_REGION}" \
+                    | docker login --username AWS --password-stdin "${SCH_ECR_REGISTRY}"
+                  docker build -f ./Dockerfile \
+                    --build-arg SCH_IMAGE_VERSION="${SCH_DEPLOY_TAG}" \
+                    -t "${SCH_REPO_URI}:${SCH_DEPLOY_TAG}" .
+                  test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${SCH_REPO_URI}:${SCH_DEPLOY_TAG}")" = linux/arm64
+                  docker push "${SCH_REPO_URI}:${SCH_DEPLOY_TAG}"
+                  export SCH_IMAGE_URI="${SCH_REPO_URI}:${SCH_DEPLOY_TAG}"
+                  echo "SCH_IMAGE_URI=${SCH_IMAGE_URI}"
+
+Outputs:
+  RepositoryUri:
+    Description: URI of the ECR repository
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ecr-uri
+  RepositoryArn:
+    Description: ARN of the ECR repository
+    Value: !GetAtt ECRRepository.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ecr-arn
+  RepositoryName:
+    Description: Name of the ECR repository
+    Value: !Ref ECRRepository
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ecr-name
+  ImageBuildProjectName:
+    Description: CodeBuild project that builds the runtime image for a deploy
+    Value: !Ref ImageBuildProject
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-image-build-project
+  BuildSourcesBucketName:
+    Description: Bucket deploy.sh uploads the image build context to
+    Value: !Ref BuildSourcesBucket
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-build-sources-bucket

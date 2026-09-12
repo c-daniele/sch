@@ -1,0 +1,9 @@
+# Shim dependencies (Python 3.11).
+# bedrock-agentcore provides BedrockAgentCoreApp (/invocations + /ping contract on :8080).
+bedrock-agentcore>=1.4.7,<2
+uvicorn>=0.34.0
+# L2 durability checkpoint (design D7): S3 upload/download of workspace
+# checkpoints. Transitively available via bedrock-agentcore already, but
+# pinned explicitly here since main.py imports it directly.
+# Conditional PutObject headers (IfMatch/IfNoneMatch) are used for fencing.
+boto3>=1.42.87,<2
