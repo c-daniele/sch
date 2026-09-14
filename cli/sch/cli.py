@@ -45,9 +45,10 @@ Usage:
                                               (--continue resumes the harness's latest session)
   sch list                                  list known workspaces + status
   sch dashboard [--interval <seconds>]      full-screen offline workspace dashboard
-  sch task <workspace> [--harness <opencode|claude|pi>] [--model <id>] [--branch <name>] [--storage <s3|session>] [--continue] [--handoff [--handoff-session <id>] [--sanitize]] "<prompt>" [--timeout <s>] [sync options]
-                                             submit a headless detached task
-                                             (--handoff exports the local OpenCode session,
+  sch task <workspace> [--harness <opencode|claude|pi>] [--model <id>] [--variant <name>] [--branch <name>] [--storage <s3|session>] [--continue] [--handoff [--handoff-session <id>] [--sanitize]] "<prompt>" [--timeout <s>] [sync options]
+                                              submit a headless detached task
+                                              (--model/--variant are opencode-only;
+                                              --handoff exports the local OpenCode session,
                                              imports it remotely, then submits with --continue;
                                              opencode harness only; seed-then-handoff with --branch)
   sch fetch <workspace> [--push] [--force]  collect a git-native session's work as a local branch
@@ -163,6 +164,22 @@ def validate_model_or_die(model):
             )
         )
     return model
+
+
+def validate_variant_or_die(variant):
+    """Validate a ``--variant`` value against the shared syntactic allowlist,
+    dying with a usage error (without invoking the runtime) on an empty or
+    out-of-allowlist value — same rule as ``--model`` (spec:
+    headless-task-execution R8a): the effort name stays opaque, only the
+    syntax is checked.
+    """
+    if not _MODEL_RE.fullmatch(variant):
+        die(
+            "invalid --variant value '{}' (must match [A-Za-z0-9._:/-]+)".format(
+                variant
+            )
+        )
+    return variant
 
 
 def parse_int_or_die(value, flag_name):

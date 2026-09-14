@@ -160,8 +160,9 @@ workspace's persisted harness**:
   forwarded as `--model <id>`/`--variant <v>`, so a headless `--continue`
   keeps the model and effort selected in the TUI (a model-less prompt would
   otherwise resolve to the `remote-auto` agent's configured model and
-  default effort). An explicit `--model` wins; an unreadable session row
-  degrades to the harness default.
+  default effort). An explicit `--model` wins (dropping the stored effort);
+  an explicit `--variant` wins over the stored effort. An unreadable session
+  row degrades to the harness default.
 - **claude**: `ls -t $CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/*.jsonl | head -1`,
   basename-strip the `.jsonl` to get the resume handle, then pass
   `--resume <id>` to `claude -p`. `<encoded-cwd>` is Claude's path encoding

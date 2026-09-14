@@ -56,6 +56,17 @@ def _parse_args(args):
             model = cli_mod.validate_model_or_die(rest[i + 1])
             i += 2
             continue
+        if arg == "--variant":
+            # The pinned opencode TUI has no --variant flag (only `opencode
+            # run` does), so there is nothing to forward to: fail fast with
+            # the remedy instead of the generic unknown-option error. Set the
+            # effort in the TUI model picker, or use `sch task --variant`
+            # for headless tasks.
+            die(
+                "'sch run' does not support --variant (the opencode TUI has "
+                "no such flag); pick the effort in the TUI model picker, or "
+                "run headless with 'sch task --variant <name>'"
+            )
         if arg == "--branch":
             if i + 1 >= len(rest):
                 die("usage: --branch <name>")

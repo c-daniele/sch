@@ -489,6 +489,7 @@ _TASK_STATE: dict = {
     "exit_code": None,
     "opencode_session_id": None,
     "model": None,  # explicit per-invocation model, None = harness default
+    "variant": None,  # explicit per-invocation effort, None = model default
     "error": None,
     "thread": None,
     "async_task_handle": None,
@@ -3506,11 +3507,12 @@ def _resolve_latest_opencode_session() -> str | None:
 
 def _run_task_heartbeat(
     workspace: str, task_id: str, stop_event: threading.Event, harness: str,
-    model: str | None = None,
+    model: str | None = None, variant: str | None = None,
 ) -> None:
     """Daemon heartbeat: PUT heartbeat_utc every ~30s while running (task 5.7:
     harness field preserved on every heartbeat write; model field present on
-    every heartbeat when one was requested — add-task-model-flag task 2.2)."""
+    every heartbeat when one was requested — add-task-model-flag task 2.2;
+    same for variant — spec R8a)."""
     task_started = time.time()
     while not stop_event.is_set():
         stop_event.wait(30)
@@ -3530,6 +3532,8 @@ def _run_task_heartbeat(
             status["harness"] = harness  # preserve harness field on heartbeat
             if model:
                 status["model"] = model  # preserve model field on heartbeat
+            if variant:
+                status["variant"] = variant  # preserve variant field on heartbeat
             _upload_task_status(workspace, status)
 
 
@@ -4300,6 +4304,21 @@ def _handle_task_action(payload: dict) -> dict:
         }
     model = model if model_present else None
 
+    # Optional per-invocation reasoning-effort variant (spec:
+    # headless-task-execution R8a; opencode-only `--variant`). Same
+    # second-line-of-defense contract as `model` above: a present-but-
+    # malformed value is rejected BEFORE any mutation.
+    variant_present = "variant" in payload
+    variant = payload.get("variant")
+    if variant_present and (
+        not isinstance(variant, str) or not MODEL_ID_RE.fullmatch(variant)
+    ):
+        return {
+            "status": "error",
+            "message": "invalid variant: expected non-empty [A-Za-z0-9._:/-]+",
+        }
+    variant = variant if variant_present else None
+
     timeout_s = payload.get("timeout_s")
     try:
         timeout_s = int(timeout_s) if timeout_s is not None else SCH_TASK_TIMEOUT_S
@@ -4353,6 +4372,7 @@ def _handle_task_action(payload: dict) -> dict:
             "exit_code": None,
             "harness": harness,
             "model": model,
+            "variant": variant,
             "harness_session_id": session_id_hint if continue_session else None,
             # Back-compat: keep the opencode-specific field name populated for
             # harness=opencode (existing `sch status` reads may still
@@ -4389,6 +4409,11 @@ def _handle_task_action(payload: dict) -> dict:
         # previous model-bearing task so "no model requested" always renders
         # as an absent field.
         _TASK_STATUS.pop("model", None)
+    if variant:
+        # Same present-iff-requested contract as `model` (spec R8a).
+        initial_status["variant"] = variant
+    else:
+        _TASK_STATUS.pop("variant", None)
     # Same leftover discipline for the terminal-notification fields (TASK-28):
     # they describe the previous task's delivery, never this running one.
     for field in NOTIFICATION_FIELDS:
@@ -4409,6 +4434,7 @@ def _handle_task_action(payload: dict) -> dict:
         "task_id": task_id,
         "harness": harness,
         "model": model,
+        "variant": variant,
         "prompt": prompt,
     }, workspace)
 
@@ -4416,7 +4442,7 @@ def _handle_task_action(payload: dict) -> dict:
         target=_run_task,
         name=f"sch-task-{task_id}",
         daemon=True,
-        args=(task_id, prompt, timeout_s, continue_session, session_id_hint, workspace, harness, model),
+        args=(task_id, prompt, timeout_s, continue_session, session_id_hint, workspace, harness, model, variant),
     )
     with _TASK_LOCK:
         _TASK_STATE["thread"] = thread
@@ -4428,6 +4454,10 @@ def _handle_task_action(payload: dict) -> dict:
         # client uses the missing echo to detect a runtime image that
         # predates the feature. Key present only when a model was requested.
         response["model"] = model
+    if variant:
+        # Same echo contract as `model` (spec R8a): present only when a
+        # variant was requested.
+        response["variant"] = variant
     if continue_session:
         # Echo the accepted continuation request (TASK-27, same contract as
         # the prepare-run action and the model echo above): the client uses
@@ -4674,6 +4704,7 @@ def _run_task(
     workspace: str,
     harness: str,
     model: str | None = None,
+    variant: str | None = None,
 ) -> None:
     """Background worker for a headless task (design D1, D5, D6, D7, D8)."""
     started = _utcnow()
@@ -4703,7 +4734,7 @@ def _run_task(
     heartbeat_stop = threading.Event()
     heartbeat_thread = threading.Thread(
         target=_run_task_heartbeat,
-        args=(workspace, task_id, heartbeat_stop, harness, model),
+        args=(workspace, task_id, heartbeat_stop, harness, model, variant),
         name=f"sch-task-hb-{task_id}",
         daemon=True,
     )
@@ -4737,6 +4768,7 @@ def _run_task(
             heartbeat_stop=heartbeat_stop,
             heartbeat_thread=heartbeat_thread,
             model=model,
+            variant=variant,
             continue_requested=continue_session,
             continue_resolved=continue_resolved,
         )
@@ -4768,17 +4800,22 @@ def _run_task(
     # is applied even on the headless path (spec: runtime-image,
     # "Esecuzione headless riusa il wrapper dispatcher").
     effective_model = model
-    effective_variant = None
+    effective_variant = variant
     if harness == "opencode" and not effective_model:
         # No explicit --model: forward the resumed session's own stored
         # model+variant so a headless --continue keeps the TUI selection
         # (model and reasoning effort, e.g. `high`). Without this the
         # --agent remote-auto switch resolves the turn to the agent's
         # configured model and default effort, discarding the selection and
-        # clobbering the session row. An explicit --model always wins (its
-        # variant is the model's default: a stored variant belongs to the
-        # previous model). (None, None) degrades to the harness default.
-        effective_model, effective_variant = _opencode_continue_model(harness_session_id)
+        # clobbering the session row. An explicit --model always wins — and
+        # skips this lookup entirely, since its variant is the model's
+        # default (a stored variant belongs to the previous model) — while
+        # an explicit --variant always wins over the stored one.
+        # (None, None) degrades to the harness default.
+        stored_model, stored_variant = _opencode_continue_model(harness_session_id)
+        effective_model = stored_model
+        if not effective_variant:
+            effective_variant = stored_variant
         if effective_model:
             logger.info(
                 "task %s continuing opencode session %s with model %s%s",
@@ -4858,12 +4895,13 @@ def _run_task(
         output_truncated=output_truncated,
         workspace=workspace,
         async_handle=async_handle,
-        heartbeat_stop=heartbeat_stop,
-        heartbeat_thread=heartbeat_thread,
-        model=model,
-        continue_requested=continue_session,
-        continue_resolved=continue_resolved,
-    )
+            heartbeat_stop=heartbeat_stop,
+            heartbeat_thread=heartbeat_thread,
+            model=model,
+            variant=variant,
+            continue_requested=continue_session,
+            continue_resolved=continue_resolved,
+        )
 
 
 def _finish_task(
@@ -4884,6 +4922,7 @@ def _finish_task(
     heartbeat_stop: threading.Event,
     heartbeat_thread: threading.Thread,
     model: str | None = None,
+    variant: str | None = None,
     continue_requested: bool = False,
     continue_resolved: bool | None = None,
 ) -> None:
@@ -4947,6 +4986,9 @@ def _finish_task(
         # Terminal record keeps the model for post-hoc provenance (spec:
         # headless-task-execution, "Task model observability").
         terminal_status["model"] = model
+    if variant:
+        # Same provenance contract as `model` (spec R8a).
+        terminal_status["variant"] = variant
     if continue_requested:
         # Continuation provenance (TASK-27): present iff requested, like the
         # model field. continue_resolved is present iff the worker resolved
@@ -5014,6 +5056,9 @@ def _task_info_field() -> dict:
                 # headless-task-execution, "Info live durante il task");
                 # absent when no model was requested.
                 running["model"] = _TASK_STATE.get("model")
+            if _TASK_STATE.get("variant"):
+                # Same contract as `model` (spec R8a).
+                running["variant"] = _TASK_STATE.get("variant")
             return running
         # Idle: surface the last terminal record for observability (task 5.8).
         return {

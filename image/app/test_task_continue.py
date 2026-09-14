@@ -149,7 +149,7 @@ class WorkerContinueTests(unittest.TestCase):
         self._continue_session = None
 
     def _run_worker(self, continue_session, session_id_hint, resolved_session,
-                      model=None):
+                      model=None, variant=None):
         # Mirror the submit handler: it records continue_requested at accept.
         self._continue_session = continue_session
         if continue_session:
@@ -184,6 +184,7 @@ class WorkerContinueTests(unittest.TestCase):
                 continue_session=continue_session,
                 session_id_hint=session_id_hint,
                 workspace="ws", harness="opencode", model=model,
+                variant=variant,
             )
         return recorded, finished, resolve
 
@@ -249,6 +250,36 @@ class WorkerContinueTests(unittest.TestCase):
                 True, None, "ses_old", model="explicit/other-model"
             )
         preserved.assert_not_called()
+        self.assertEqual(
+            recorded["argv"],
+            ("opencode", "ses_old", "hi", "explicit/other-model", None),
+        )
+
+    def test_explicit_variant_wins_over_stored_variant(self):
+        # An explicit --variant always wins; the model still comes from the
+        # stored session when no explicit --model was given.
+        with patch.object(
+            main, "_opencode_continue_model",
+            return_value=("amazon-bedrock/stored-model", "low"),
+        ):
+            recorded, _, _ = self._run_worker(
+                True, None, "ses_old", variant="high"
+            )
+        self.assertEqual(
+            recorded["argv"],
+            ("opencode", "ses_old", "hi", "amazon-bedrock/stored-model", "high"),
+        )
+
+    def test_explicit_model_drops_stored_variant(self):
+        # Explicit --model resets the effort to the model's default: the
+        # stored variant belongs to the previous model.
+        with patch.object(
+            main, "_opencode_continue_model",
+            return_value=("amazon-bedrock/stored-model", "low"),
+        ):
+            recorded, _, _ = self._run_worker(
+                True, None, "ses_old", model="explicit/other-model"
+            )
         self.assertEqual(
             recorded["argv"],
             ("opencode", "ses_old", "hi", "explicit/other-model", None),

@@ -137,6 +137,7 @@ class TaskModelTests(unittest.TestCase):
                 "prompt": None,
                 "harness": None,
                 "model": None,
+                "variant": None,
                 "thread": None,
                 "async_task_handle": None,
             })
@@ -189,9 +190,11 @@ class TaskModelTests(unittest.TestCase):
         self.assertEqual(len(self.uploads), 1)
         self.assertEqual(self.uploads[0]["model"], MODEL)
         self.assertEqual(main._TASK_STATUS["model"], MODEL)
-        # Worker thread receives the model as its last positional arg.
+        # Worker thread receives model and variant as its last two
+        # positional args (variant None when not requested).
         self.assertEqual(len(FakeThread.instances), 1)
-        self.assertEqual(FakeThread.instances[0].args[-1], MODEL)
+        self.assertEqual(FakeThread.instances[0].args[-2], MODEL)
+        self.assertIsNone(FakeThread.instances[0].args[-1])
 
     def test_running_info_surface_includes_model(self):
         self.submit(model=MODEL)
@@ -236,6 +239,7 @@ class TaskModelTests(unittest.TestCase):
         self.assertEqual(len(self.uploads), 1)
         self.assertNotIn("model", self.uploads[0])
         self.assertNotIn("model", main._TASK_STATUS)
+        self.assertIsNone(FakeThread.instances[0].args[-2])
         self.assertIsNone(FakeThread.instances[0].args[-1])
         info = main._task_info_field()
         self.assertNotIn("model", info)
@@ -582,6 +586,177 @@ class OpencodeContinueModelTests(unittest.TestCase):
                 main._build_headless_argv("opencode", "ses", "p", MODEL),
                 main._build_headless_argv("opencode", "ses", "p", MODEL, None),
             )
+
+
+class TaskVariantTests(unittest.TestCase):
+    """Explicit `--variant` handling mirrors `--model` (present-iff-requested
+    on ack, state, status, heartbeat, terminal record and info)."""
+
+    def setUp(self):
+        main._HARNESS["value"] = "opencode"
+        main._WORKSPACE_NAME["value"] = "workspace"
+        main._SESSION_EPOCH["value"] = 0
+        main._STORAGE_BACKEND["value"] = "session"
+        main.CHECKPOINT_BUCKET = ""
+        self._reset_slot()
+        FakeThread.instances = []
+        self.uploads = []
+
+        patches = [
+            patch.object(main.threading, "Thread", FakeThread),
+            patch.object(
+                main, "_upload_task_status",
+                side_effect=lambda ws, status: self.uploads.append(dict(status)) or True,
+            ),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _reset_slot(self):
+        with main._TASK_LOCK:
+            main._TASK_STATE.update({
+                "task_id": None,
+                "state": "idle",
+                "prompt": None,
+                "harness": None,
+                "model": None,
+                "variant": None,
+                "thread": None,
+                "async_task_handle": None,
+            })
+        main._TASK_STATUS.clear()
+        main._TASK_STATUS["state"] = "none"
+
+    def submit(self, **updates):
+        payload = {
+            "action": "task",
+            "workspace": "workspace",
+            "harness": "opencode",
+            "prompt": "build and test",
+        }
+        payload.update(updates)
+        return main.invoke(payload)
+
+    def test_malformed_variant_rejected_without_any_mutation(self):
+        for variant in ("", "high effort", "high;rm", 123, None):
+            with self.subTest(variant=variant):
+                response = self.submit(variant=variant)
+                self.assertEqual(response["status"], "error")
+                self.assertIn("variant", response["message"])
+                self.assertEqual(main._TASK_STATE["state"], "idle")
+                self.assertIsNone(main._TASK_STATE["task_id"])
+                self.assertEqual(self.uploads, [])
+                self.assertEqual(FakeThread.instances, [])
+
+    def test_valid_variant_is_echoed_and_recorded(self):
+        response = self.submit(model=MODEL, variant="high")
+
+        self.assertEqual(response["status"], "accepted")
+        self.assertEqual(response["model"], MODEL)
+        self.assertEqual(response["variant"], "high")
+        self.assertEqual(main._TASK_STATE["variant"], "high")
+        self.assertEqual(len(self.uploads), 1)
+        self.assertEqual(self.uploads[0]["variant"], "high")
+        self.assertEqual(main._TASK_STATUS["variant"], "high")
+        self.assertEqual(len(FakeThread.instances), 1)
+        self.assertEqual(FakeThread.instances[0].args[-2], MODEL)
+        self.assertEqual(FakeThread.instances[0].args[-1], "high")
+        info = main._task_info_field()
+        self.assertEqual(info["variant"], "high")
+
+    def test_variant_without_model_is_accepted(self):
+        response = self.submit(variant="high")
+        self.assertEqual(response["status"], "accepted")
+        self.assertEqual(response["variant"], "high")
+        self.assertNotIn("model", response)
+
+    def test_absent_variant_stays_absent(self):
+        response = self.submit(model=MODEL)
+
+        self.assertEqual(response["status"], "accepted")
+        self.assertNotIn("variant", response)
+        self.assertIsNone(main._TASK_STATE["variant"])
+        self.assertNotIn("variant", self.uploads[0])
+        self.assertNotIn("variant", main._TASK_STATUS)
+        self.assertIsNone(FakeThread.instances[0].args[-1])
+        self.assertNotIn("variant", main._task_info_field())
+
+    def test_stale_variant_from_previous_task_is_dropped(self):
+        self.submit(model=MODEL, variant="high")
+        self._reset_slot()
+        main._TASK_STATUS["variant"] = "high"  # simulate leftover record
+
+        self.submit(model=MODEL)
+        self.assertNotIn("variant", main._TASK_STATUS)
+
+    def test_heartbeat_preserves_variant_field(self):
+        self.submit(model=MODEL, variant="high")
+        task_id = main._TASK_STATE["task_id"]
+
+        class OneIterationStop:
+            def __init__(self):
+                self.checks = 0
+
+            def is_set(self):
+                self.checks += 1
+                return self.checks > 2
+
+            def wait(self, _timeout):
+                return None
+
+        calls = []
+        with patch.object(
+            main, "_download_task_status",
+            return_value={"state": "running", "task_id": task_id},
+        ), patch.object(
+            main, "_upload_task_status",
+            side_effect=lambda ws, s: calls.append(dict(s)) or True,
+        ):
+            main._run_task_heartbeat(
+                "workspace", task_id, OneIterationStop(), "opencode",
+                MODEL, "high",
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["variant"], "high")
+        self.assertEqual(calls[0]["model"], MODEL)
+
+    def test_finish_task_terminal_record_includes_variant_only_when_requested(self):
+        import threading as real_threading
+
+        for variant, expect_key in (("high", True), (None, False)):
+            with self.subTest(variant=variant):
+                self.uploads.clear()
+                stop = real_threading.Event()
+                thread = real_threading.Thread(target=lambda: None)
+                thread.start()
+                with patch.object(main, "_do_checkpoint", return_value={
+                    "status": "ok", "manifest_written": True, "db_backup": "ok",
+                }):
+                    main._finish_task(
+                        task_id="t-1",
+                        prompt="p",
+                        started=main._utcnow(),
+                        started_ts=0.0,
+                        harness="opencode",
+                        harness_session_id=None,
+                        state="succeeded",
+                        exit_code=0,
+                        error=None,
+                        output="done",
+                        output_truncated=False,
+                        workspace="workspace",
+                        async_handle=None,
+                        heartbeat_stop=stop,
+                        heartbeat_thread=thread,
+                        model=MODEL,
+                        variant=variant,
+                    )
+                self.assertEqual(len(self.uploads), 1)
+                if expect_key:
+                    self.assertEqual(self.uploads[0]["variant"], "high")
+                else:
+                    self.assertNotIn("variant", self.uploads[0])
 
 
 if __name__ == "__main__":

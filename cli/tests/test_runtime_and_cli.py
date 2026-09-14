@@ -60,6 +60,24 @@ class PayloadBuilderTests(unittest.TestCase):
         self.assertEqual(with_default, explicit_empty)
         self.assertNotIn("model", json.loads(with_default))
 
+    def test_task_payload_includes_variant_when_given(self):
+        data = json.loads(runtime.payload_task(
+            "ws", "opencode", "hi", False, variant="high"
+        ))
+        self.assertEqual(data["variant"], "high")
+
+    def test_task_payload_omits_empty_variant(self):
+        data = json.loads(runtime.payload_task("ws", "opencode", "hi", False, variant=""))
+        self.assertNotIn("variant", data)
+
+    def test_task_payload_without_variant_is_byte_identical_to_legacy_shape(self):
+        with_default = runtime.payload_task("ws", "opencode", "hi", True, 30, "s3", 2)
+        explicit_empty = runtime.payload_task(
+            "ws", "opencode", "hi", True, 30, "s3", 2, variant=""
+        )
+        self.assertEqual(with_default, explicit_empty)
+        self.assertNotIn("variant", json.loads(with_default))
+
     def test_task_payload_continue_false(self):
         payload = runtime.payload_task("ws", "claude", "hi", False)
         self.assertIs(json.loads(payload)["continue"], False)
@@ -306,6 +324,9 @@ class HelpTextTests(unittest.TestCase):
             cli_mod.USAGE_TEXT,
         )
 
+    def test_global_help_lists_task_variant_flag(self):
+        self.assertIn("[--variant <name>]", cli_mod.USAGE_TEXT)
+
     def test_explains_workspace_session_mapping_storage(self):
         self.assertIn("SCH generates runtimeSessionId; AWS does not assign it", cli_mod.USAGE_TEXT)
         self.assertIn("~/.config/sch/workspaces", cli_mod.USAGE_TEXT)
@@ -378,6 +399,18 @@ class RunArgumentTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     run_cmd._parse_args(["ws", "--model", model])
 
+    def test_run_variant_is_rejected_with_remedy(self):
+        # The pinned opencode TUI has no --variant flag, so `sch run` fails
+        # fast with the remedy instead of the generic unknown-option error.
+        for args in (["ws", "--variant", "high"], ["ws", "--variant"]):
+            with self.subTest(args=args):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit):
+                        run_cmd._parse_args(args)
+                self.assertIn("--variant", err.getvalue())
+                self.assertIn("sch task --variant", err.getvalue())
+
     def test_local_help_lists_model_and_exits_successfully(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -417,9 +450,36 @@ class SharedModelValidationTests(unittest.TestCase):
         self.assertEqual(helper.call_count, 2)
 
 
+class SharedVariantValidationTests(unittest.TestCase):
+    """Same syntactic rule as --model, dedicated helper so the usage error
+    names the right flag."""
+
+    def test_valid_variant_is_returned(self):
+        for variant in ("high", "xhigh", "minimal", "max"):
+            with self.subTest(variant=variant):
+                self.assertEqual(cli_mod.validate_variant_or_die(variant), variant)
+
+    def test_empty_variant_dies(self):
+        with self.assertRaises(SystemExit):
+            cli_mod.validate_variant_or_die("")
+
+    def test_out_of_allowlist_variant_dies(self):
+        for variant in ("high effort", "high;rm", "high\nlow"):
+            with self.subTest(variant=variant):
+                with self.assertRaises(SystemExit):
+                    cli_mod.validate_variant_or_die(variant)
+
+    def test_error_names_variant_flag(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                cli_mod.validate_variant_or_die("bad variant")
+        self.assertIn("--variant", err.getvalue())
+
+
 class TaskArgumentTests(unittest.TestCase):
     def test_parses_valid_model(self):
-        ws, harness, model, branch, cont, timeout, prompt, options, handoff, handoff_session, sanitize = task_cmd._parse_args([
+        ws, harness, model, variant, branch, cont, timeout, prompt, options, handoff, handoff_session, sanitize = task_cmd._parse_args([
             "ws", "--harness", "claude", "--model",
             "eu.anthropic.claude-haiku-4-5-20251001-v1:0", "build and test",
         ])
@@ -454,7 +514,7 @@ class TaskArgumentTests(unittest.TestCase):
     def test_model_after_separator_is_prompt_text(self):
         # Existing `--` contract: everything after it is prompt text, so
         # `--model x` becomes prompt words and no model is selected.
-        ws, harness, model, branch, cont, timeout, prompt, options, handoff, handoff_session, sanitize = task_cmd._parse_args(
+        ws, harness, model, variant, branch, cont, timeout, prompt, options, handoff, handoff_session, sanitize = task_cmd._parse_args(
             ["ws", "--", "--model", "x"]
         )
         self.assertEqual(model, "")
@@ -465,10 +525,10 @@ class TaskArgumentTests(unittest.TestCase):
             ["ws", "--model", "provider/model-id", "--", "build", "the", "app"]
         )
         self.assertEqual(result[2], "provider/model-id")
-        self.assertEqual(result[6], "build the app")
+        self.assertEqual(result[7], "build the app")
 
     def test_model_combines_with_continue_and_timeout(self):
-        ws, harness, model, branch, cont, timeout, prompt, options, handoff, handoff_session, sanitize = task_cmd._parse_args([
+        ws, harness, model, variant, branch, cont, timeout, prompt, options, handoff, handoff_session, sanitize = task_cmd._parse_args([
             "ws", "--continue", "--model", "provider/model-id",
             "--timeout", "120", "proceed",
         ])
@@ -476,6 +536,48 @@ class TaskArgumentTests(unittest.TestCase):
         self.assertTrue(cont)
         self.assertEqual(timeout, "120")
         self.assertEqual(prompt, "proceed")
+
+    def test_parses_valid_variant(self):
+        result = task_cmd._parse_args(
+            ["ws", "--model", "provider/model-id", "--variant", "high", "build"]
+        )
+        self.assertEqual(result[2], "provider/model-id")
+        self.assertEqual(result[3], "high")
+        self.assertEqual(result[7], "build")
+
+    def test_variant_is_optional(self):
+        self.assertEqual(task_cmd._parse_args(["ws", "build"])[3], "")
+
+    def test_rejects_missing_variant_value(self):
+        with self.assertRaises(SystemExit):
+            task_cmd._parse_args(["ws", "--variant"])
+
+    def test_rejects_empty_variant(self):
+        with self.assertRaises(SystemExit):
+            task_cmd._parse_args(["ws", "--variant", "", "build"])
+
+    def test_rejects_variant_with_spaces(self):
+        with self.assertRaises(SystemExit):
+            task_cmd._parse_args(["ws", "--variant", "high effort", "build"])
+
+    def test_rejects_variant_characters_outside_allowlist(self):
+        for variant in ("high;rm", "high\nlow"):
+            with self.subTest(variant=variant):
+                with self.assertRaises(SystemExit):
+                    task_cmd._parse_args(["ws", "--variant", variant, "build"])
+
+    def test_variant_after_separator_is_prompt_text(self):
+        result = task_cmd._parse_args(["ws", "--", "--variant", "high"])
+        self.assertEqual(result[3], "")
+        self.assertEqual(result[7], "--variant high")
+
+    def test_non_opencode_harness_flag_with_variant_dies(self):
+        for flag in ("claude", "pi"):
+            with self.subTest(flag=flag):
+                with self.assertRaises(SystemExit):
+                    task_cmd._parse_args(
+                        ["ws", "--harness", flag, "--variant", "high", "build"]
+                    )
 
 
 class TaskModelSubmissionTests(unittest.TestCase):
@@ -546,6 +648,95 @@ class TaskModelSubmissionTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out.getvalue().strip(), "t-4")
         self.assertIn("did not echo requested model", err.getvalue())
+
+
+class TaskVariantSubmissionTests(unittest.TestCase):
+    """cmd_task propagates --variant into the payload, warns when the ack
+    does not echo it, and refuses non-opencode harnesses (spec R8a)."""
+
+    def setUp(self):
+        self.cfg = type("Config", (), {"region": "test", "ws_dir": Path("/nonexistent/sch-test-ws")})()
+
+    def _resolved(self, harness="opencode"):
+        return type(
+            "Resolved", (), {
+                "sid": "sid", "harness": harness, "identity": "ws",
+                "storage": "s3", "epoch": 1, "was_created": False,
+            }
+        )()
+
+    def _submit(self, args, ack, harness="opencode"):
+        responses = [
+            runtime.InvocationResult(True, json.dumps({"status": "ok", "storage": "s3"})),
+            runtime.InvocationResult(True, json.dumps(ack)),
+        ]
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(task_cmd.harness_mod, "resolve_harness", return_value=self._resolved(harness)), \
+             patch.object(task_cmd.sync_mod, "resolve_binding", return_value=None), \
+             patch.object(task_cmd.runtime, "invoke_verified", side_effect=responses) as invoke, \
+             patch.object(task_cmd.workspace, "mark_status"), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = task_cmd.cmd_task(self.cfg, args)
+        return code, out, err, invoke
+
+    def test_variant_reaches_task_payload(self):
+        code, out, err, invoke = self._submit(
+            ["ws", "--variant", "high", "build"],
+            {"status": "accepted", "task_id": "t-1", "variant": "high"},
+        )
+        self.assertEqual(code, 0)
+        task_payload = json.loads(invoke.call_args_list[1].args[2])
+        self.assertEqual(task_payload["variant"], "high")
+        self.assertEqual(out.getvalue().strip(), "t-1")
+        self.assertNotIn("did not echo requested variant", err.getvalue())
+
+    def test_payload_has_no_variant_field_without_flag(self):
+        code, out, err, invoke = self._submit(
+            ["ws", "build"], {"status": "accepted", "task_id": "t-2"},
+        )
+        self.assertEqual(code, 0)
+        task_payload = json.loads(invoke.call_args_list[1].args[2])
+        self.assertNotIn("variant", task_payload)
+        self.assertNotIn("did not echo requested variant", err.getvalue())
+
+    def test_missing_variant_echo_warns_but_prints_task_id(self):
+        code, out, err, _ = self._submit(
+            ["ws", "--variant", "high", "build"],
+            {"status": "accepted", "task_id": "t-3"},
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue().strip(), "t-3")
+        self.assertIn(
+            "runtime did not echo requested variant 'high'",
+            err.getvalue(),
+        )
+        self.assertIn("default effort", err.getvalue())
+
+    def test_model_and_variant_travel_together(self):
+        code, out, err, invoke = self._submit(
+            ["ws", "--model", "provider/model-id", "--variant", "high", "build"],
+            {"status": "accepted", "task_id": "t-4",
+             "model": "provider/model-id", "variant": "high"},
+        )
+        self.assertEqual(code, 0)
+        task_payload = json.loads(invoke.call_args_list[1].args[2])
+        self.assertEqual(task_payload["model"], "provider/model-id")
+        self.assertEqual(task_payload["variant"], "high")
+        self.assertNotIn("did not echo", err.getvalue())
+
+    def test_bound_non_opencode_workspace_rejected_before_warmup(self):
+        for harness in ("claude", "pi"):
+            with self.subTest(harness=harness):
+                with patch.object(task_cmd.runtime, "invoke_verified") as invoke, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self._submit(
+                            ["ws", "--variant", "high", "build"],
+                            {"status": "accepted", "task_id": "t-x"},
+                            harness=harness,
+                        )
+                # The binding gate dies before the warmup invocation.
+                self.assertEqual(invoke.call_count, 0)
 
 
 class RequiredCommandTests(unittest.TestCase):

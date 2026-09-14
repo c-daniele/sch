@@ -101,8 +101,8 @@ class FlagExclusionTests(unittest.TestCase):
 class ParseArgsTests(unittest.TestCase):
     def test_task_parses_branch(self):
         result = task_cmd._parse_args(["ws", "--branch", "feat/x", "build"])
-        self.assertEqual(result[3], "feat/x")
-        self.assertEqual(result[6], "build")
+        self.assertEqual(result[4], "feat/x")
+        self.assertEqual(result[7], "build")
 
     def test_run_parses_branch(self):
         result = run_cmd._parse_args(["ws", "--branch", "feat/x"])
