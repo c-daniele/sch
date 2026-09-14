@@ -2213,6 +2213,67 @@ def _opencode_resume_model(session_id: str | None) -> str | None:
     return None
 
 
+def _opencode_session_model_variant(session_id: str | None) -> tuple[str | None, str | None]:
+    """(model, variant) stored on an opencode session row, validated.
+
+    The session row's ``model`` JSON (``{providerID, id, variant?}``) is the
+    durable record of the model (and reasoning-effort variant, e.g. ``high``)
+    the operator selected in the TUI. Returns ``(None, None)`` when there is
+    no session, no row, no stored model, or anything fails to parse/validate
+    — callers degrade to the previous behavior (harness default). A stored
+    variant of ``"default"`` (opencode's sentinel for "no variant") is
+    normalized to ``None``.
+    """
+    if not session_id or not OPENCODE_DB_LOCAL.exists():
+        return None, None
+    try:
+        with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
+            row = conn.execute("SELECT model FROM session WHERE id = ?", (session_id,)).fetchone()
+        session_model = json.loads(row[0]) if row and row[0] else {}
+        if not isinstance(session_model, dict):
+            return None, None
+        provider = session_model.get("providerID") or session_model.get("provider") or ""
+        model_id = (
+            session_model.get("id") or session_model.get("modelID")
+            or session_model.get("modelId") or ""
+        )
+        if not isinstance(provider, str) or not isinstance(model_id, str):
+            return None, None
+        model = "{}/{}".format(provider, model_id) if provider and model_id else ""
+        if not model or not MODEL_ID_RE.fullmatch(model):
+            return None, None
+        variant = session_model.get("variant") or ""
+        if not isinstance(variant, str) or variant in ("", "default"):
+            return model, None
+        if not MODEL_ID_RE.fullmatch(variant):
+            return model, None
+        return model, variant
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _opencode_continue_model(session_id: str | None) -> tuple[str | None, str | None]:
+    """(model, variant) a headless ``--continue`` should forward for opencode.
+
+    Without an explicit ``--model`` the headless argv switches the agent to
+    ``remote-auto`` while passing no model: opencode resolves such a
+    model-less prompt to the agent's configured model, discarding the model
+    the operator selected in the TUI (and clobbering the session row). The
+    reasoning-effort variant (``--variant``, e.g. ``high``) is likewise lost,
+    since it resolves from the new agent. Forwarding the resumed session's
+    own stored model+variant preserves the TUI selection.
+
+    Precedence: an unavailable-provider session still resolves to the runtime
+    default model with no variant (existing ``_opencode_resume_model``
+    override — the stored provider cannot serve); otherwise the session's own
+    stored model+variant; ``(None, None)`` degrades to the harness default.
+    """
+    override = _opencode_resume_model(session_id)
+    if override:
+        return override, None
+    return _opencode_session_model_variant(session_id)
+
+
 def _opencode_api(method: str, path: str, payload: dict = None, timeout: float = 10.0):
     port = _SERVE_STATE.get("port") or OPENCODE_SERVE_PORT
     url = f"http://127.0.0.1:{port}{path}"
@@ -4424,12 +4485,13 @@ def _ensure_serve_supervisor_started() -> None:
 
 
 def _build_headless_argv(
-    harness: str, session_id: str | None, prompt: str, model: str | None = None
+    harness: str, session_id: str | None, prompt: str, model: str | None = None,
+    variant: str | None = None,
 ) -> list:
     """Per-harness headless argv builder (design D6, tasks 5.2/5.3; model
     mapping: design D3 of add-task-model-flag).
 
-    - opencode: `opencode run --session <id>? --model <id>? --agent remote-auto? --auto <prompt>`
+    - opencode: `opencode run --session <id>? --model <id>? --variant <v>? --agent remote-auto? --auto <prompt>`
     - claude:   `claude -p --resume <id>? --model <id>? --agent remote-auto? --dangerously-skip-permissions <prompt>`
     - pi:       `pi -p --session <path>? --provider amazon-bedrock --model <id>?
                  --append-system-prompt <remote-auto role file>? <prompt>`
@@ -4440,7 +4502,11 @@ def _build_headless_argv(
     default-on; OQ-MCP2 stays open — to be lifted empirically for claude only
     if `claude -p` is confirmed not to hang with a TTY). The optional model
     is inserted as a discrete `--model <id>` argv pair (no shell
-    interpolation); when empty the argv is byte-for-byte unchanged.
+    interpolation); when empty the argv is byte-for-byte unchanged. The
+    optional variant (opencode only: `--variant`, the provider-specific
+    reasoning effort such as `high`) follows the same discrete-pair rule and
+    is ignored for the other harnesses, which have no such flag on their
+    headless argv.
 
     add-pi-harness (design D3/D4): the pi argv carries NO auto-approval flag —
     Pi has no permission prompt by design, so the unattended-execution
@@ -4486,6 +4552,11 @@ def _build_headless_argv(
         argv += ["--session", session_id]
     if model:
         argv += ["--model", model]
+    if variant and MODEL_ID_RE.fullmatch(variant):
+        # Reasoning-effort variant (e.g. `high`): discrete pair like --model.
+        # A malformed value is dropped rather than failing the task — the turn
+        # then runs with the model's default effort.
+        argv += ["--variant", variant]
     if _TASK_AGENT:
         argv += ["--agent", _TASK_AGENT]  # default "remote-auto" (sch-remote-agents)
     argv += _TASK_AUTO_APPROVE_FLAGS  # default ["--auto"]
@@ -4665,14 +4736,26 @@ def _run_task(
     # is applied even on the headless path (spec: runtime-image,
     # "Esecuzione headless riusa il wrapper dispatcher").
     effective_model = model
+    effective_variant = None
     if harness == "opencode" and not effective_model:
-        effective_model = _opencode_resume_model(harness_session_id)
+        # No explicit --model: forward the resumed session's own stored
+        # model+variant so a headless --continue keeps the TUI selection
+        # (model and reasoning effort, e.g. `high`). Without this the
+        # --agent remote-auto switch resolves the turn to the agent's
+        # configured model and default effort, discarding the selection and
+        # clobbering the session row. An explicit --model always wins (its
+        # variant is the model's default: a stored variant belongs to the
+        # previous model). (None, None) degrades to the harness default.
+        effective_model, effective_variant = _opencode_continue_model(harness_session_id)
         if effective_model:
             logger.info(
-                "task %s overriding unavailable imported-session provider with model %s",
-                task_id, effective_model,
+                "task %s continuing opencode session %s with model %s%s",
+                task_id, harness_session_id, effective_model,
+                " variant {}".format(effective_variant) if effective_variant else "",
             )
-    argv = _build_headless_argv(harness, harness_session_id, prompt, effective_model)
+    argv = _build_headless_argv(
+        harness, harness_session_id, prompt, effective_model, effective_variant,
+    )
 
     proc = None
     exit_code = None

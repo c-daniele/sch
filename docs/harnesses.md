@@ -114,7 +114,7 @@ default**: a legacy index still reconciles to `opencode`.
 
 | harness   | headless argv (built by the shim)                                                                                  | session-resume flag  | auto-approval flag (argv-only)   |
 | --------- | ------------------------------------------------------------------------------------------------------------------ | -------------------- | -------------------------------- |
-| opencode  | `opencode run [--session <id>] --agent remote-auto --auto <prompt>`                                                | `--session <id>`     | `--auto`                         |
+| opencode  | `opencode run [--session <id>] [--model <id>] [--variant <v>] --agent remote-auto --auto <prompt>`                           | `--session <id>`     | `--auto`                         |
 | claude    | `claude -p [--resume <id>] --agent remote-auto --dangerously-skip-permissions <prompt>`                            | `--resume <id>`      | `--dangerously-skip-permissions` |
 | pi        | `pi -p [--session <path>] [--provider amazon-bedrock --model <id>] --append-system-prompt <role file> <prompt>`     | `--session <path>`   | **none — by design**             |
 
@@ -155,7 +155,13 @@ workspace's persisted harness**:
 
 - **opencode**: queries the `session` table in `opencode.db` for the row
   with the latest `time_updated` in the worktree's `directory`, then passes
-  `--session <id>` to `opencode run`.
+  `--session <id>` to `opencode run`. Without an explicit `--model`, the
+  resumed session's own stored model and reasoning-effort variant are
+  forwarded as `--model <id>`/`--variant <v>`, so a headless `--continue`
+  keeps the model and effort selected in the TUI (a model-less prompt would
+  otherwise resolve to the `remote-auto` agent's configured model and
+  default effort). An explicit `--model` wins; an unreadable session row
+  degrades to the harness default.
 - **claude**: `ls -t $CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/*.jsonl | head -1`,
   basename-strip the `.jsonl` to get the resume handle, then pass
   `--resume <id>` to `claude -p`. `<encoded-cwd>` is Claude's path encoding
