@@ -28,7 +28,7 @@ jobs:
         python: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Install the CLI package with the dev extra
@@ -56,7 +56,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: tunnel/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           # mirror-reconnect.test.js drives image/app/fs_sync_worker.py, the
           # image-side worker: same interpreter as the image.
@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Links, spec structure, account IDs, personal paths, language
