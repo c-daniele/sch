@@ -27,7 +27,7 @@ jobs:
         # runtime (infra/agent_runtime.yaml). Keep both green.
         python: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -50,7 +50,7 @@ jobs:
       matrix:
         node: ["20", "22"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -72,7 +72,7 @@ jobs:
     name: Documentation and hygiene checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -94,7 +94,7 @@ jobs:
       # integration" before scanning anything (seen on the first Dependabot PRs).
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history so the scan covers every commit in the push/PR range.
           fetch-depth: 0
