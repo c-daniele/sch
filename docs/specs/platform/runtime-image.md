@@ -131,6 +131,23 @@ Out of scope:
 
 **R46.** The image SHALL include the GitHub CLI (`gh`) at a fixed version declared as an `ARG` (`GH_VERSION`), installed from the versioned upstream release tarball with a build-time assertion that the installed version matches the pin; no floating downloads. Authentication comes exclusively from the per-session staged token (`GH_TOKEN`/`GITHUB_TOKEN`); no auth state is ever baked or persisted in the image.
 
+**R47.** AgentCore bills memory on the session's peak second, so the image SHALL
+bound transient peaks by default on every harness launch path (interactive
+dispatcher, headless task subprocess, serve supervisor): `NODE_OPTIONS` SHALL
+carry `--max-old-space-size=<SCH_NODE_HEAP_MB>` (default `1792`) and the build
+parallelism SHALL default to `SCH_BUILD_JOBS=2`, fanned out to `MAKEFLAGS`,
+`CMAKE_BUILD_PARALLEL_LEVEL`, `CARGO_BUILD_JOBS` and restated as
+`SCH_BUILD_JOBS` for repo runners (single source of truth: `_apply_memory_caps`
+in `image/app/main.py`, mirrored in `image/scripts/harness-wrapper.sh`).
+Precedence: an operator value already present (e.g. a larger heap for a
+known-big build) MUST win; `SCH_NODE_HEAP_MB=0` MUST disable the heap cap; an
+unparseable value MUST fall back to the default, never to uncapped. Deploy-time
+defaults SHALL be the `NodeHeapMb`/`BuildJobs` stack parameters (see
+[runtime-provisioning](runtime-provisioning.md)); per-workspace overrides are
+plain env and MUST NOT require a redeploy. A headless task that dies of memory
+pressure (V8 heap message, or exit 134/137 with an OOM/killed signature) MUST
+fail with the remediation naming both knobs, never as a bare non-zero exit.
+
 ## Behavior
 
 Pinned versions (single source of truth: `image/Dockerfile` `ARG`s; current values at rationalization time):
@@ -154,6 +171,7 @@ Pinned versions (single source of truth: `image/Dockerfile` `ARG`s; current valu
 Typical flows:
 - `sch open myws` → shim warms up (`noop`), seed-or-restore runs, readiness marker written, TUI launches through the dispatcher with the ENV bridge and `SCH_EXECUTION_MODE=interactive`.
 - `sch task myws --continue "..."` → `task` action returns a `task_id` sub-second, `/ping` is `HealthyBusy` until completion, `info` exposes the running task, Telegram receives the terminal event.
+- A headless task killed by memory pressure → terminal state carries the OOM remediation (`SCH_NODE_HEAP_MB`/`SCH_BUILD_JOBS`); raising the caps re-prices the billed peak.
 - MicroVM restart on empty session storage with an existing S3 checkpoint → L2 restore instead of fresh seed; restored config is the user's, not the default.
 - Interactive milestone while a client is attached → suppressed at the spool; emitted detached → delivered even if a client reconnects before sending.
 
@@ -167,6 +185,7 @@ Typical flows:
 - **I6.** `/ping` returns `HealthyBusy` for the entire duration of an active headless task and `Healthy` when the slot is free.
 - **I7.** Absent/corrupted/expired presence state is treated as detached, never as a blocker.
 - **I8.** Build-time artifacts land only in `/app/*-templates/`; `/home/sch/.claude` is empty at build time.
+- **I9.** No harness, build, or headless task process in the microVM runs without the R47 caps unless the operator explicitly disabled or overrode them; caps never silently vanish (typo falls back to the default).
 
 ## Cross-references
 
@@ -180,3 +199,4 @@ Typical flows:
 - [telegram-interaction](../access-surfaces/telegram-interaction.md) — Inbound command queue and remote permission broker.
 - [MANIFESTO](../../../MANIFESTO.md)
 - Code: `image/Dockerfile`, `image/app/main.py` (shim), `image/app/telegram_notifier.py`, `image/scripts/init-workspace.sh`, `image/scripts/harness-wrapper.sh` (dispatcher), `image/scripts/sch-build-image.sh`, `image/claude-templates/`, `image/opencode-templates/`, `image/pi-templates/`, `bin/verify-multi-harness.sh`, `bin/verify-l2.sh`, `bin/verify-headless-tasks.sh`
+- Memory-cost footprint: `image/app/test_memory_footprint.py`, `bin/mem-trace.sh`, [memory peak attribution](../../history/memory-peak-attribution.md)

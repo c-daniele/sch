@@ -531,8 +531,11 @@ container-level checks (source-building a C extension, `npm ci` driving node-gyp
 seeded-template contents on both harnesses) live in `image/test-local.sh`
 (section 11, plus sections 9 and 10b).
 
-**Known trade-off (follow-up):** project-local `.venv/` and `node_modules/` live
-on `/mnt/workspace`, so they inflate the L2 checkpoint tar (`_create_archive`)
-and the `sch acp` fs-sync mirror. Accepted here and left as an explicit
-follow-up change; the lockfile-first guidance keeps those directories disposable
-(delete them and `uv sync`/`npm ci` recreates them).
+**Resolved (TASK-1):** project-local `.venv/` and `node_modules/` no longer
+ride the L2 checkpoint tar or the repo fingerprint (spec
+[workspace-checkpointing](specs/workspace-lifecycle/workspace-checkpointing.md)
+R21; the `sch acp` fs-sync mirror already ignored them) — the env is rebuilt
+best-effort after an L2 restore. They still live on `/mnt/workspace`, so they
+still count against the 1 GB session-storage budget; the lockfile-first
+guidance keeps them disposable (delete them and `uv sync`/`npm ci` recreates
+them).

@@ -1,9 +1,10 @@
 ---
 id: TASK-1.4
 title: 'Lifecycle guardrails: idle timeout, recycle-after-peak, cost alarm'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-14 08:42'
+updated_date: '2026-09-14 19:02'
 labels: []
 dependencies: []
 parent_task_id: TASK-1

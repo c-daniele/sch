@@ -169,6 +169,20 @@ the previous one is no longer used) → reopening → assertion that the worktre
 OpenCode sessions, and the config have been restored. Each check SHALL report an explicit
 pass/fail outcome.
 
+**R21.** The repo archive and the repo fingerprint SHALL exclude regenerable
+directories by name (`node_modules`, `.venv`, `venv`, build outputs and caches —
+single source of truth: `REPO_CHECKPOINT_EXCLUDE_NAMES` in `image/app/main.py`),
+matched as whole path segments at any depth, so nested copies are skipped too.
+`.git` (R1: Git metadata rides the checkpoint) and source files MUST NOT be
+excluded. After an L2 restore the shim SHALL rebuild the missing project envs
+best-effort (`npm ci` for a lockfile'd Node project, `uv sync` for a
+`uv.lock`/`pyproject.toml` Python project, `pip install -r requirements.txt`
+otherwise), under the memory caps of
+[runtime-image](../platform/runtime-image.md) R47 and never fail-closed
+(`SCH_REBUILD_ENV_ON_RESTORE=0` disables the rebuild; every failure only
+logs). The first checkpoint after enabling the excludes re-uploads the repo
+once, smaller; unchanged workspaces keep performing zero uploads (I2).
+
 ## Behavior
 
 - Checkpoint fires with worktree changes (even without a commit) → the repo archive on S3
@@ -187,6 +201,9 @@ pass/fail outcome.
 - Restart with empty storage and an existing checkpoint → worktree, OpenCode state,
   config, and claude/pi JSONL state restored; sessions reappear with history at the next
   TUI startup; the manifest's `harness` drives seed, restore, and dispatcher.
+- Restore of a Node/Python workspace → `node_modules`/`.venv` absent from the
+  archive and rebuilt best-effort after promotion; `sch status`/shim `info`
+  reports the rebuild outcome without failing the restore.
 - `sch status myws` with the microVM stopped → the operator sees
   `state`/`exit_code`/`finished_utc`/`harness` of the last task without waking the
   microVM; after a restart of a microVM that died mid-run, the state shows
@@ -228,11 +245,16 @@ later epoch.
 **I10.** `state=interrupted` is reachable only via orphan reconciliation (microVM died
 mid-run), never via the normal task execution path.
 
+**I11.** Nothing excluded from the repo archive by R21 is load-bearing for
+durability: every excluded name is regenerable by the post-restore rebuild,
+and no source file or Git metadata is ever excluded.
+
 ## Cross-references
 
 - Durability contract and loss window: [workspace-persistence](workspace-persistence.md).
 - Purge of the checkpoint prefixes at deletion: [workspace-deletion](workspace-deletion.md).
 - Rationalized from openspec/specs/workspace-checkpointing (git tag `pre-openspec-retirement`).
 - Headless task semantics: [headless-task-execution](../access-surfaces/headless-task-execution.md); harness binding: [harness-selection](../platform/harness-selection.md).
+- Memory caps and OOM contract: [runtime-image](../platform/runtime-image.md) R47.
 - [MANIFESTO](../../../MANIFESTO.md).
 - Code: `image/scripts/harness-wrapper.sh` (shim checkpoint/restore actions), `image/scripts/init-workspace.sh` (seed/restore bootstrap), CLI in `cli/sch`; end-to-end check in `bin/verify-l2.sh`.

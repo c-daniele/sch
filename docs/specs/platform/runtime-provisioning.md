@@ -82,6 +82,14 @@ Out of scope:
 
 **R16.** The rollback procedure SHALL be a single command (`sch destroy`, specified in [`installation.md`](installation.md)) covering both stacks, the repository contents and every bucket of the deployment, and SHALL be documented with an explicit warning that `DeleteAgentRuntime` also deletes the associated session storage.
 
+**R17.** The runtime stack SHALL expose the TASK-1 memory-cap defaults as
+parameters (`NodeHeapMb`, default 1792, 0 disables; `BuildJobs`, default 2,
+minimum 1), wired into the runtime environment as `SCH_NODE_HEAP_MB` /
+`SCH_BUILD_JOBS` and honored per [runtime-image](runtime-image.md) R47.
+`infra/deploy.sh` SHALL accept the same-named env overrides. Changing them
+SHALL redeploy in place without touching the image; per-workspace env
+overrides MUST NOT require even that.
+
 ## Behavior
 
 - `infra/deploy.sh` (or `sch deploy`) deploys `infra/bootstrap.yaml`, builds and pushes the arm64 image from `image/Dockerfile` on the bootstrap stack's build project (or locally with `-l`), then deploys `infra/agent_runtime.yaml`. The runtime environment receives `SCH_CHECKPOINT_BUCKET` and (when the in-session capability is enabled) the rebuild project variable consumed by `image/scripts/sch-build-image.sh`.

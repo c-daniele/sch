@@ -229,7 +229,6 @@
 # the never-overwrite seeding contract PRE-EXISTING workspaces keep their old
 # briefs (deleting a seeded template file re-seeds the new version at next
 # boot).
-
 # v30: add-pi-harness — Pi (`@earendil-works/pi-coding-agent`, MIT, pre-1.0) is
 # installed as the THIRD harness next to opencode and claude: pinned via
 # ARG PI_VERSION, `npm install -g --ignore-scripts` (supply-chain hardening
@@ -246,6 +245,18 @@
 # permission prompt and NO MCP support by design: the headless argv therefore
 # carries no auto-approve flag (conformant by construction) and the accepted
 # limits (no MCP/web/attach/handoff/acp) are documented in the README.
+
+# v32: memory-cost footprint (TASK-1, peak-memory billing) — AgentCore bills
+# the session on its peak second, so the image carries conservative default
+# caps: SCH_NODE_HEAP_MB=1792 (Node --max-old-space-size for harness, builds
+# and headless tasks) and SCH_BUILD_JOBS=2 (fanned out to MAKEFLAGS,
+# CMAKE_BUILD_PARALLEL_LEVEL, CARGO_BUILD_JOBS; also restated for repo
+# runners). Both are plain env overrides per workspace/deploy — raising them
+# re-prices the peak, see docs/deploy.md "Lifecycle and Costs". The L2
+# checkpoint excludes regenerable dirs (node_modules/.venv/build outputs,
+# see app/main.py REPO_CHECKPOINT_EXCLUDE_NAMES) and rebuilds the project env
+# best-effort after a restore (SCH_REBUILD_ENV_ON_RESTORE=1); the v29
+# follow-up debt note above is resolved by that change.
 
 # Must stay in the GLOBAL ARG scope (before the first FROM): an ARG declared
 # after a FROM belongs to that build stage and expands to "" in later FROM
@@ -751,6 +762,9 @@ ENV HOME=/home/sch \
     PI_TELEMETRY=0 \
     PI_SKIP_VERSION_CHECK=1 \
     SCH_DB_BACKUP_INTERVAL=60 \
+    SCH_NODE_HEAP_MB=1792 \
+    SCH_BUILD_JOBS=2 \
+    SCH_REBUILD_ENV_ON_RESTORE=1 \
     AWS_PROFILE=default \
     AWS_REGION=${SCH_AWS_REGION} \
     AWS_DEFAULT_REGION=${SCH_AWS_REGION} \

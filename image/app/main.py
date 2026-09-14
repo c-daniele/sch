@@ -434,6 +434,58 @@ CHECKPOINT_STATE: dict = {
 # cycle simply delays the next tick rather than piling up work.
 _CHECKPOINT_LOCK = threading.Lock()
 
+# --- Memory-cost footprint (TASK-1: peak-memory billing) -----------------------
+# AgentCore bills memory on the peak consumed up to each second, so one
+# transient spike prices the whole session. Three levers live here:
+# (1) REPO_CHECKPOINT_EXCLUDE_NAMES keeps regenerable dirs out of the repo
+# tarball and the repo fingerprint; (2) the SCH_NODE_HEAP_MB / SCH_BUILD_JOBS
+# caps bound transient build and harness peaks; (3) the env is rebuilt
+# best-effort after an L2 restore, since the excluded dirs no longer ride
+# the checkpoint. Defaults are image ENV / deploy parameters; every knob has
+# a per-workspace escape hatch (a plain env override, never a rebuild).
+#
+# The exclude list mirrors the fs-sync DEFAULT_IGNORE in fs_sync_worker.py
+# MINUS the entries that must stay durable: .git (spec checkpointing R1:
+# the archive includes Git metadata) and anything under state/ (the state
+# tarball is a different artifact with its own excludes). Names match whole
+# path segments at any depth, so nested node_modules/.venv copies are
+# skipped too. Never add source dirs here: an excluded name that also holds
+# operator sources would silently drop them from durability.
+REPO_CHECKPOINT_EXCLUDE_NAMES = frozenset({
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".cache",
+    "dist",
+    "build",
+    "coverage",
+    "htmlcov",
+    ".next",
+    ".nuxt",
+    "target",
+    ".codebase-memory",
+    "dummy_data",
+})
+# Heap cap (MB) for every Node process the shim spawns or fronts
+# (harness, headless tasks, serve supervisor). 1792 keeps a comfortable
+# distance from the ~2 GB mark on the smallest shapes while leaving headroom
+# for the shim + MCP children. "0" disables the cap (escape hatch for big
+# builds that would rather pay the peak than OOM); unparseable falls back
+# to the default so a typo never silently uncaps the session.
+NODE_HEAP_MB_DEFAULT = 1792
+# Build parallelism: one knob, fanned out to the build systems that honor
+# env (MAKEFLAGS, CMAKE_BUILD_PARALLEL_LEVEL, CARGO_BUILD_JOBS) and exported
+# as SCH_BUILD_JOBS for repo runners the shim cannot cap itself
+# (jest/vitest --maxWorkers, pytest -n, tsc -b). Default 2.
+BUILD_JOBS_DEFAULT = 2
+# Rebuild the excluded project env after an L2 restore ("1") or leave the
+# worktree as-restored ("0"). Best-effort either way: never fail-closed.
+REBUILD_ENV_ON_RESTORE_DEFAULT = "1"
+
 # --- Headless task state (Fase 1, sch-headless-tasks) --------------------------
 # Application timeout strictly below AgentCore MaxLifetime (8h) so the shim
 # owns the terminal state (design D7). Default 7h; clamp to safe range.
@@ -1559,6 +1611,107 @@ def _backup_db_durable() -> dict:
 
 # --- L2 checkpoint engine: fingerprints (design D3) -----------------------------
 
+def _node_heap_mb(env: dict | None = None) -> int:
+    """Heap cap in MB from SCH_NODE_HEAP_MB (TASK-1.2). 0 disables the cap;
+    unparseable falls back to NODE_HEAP_MB_DEFAULT (a typo must never
+    silently uncap the session)."""
+    raw = (env if env is not None else os.environ).get("SCH_NODE_HEAP_MB", "")
+    if raw is None or str(raw).strip() == "":
+        return NODE_HEAP_MB_DEFAULT
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        logger.warning("invalid SCH_NODE_HEAP_MB=%r; using default %s", raw, NODE_HEAP_MB_DEFAULT)
+        return NODE_HEAP_MB_DEFAULT
+    return max(0, value)
+
+
+def _build_jobs(env: dict | None = None) -> int:
+    """Build parallelism from SCH_BUILD_JOBS (TASK-1.2). At least 1;
+    unparseable falls back to BUILD_JOBS_DEFAULT."""
+    raw = (env if env is not None else os.environ).get("SCH_BUILD_JOBS", "")
+    if raw is None or str(raw).strip() == "":
+        return BUILD_JOBS_DEFAULT
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        logger.warning("invalid SCH_BUILD_JOBS=%r; using default %s", raw, BUILD_JOBS_DEFAULT)
+        return BUILD_JOBS_DEFAULT
+    return max(1, value)
+
+
+def _apply_memory_caps(env: dict) -> dict:
+    """Apply the TASK-1.2 caps to a child environment, in place and returned.
+
+    - NODE_OPTIONS gains --max-old-space-size=<heap> unless disabled
+      (SCH_NODE_HEAP_MB=0) or the flag is already present (operator override
+      wins, e.g. a larger heap for a known-big build).
+    - MAKEFLAGS gains -j<jobs> unless -j is already present.
+    - CMAKE_BUILD_PARALLEL_LEVEL / CARGO_BUILD_JOBS default to <jobs> when
+      absent (both are honored by their build systems; never overwrite).
+    - SCH_BUILD_JOBS is always (re)stated to the resolved value so repo
+      runners the shim cannot cap itself (jest/vitest --maxWorkers,
+      pytest -n auto, tsc) can read one knob.
+    """
+    heap_mb = _node_heap_mb(env)
+    jobs = _build_jobs(env)
+    if heap_mb > 0:
+        node_opts = env.get("NODE_OPTIONS", "")
+        if "max-old-space-size" not in node_opts:
+            flag = f"--max-old-space-size={heap_mb}"
+            env["NODE_OPTIONS"] = f"{node_opts} {flag}".strip()
+    makeflags = env.get("MAKEFLAGS", "")
+    if "-j" not in makeflags:
+        env["MAKEFLAGS"] = f"{makeflags} -j{jobs}".strip()
+    if not env.get("CMAKE_BUILD_PARALLEL_LEVEL"):
+        env["CMAKE_BUILD_PARALLEL_LEVEL"] = str(jobs)
+    if not env.get("CARGO_BUILD_JOBS"):
+        env["CARGO_BUILD_JOBS"] = str(jobs)
+    env["SCH_BUILD_JOBS"] = str(jobs)
+    return env
+
+
+# Substrings (lowercased) identifying an out-of-memory kill in harness
+# stderr. Matched only together with a suspicious exit code, or on their
+# own for the unambiguous V8 heap message — see _oom_remediation.
+_OOM_EXIT_CODES = frozenset({134, 137})
+_OOM_STDERR_PATTERNS = (
+    "javascript heap out of memory",
+    "heap out of memory",
+    "allocation failure",
+    "out of memory",
+    "cannot allocate memory",
+    "memory exhausted",
+)
+
+
+def _oom_remediation(stderr_data: str | None, exit_code: int | None) -> str | None:
+    """Return a remediation hint when a headless task died of memory pressure
+    (TASK-1.2: caps convert expensive-success into cheap-OOM, so the OOM must
+    fail loudly with the escape hatch attached). None for ordinary failures.
+
+    V8 prints 'JavaScript heap out of memory' and aborts (exit 134); the
+    kernel OOM-killer prints 'Killed' / 'Killed process' on the victim's
+    terminal (exit 137). Either is conclusive enough to name the knobs.
+    """
+    text = (stderr_data or "").lower()
+    if "javascript heap out of memory" in text or "heap out of memory" in text:
+        oom = True
+    elif exit_code in _OOM_EXIT_CODES and (
+        "killed" in text or any(p in text for p in _OOM_STDERR_PATTERNS)
+    ):
+        oom = True
+    else:
+        return None
+    return (
+        "likely out-of-memory kill under the TASK-1.2 memory caps: "
+        "re-run with a larger heap (SCH_NODE_HEAP_MB, default "
+        f"{NODE_HEAP_MB_DEFAULT}) or lower parallelism (SCH_BUILD_JOBS, "
+        f"default {BUILD_JOBS_DEFAULT}); e.g. SCH_NODE_HEAP_MB=4096 "
+        "SCH_BUILD_JOBS=1 for a known-big build. The uncapped peak is what "
+        "AgentCore bills, so raise the cap only as far as the build needs."
+    )
+
 def _git_head(repo_dir: Path) -> str:
     try:
         out = subprocess.run(
@@ -1586,8 +1739,15 @@ def _tree_fingerprint(
     path: Path,
     exclude_dirs: frozenset = frozenset(),
     exclude_files: frozenset = frozenset(),
+    exclude_dir_names: frozenset = frozenset(),
 ) -> str:
-    """Content-aware identity including paths, modes, content and deletions."""
+    """Content-aware identity including paths, modes, content and deletions.
+
+    exclude_dirs/exclude_files match exact paths; exclude_dir_names (TASK-1.3)
+    prunes every directory whose NAME matches, at any depth (regenerable
+    dirs such as node_modules/.venv live nested too). Pruned subtrees
+    contribute nothing — not even their dir entry — so creating or deleting
+    a regenerable dir never flips the fingerprint."""
     digest = hashlib.sha256()
     if not path.exists():
         digest.update(b"absent")
@@ -1597,7 +1757,7 @@ def _tree_fingerprint(
         kept_dirs = []
         for name in sorted(dirs):
             entry = root_path / name
-            if entry in exclude_dirs:
+            if entry in exclude_dirs or name in exclude_dir_names:
                 continue
             relative = entry.relative_to(path).as_posix().encode()
             if entry.is_symlink():
@@ -1640,7 +1800,12 @@ def _tree_fingerprint(
 
 
 def _fingerprint_repo() -> str:
-    return _tree_fingerprint(REPO_DIR)
+    # TASK-1.3: regenerable dirs are excluded from durability, so they must
+    # also be excluded from change detection — otherwise every `npm ci`
+    # would flip the fingerprint and force a full repo re-upload of content
+    # that is excluded from the archive anyway. First checkpoint after the
+    # upgrade re-uploads the repo once (smaller); later ticks stay quiet.
+    return _tree_fingerprint(REPO_DIR, exclude_dir_names=REPO_CHECKPOINT_EXCLUDE_NAMES)
 
 
 def _fingerprint_state() -> str:
@@ -1700,7 +1865,9 @@ def _run_tar_create(args: list, dest_tar: Path) -> bool:
     return False
 
 
-def _create_archive(src_dir: Path, dest_tar: Path, excludes: tuple = ()) -> bool:
+def _create_archive(
+    src_dir: Path, dest_tar: Path, excludes: tuple = (), exclude_names: frozenset = frozenset(),
+) -> bool:
     if not src_dir.exists():
         return False
     dest_tar.parent.mkdir(parents=True, exist_ok=True)
@@ -1711,6 +1878,20 @@ def _create_archive(src_dir: Path, dest_tar: Path, excludes: tuple = ()) -> bool
         except ValueError:
             continue
         args += ["--exclude", str(rel)]
+    # TASK-1.3: name-based excludes match whole path segments at any depth
+    # (nested node_modules/.venv copies too). In GNU tar `*` crosses `/`,
+    # so `<src>/*/<name>` covers depth >= 1 and `<src>/<name>` the top level;
+    # the trailing `/*` forms drop the contents even when the dir entry
+    # itself is still visited.
+    for name in sorted(exclude_names):
+        if not name or "/" in name or name in (".", ".."):
+            continue
+        args += [
+            "--exclude", f"{src_dir.name}/{name}",
+            "--exclude", f"{src_dir.name}/{name}/*",
+            "--exclude", f"{src_dir.name}/*/{name}",
+            "--exclude", f"{src_dir.name}/*/{name}/*",
+        ]
     args.append(src_dir.name)
     return _run_tar_create(args, dest_tar)
 
@@ -2751,7 +2932,9 @@ def _do_checkpoint(force: bool) -> dict:
         try:
             if force or new_fp["repo"] != prev_fp.get("repo"):
                 tar_path = tmp_dir / "repo.tar.gz"
-                if _create_archive(REPO_DIR, tar_path):
+                if _create_archive(
+                    REPO_DIR, tar_path, exclude_names=REPO_CHECKPOINT_EXCLUDE_NAMES,
+                ):
                     prev_sizes["repo"] = tar_path.stat().st_size
                     if upload_artifact(tar_path, "repo.tar.gz"):
                         uploaded.append("repo")
@@ -2966,6 +3149,74 @@ def _download_manifest(workspace: str) -> dict | None:
         raise ManifestReadError(f"manifest download failed: {exc}") from exc
 
 
+def _project_env_plan(repo_dir: Path) -> list:
+    """Which regenerable project envs need rebuilding (TASK-1.3).
+
+    Returns [(label, argv)] for envs whose manifest exists but whose
+    directory is absent — the exact state an L2 restore produces now that
+    node_modules/.venv no longer ride the repo tarball. Labels are stable
+    strings consumed by _maybe_rebuild_project_env and tests.
+    """
+    plan: list = []
+    if (repo_dir / "package.json").is_file() and not (repo_dir / "node_modules").is_dir():
+        if (repo_dir / "package-lock.json").is_file():
+            plan.append(("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"]))
+        else:
+            plan.append(("npm-install", ["npm", "install", "--no-audit", "--no-fund"]))
+    if not (repo_dir / ".venv").is_dir():
+        if (repo_dir / "uv.lock").is_file() or (repo_dir / "pyproject.toml").is_file():
+            plan.append(("uv-sync", ["uv", "sync"]))
+        elif (repo_dir / "requirements.txt").is_file():
+            plan.append((
+                "pip-install",
+                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+            ))
+    return plan
+
+
+def _maybe_rebuild_project_env() -> str:
+    """Best-effort rebuild of the excluded project env after an L2 restore
+    (TASK-1.3). Never fail-closed: every failure mode returns a
+    skipped-*/rebuild-failed status and logs loudly, so boot always proceeds.
+
+    Runs under the TASK-1.2 caps (a restore-time `npm ci` is itself a
+    transient spike candidate) with a bounded timeout per step.
+    """
+    if os.environ.get("SCH_REBUILD_ENV_ON_RESTORE", REBUILD_ENV_ON_RESTORE_DEFAULT) == "0":
+        return "skipped-disabled"
+    plan = _project_env_plan(REPO_DIR)
+    if not plan:
+        return "skipped-noop"
+    env = _apply_memory_caps(_child_env_with_provider_keys())
+    outcomes: list = []
+    for label, argv in plan:
+        if shutil.which(argv[0]) is None:
+            logger.warning("env rebuild: %s unavailable, skipping (%s)", argv[0], label)
+            outcomes.append(f"{label}:unavailable")
+            continue
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(REPO_DIR), env=env,
+                capture_output=True, text=True, timeout=600,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            logger.warning("env rebuild %s failed: %s", label, exc)
+            outcomes.append(f"{label}:failed")
+            continue
+        if proc.returncode != 0:
+            tail = ((proc.stderr or "")[-2000:] or f"exit {proc.returncode}").strip()
+            logger.warning("env rebuild %s failed: %s", label, tail)
+            outcomes.append(f"{label}:failed")
+        else:
+            logger.info("env rebuild %s succeeded", label)
+            outcomes.append(f"{label}:ok")
+    if any(o.endswith(":ok") for o in outcomes):
+        return "rebuilt"
+    if all(o.endswith(":unavailable") for o in outcomes):
+        return "skipped-unavailable"
+    return "rebuild-failed"
+
+
 def _restore_l2(workspace: str) -> dict:
     """Download + extract the S3 checkpoint into the active workspace root.
     Caller is responsible for the anti-clobber guard (_mount_storage_empty).
@@ -3120,11 +3371,18 @@ def _restore_l2(workspace: str) -> dict:
     if errors:
         logger.error("L2 restore for workspace '%s' incomplete: %s", workspace, errors)
         return {"attempted": True, "result": "error", "errors": errors, "harness": _resolve_harness()}
+    # TASK-1.3: node_modules/.venv no longer ride the checkpoint — rebuild
+    # them best-effort so the restored workspace is immediately usable.
+    # Never fail-closed: _maybe_rebuild_project_env only logs on failure.
+    env_rebuild = _maybe_rebuild_project_env()
     logger.info(
-        "L2 restore for workspace '%s' downloaded+extracted (harness=%s)",
-        workspace, _resolve_harness(),
+        "L2 restore for workspace '%s' downloaded+extracted (harness=%s, env_rebuild=%s)",
+        workspace, _resolve_harness(), env_rebuild,
     )
-    return {"attempted": True, "result": "downloaded", "harness": _resolve_harness()}
+    return {
+        "attempted": True, "result": "downloaded",
+        "harness": _resolve_harness(), "env_rebuild": env_rebuild,
+    }
 
 
 def _bootstrap() -> None:
@@ -4639,6 +4897,11 @@ def _headless_harness_env(harness: str) -> dict[str, str]:
     env = _child_env_with_provider_keys()
     env["SCH_HARNESS"] = harness
     env["SCH_EXECUTION_MODE"] = "headless"
+    # TASK-1.2: bound the transient spikes that poison peak billing on the
+    # headless path too (harness heap, build argv). Escape hatches are plain
+    # env overrides (SCH_NODE_HEAP_MB=0 / larger, SCH_BUILD_JOBS=N), honored
+    # by _apply_memory_caps without overwriting operator-set values.
+    _apply_memory_caps(env)
     for name in (
         "SCH_TELEGRAM_BOT_TOKEN",
         "SCH_TELEGRAM_CHAT_ID",
@@ -4859,7 +5122,14 @@ def _run_task(
             else:
                 state = "failed"
                 stderr_tail = (stderr_data or "")[-4000:]
-                error = stderr_tail or f"exit code {exit_code}"
+                # TASK-1.2: caps trade expensive-success for cheap-OOM — an
+                # OOM must fail loudly with the remediation attached, never
+                # as a bare non-zero exit.
+                oom_hint = _oom_remediation(stderr_data, exit_code)
+                if oom_hint:
+                    error = f"{stderr_tail or f'exit code {exit_code}'}\n{oom_hint}"
+                else:
+                    error = stderr_tail or f"exit code {exit_code}"
         except subprocess.TimeoutExpired:
             # Kill the entire process group (negative PID) so children die too.
             try:
@@ -5903,6 +6173,16 @@ def invoke(payload, context=None):
             "last_result": CHECKPOINT_STATE.get("last_result"),
             "last_attempt_utc": CHECKPOINT_STATE.get("last_attempt_utc"),
             "last_success_utc": CHECKPOINT_STATE.get("last_success_utc"),
+            # TASK-1: regenerable dirs excluded from the repo tarball +
+            # fingerprint, and the caps bounding transient peaks.
+            "repo_excludes": sorted(REPO_CHECKPOINT_EXCLUDE_NAMES),
+            "memory_caps": {
+                "node_heap_mb": _node_heap_mb(),
+                "build_jobs": _build_jobs(),
+                "rebuild_env_on_restore": os.environ.get(
+                    "SCH_REBUILD_ENV_ON_RESTORE", REBUILD_ENV_ON_RESTORE_DEFAULT,
+                ) != "0",
+            },
         }
         response["task"] = _task_info_field()
         # add-user-provider-keys: NAMES only, never values (spec:

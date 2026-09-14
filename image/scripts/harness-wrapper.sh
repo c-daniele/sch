@@ -77,6 +77,43 @@ export SCH_COMMAND_SHELL_PRESENCE_FILE="/tmp/sch-command-shell-presence.json"
 export UV_PYTHON="${UV_PYTHON:-python3.11}"
 export UV_PYTHON_DOWNLOADS="${UV_PYTHON_DOWNLOADS:-never}"
 
+# --- Memory-cost footprint (TASK-1.2: peak-memory billing) --------------------
+# AgentCore bills the session on its peak second, so the interactive path
+# carries the same caps the shim applies headlessly (see _apply_memory_caps
+# in app/main.py — same defaults, same precedence: an operator export wins,
+# SCH_NODE_HEAP_MB=0 disables the heap cap). SCH_BUILD_JOBS is restated so
+# repo runners (jest/vitest --maxWorkers, pytest -n, tsc) can read one knob.
+export SCH_NODE_HEAP_MB="${SCH_NODE_HEAP_MB:-1792}"
+export SCH_BUILD_JOBS="${SCH_BUILD_JOBS:-2}"
+case "${SCH_NODE_HEAP_MB}" in
+    ""|0)
+        ;;
+    *)
+        case "${NODE_OPTIONS:-}" in
+            *max-old-space-size*) ;;
+            *)
+                if [ -n "${NODE_OPTIONS:-}" ]; then
+                    export NODE_OPTIONS="${NODE_OPTIONS} --max-old-space-size=${SCH_NODE_HEAP_MB}"
+                else
+                    export NODE_OPTIONS="--max-old-space-size=${SCH_NODE_HEAP_MB}"
+                fi
+                ;;
+        esac
+        ;;
+esac
+case "${MAKEFLAGS:-}" in
+    *-j*) ;;
+    *)
+        if [ -n "${MAKEFLAGS:-}" ]; then
+            export MAKEFLAGS="${MAKEFLAGS} -j${SCH_BUILD_JOBS}"
+        else
+            export MAKEFLAGS="-j${SCH_BUILD_JOBS}"
+        fi
+        ;;
+esac
+export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-${SCH_BUILD_JOBS}}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${SCH_BUILD_JOBS}}"
+
 # --- Resolve harness -----------------------------------------------------------
 # Precedence: $SCH_HARNESS (shim headless subprocess) > mount marker > $0.
 HARNESS="${SCH_HARNESS:-}"

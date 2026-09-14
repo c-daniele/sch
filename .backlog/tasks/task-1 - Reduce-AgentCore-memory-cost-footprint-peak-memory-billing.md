@@ -1,9 +1,10 @@
 ---
 id: TASK-1
 title: Reduce AgentCore memory-cost footprint (peak-memory billing)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-14 08:41'
+updated_date: '2026-09-14 19:02'
 labels: []
 dependencies: []
 ordinal: 1000
@@ -22,3 +23,9 @@ AgentCore microVMs bill memory on peak-consumed-up-to-that-second per second (12
 - [ ] #3 Checkpoint artifacts exclude regenerable dirs with restore verified green
 - [ ] #4 Idle/lifecycle guidance plus cost alarm documented
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Attribute peak with mem-trace tool + local tar/fingerprint evidence (live billed-peak re-run is operator follow-up). 2. Cap Node heap + build parallelism in shim headless env, wrapper, image ENV, template params; loud OOM hint; escape hatch. 3. Exclude regenerable dirs from repo archive + repo fingerprint; best-effort env rebuild on restore; verify via bin/verify-l2.sh unit-level + local tar evidence. 4. Lifecycle guardrails: idle-timeout/stop/recycle guidance + CloudWatch MemoryUsed-GBHours alarm proposal in docs/deploy.md. 5. Specs (checkpointing R + runtime-image R), tests, verify-docs, journal + masterplan.
+<!-- SECTION:PLAN:END -->

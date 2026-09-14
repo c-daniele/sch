@@ -48,6 +48,25 @@ Parameters:
     Default: 28800
     MinValue: 60
     MaxValue: 28800
+  NodeHeapMb:
+    Type: Number
+    Description: >-
+      TASK-1 (peak-memory billing): default Node heap cap (MB) applied via
+      NODE_OPTIONS --max-old-space-size to the harness, builds and headless
+      tasks. 0 disables the cap. Per-workspace override needs no redeploy
+      (SCH_NODE_HEAP_MB env); raising it re-prices the billed peak, see
+      docs/deploy.md "Lifecycle and Costs".
+    Default: 1792
+    MinValue: 0
+  BuildJobs:
+    Type: Number
+    Description: >-
+      TASK-1 (peak-memory billing): default build parallelism, fanned out to
+      MAKEFLAGS, CMAKE_BUILD_PARALLEL_LEVEL, CARGO_BUILD_JOBS and restated as
+      SCH_BUILD_JOBS for repo runners. Per-workspace override needs no
+      redeploy (SCH_BUILD_JOBS env).
+    Default: 2
+    MinValue: 1
   MainInferenceProfileId:
     Type: String
     Description: Bedrock inference profile ID for the main model (see docs/history/implementation-findings.md, preflight)
@@ -1697,6 +1716,12 @@ Resources:
           - !Ref TelegramRoutingTable
           - !Ref AWS::NoValue
         SCH_PI_DEFAULT_MODEL: !Ref PiDefaultModel
+        # TASK-1 (peak-memory billing): deploy-time defaults for the transient
+        # peak caps (image ENV carries the same values; an explicit
+        # SCH_NODE_HEAP_MB/SCH_BUILD_JOBS in the session env wins per
+        # workspace without a redeploy).
+        SCH_NODE_HEAP_MB: !Ref NodeHeapMb
+        SCH_BUILD_JOBS: !Ref BuildJobs
         # add-user-provider-keys (design D5, BREAKING): NO provider API key is
         # exposed here any more. The SCH_*_API_KEY names stay the canonical
         # inert spelling the dispatcher recognizes, but their source is the

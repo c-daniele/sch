@@ -1,9 +1,10 @@
 ---
 id: TASK-1.3
 title: Exclude regenerable dirs from L2 checkpoint and fingerprint
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-14 08:41'
+updated_date: '2026-09-14 19:02'
 labels: []
 dependencies: []
 parent_task_id: TASK-1
