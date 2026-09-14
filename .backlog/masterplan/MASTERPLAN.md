@@ -14,7 +14,11 @@ This repository was published as a fresh history: the specifications under `docs
 
 ## Active work
 
-No active tasks. The board is empty (`backlog task list --plain` prints `No tasks found`). Create the first task with `backlog task create` per [AGENTS.md](../../AGENTS.md).
+No active tasks. The TASK-1 memory-cost work (TASK-1 through TASK-1.4) is
+done and recorded below; live-AWS follow-ups (billed-peak re-run, caps-on
+comparison, fresh bootstrap, full `verify-l2.sh` cycle, alarm threshold)
+are operator-side and named in each task summary. `backlog task list
+--plain` shows the completed tasks.
 
 ## Durable decisions
 
@@ -51,6 +55,8 @@ Architecture decisions are recorded in [`.backlog/decisions/`](../decisions/) (`
 - Journal: `.backlog/docs/journal/` (`backlog doc list --plain`).
 
 ## Journal
+
+- [2026-09-14 Reduce AgentCore memory-cost footprint](../docs/journal/doc-7%20-%202026-09-14-Reduce-AgentCore-memory-cost-footprint.md) — peak-memory billing: attribution tool+report, transient-peak caps, checkpoint excludes with post-restore rebuild, lifecycle guardrails + alarm proposal (TASK-1 through TASK-1.4).
 
 - [2026-09-14 Headless continue kept the conversation but lost the model](../docs/journal/doc-1%20-%202026-09-14-Headless-continue-kept-the-conversation-but-lost-the-model.md) — opencode `sch task --continue` now preserves the TUI-selected model and effort (TASK-2).
 - [2026-09-14 Continue-model override ignored staged provider keys](../docs/journal/doc-5%20-%202026-09-14-Continue-model-override-ignored-staged-provider-keys.md) — the override now treats staged-key providers as available (TASK-3).
