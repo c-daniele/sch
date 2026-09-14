@@ -148,7 +148,8 @@ class WorkerContinueTests(unittest.TestCase):
         })
         self._continue_session = None
 
-    def _run_worker(self, continue_session, session_id_hint, resolved_session):
+    def _run_worker(self, continue_session, session_id_hint, resolved_session,
+                      model=None):
         # Mirror the submit handler: it records continue_requested at accept.
         self._continue_session = continue_session
         if continue_session:
@@ -159,8 +160,8 @@ class WorkerContinueTests(unittest.TestCase):
         def fake_resolve(harness):
             return resolved_session
 
-        def fake_argv(harness, session_id, prompt, model):
-            recorded["argv"] = (harness, session_id, prompt, model)
+        def fake_argv(harness, session_id, prompt, argv_model, variant=None):
+            recorded["argv"] = (harness, session_id, prompt, argv_model, variant)
             return ["/bin/true"]
 
         def fake_finish(**kwargs):
@@ -182,7 +183,7 @@ class WorkerContinueTests(unittest.TestCase):
                 task_id="t1", prompt="hi", timeout_s=5,
                 continue_session=continue_session,
                 session_id_hint=session_id_hint,
-                workspace="ws", harness="opencode",
+                workspace="ws", harness="opencode", model=model,
             )
         return recorded, finished, resolve
 
@@ -225,6 +226,33 @@ class WorkerContinueTests(unittest.TestCase):
         self.assertEqual(recorded["argv"][1], "ses_hint")
         self.assertEqual(finished["harness_session_id"], "ses_hint")
         self.assertTrue(finished["continue_resolved"])
+
+    def test_continue_forwards_stored_model_and_variant(self):
+        # No explicit --model: the resumed session's stored model+variant
+        # (TUI selection) must reach the headless argv.
+        with patch.object(
+            main, "_opencode_continue_model",
+            return_value=("amazon-bedrock/muse-spark-1.3", "high"),
+        ) as preserved:
+            recorded, _, _ = self._run_worker(True, None, "ses_old")
+        preserved.assert_called_once_with("ses_old")
+        self.assertEqual(
+            recorded["argv"],
+            ("opencode", "ses_old", "hi", "amazon-bedrock/muse-spark-1.3", "high"),
+        )
+
+    def test_explicit_model_wins_and_skips_stored_lookup(self):
+        # An explicit --model always wins; the stored variant belongs to the
+        # previous model and must not leak into the argv.
+        with patch.object(main, "_opencode_continue_model") as preserved:
+            recorded, _, _ = self._run_worker(
+                True, None, "ses_old", model="explicit/other-model"
+            )
+        preserved.assert_not_called()
+        self.assertEqual(
+            recorded["argv"],
+            ("opencode", "ses_old", "hi", "explicit/other-model", None),
+        )
 
 
 class ResolveOrderingTests(unittest.TestCase):

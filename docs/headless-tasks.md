@@ -42,7 +42,8 @@ explicit model instead of the harness's default:
 - **Per-invocation semantics**: the value applies only to that submission.
   Nothing is persisted in workspace metadata, the local index, or the central
   registry; the next `sch task <ws>` without the flag runs with the harness's
-  default model again.
+  default model again — except an opencode `--continue`, which keeps the
+  resumed session's stored model (see below).
 - **Harness-specific id format**: the value is opaque to `sch` and forwarded
   verbatim to the harness — `provider/model-id` for OpenCode
   (`opencode run --model <id>`), a Bedrock inference-profile ID for Claude
@@ -55,14 +56,23 @@ explicit model instead of the harness's default:
   the harness's native error readable via `sch status`.
 - **Combines with `--continue`**: the resumed session runs its new turns with
   the requested model (native harness support); `sch` does not compare it
-  against the model of previous tasks.
+  against the model of previous tasks. Without `--model`, an opencode
+  `--continue` keeps the model and reasoning effort (e.g. `high`) selected
+  in the TUI: the shim forwards the resumed session's stored model as
+  `--model` and its stored effort as `--variant`. An explicit `--model`
+  overrides the model and drops the stored effort. There is no `--variant`
+  flag on `sch task` or `sch run`: an explicit effort cannot be requested,
+  only preserved from the resumed session.
 - **Interaction with `--`**: everything after `--` is prompt text, so the
   flag must precede `--` (`sch task ws -- --model x` submits the literal
   prompt `--model x`).
 - **Observability**: the accepted model is echoed in the submit ack and
   recorded in the task-status object (initial, heartbeats, terminal record),
   so `sch status <ws>` shows a `model` line for tasks submitted with the
-  flag. Absence of the field/line means "harness default model".
+  flag. Absence of the field/line means "harness default model" — except on
+  an opencode `--continue` without the flag, where it means "the resumed
+  session's stored model" (forwarded per above but not recorded as a
+  requested model).
 - **Older runtime image**: an image predating this feature ignores the field
   and runs the task with the default model; the CLI detects the missing echo
   in the ack and prints a stderr warning while still printing the `task_id`.

@@ -9,6 +9,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import types
@@ -370,6 +371,176 @@ class TaskModelTests(unittest.TestCase):
                     self.assertEqual(self.uploads[0]["model"], MODEL)
                 else:
                     self.assertNotIn("model", self.uploads[0])
+
+
+class OpencodeContinueModelTests(unittest.TestCase):
+    """`sch task --continue` without `--model` preserves the TUI-selected
+    model and reasoning-effort variant stored on the resumed session row."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self._saved_db = main.OPENCODE_DB_LOCAL
+        self._saved_config = main.OPENCODE_CONFIG_FILE
+        main.OPENCODE_DB_LOCAL = root / "opencode.db"
+        main.OPENCODE_CONFIG_FILE = root / "opencode.json"
+        self.addCleanup(setattr, main, "OPENCODE_DB_LOCAL", self._saved_db)
+        self.addCleanup(setattr, main, "OPENCODE_CONFIG_FILE", self._saved_config)
+        main.OPENCODE_CONFIG_FILE.write_text(json.dumps({
+            "model": "amazon-bedrock/remote-default",
+            "provider": {"amazon-bedrock": {"options": {}}},
+        }))
+
+    def _write_session(self, session_id, model_json):
+        main.OPENCODE_DB_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(str(main.OPENCODE_DB_LOCAL)) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS session "
+                "(id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER, title TEXT)"
+            )
+            try:
+                conn.execute("ALTER TABLE session ADD COLUMN model TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already present on a second write
+            conn.execute(
+                "INSERT OR REPLACE INTO session (id, directory, time_updated, title, model)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (session_id, "/repo", 1, "t", model_json),
+            )
+
+    def test_stored_model_and_variant_are_preserved(self):
+        self._write_session("ses_tui", json.dumps({
+            "providerID": "amazon-bedrock", "id": "muse-spark-1.3", "variant": "high",
+        }))
+        self.assertEqual(
+            main._opencode_continue_model("ses_tui"),
+            ("amazon-bedrock/muse-spark-1.3", "high"),
+        )
+
+    def test_stored_model_without_variant_preserves_model_only(self):
+        self._write_session("ses_plain", json.dumps({
+            "providerID": "amazon-bedrock", "id": "some-model",
+        }))
+        self.assertEqual(
+            main._opencode_continue_model("ses_plain"),
+            ("amazon-bedrock/some-model", None),
+        )
+
+    def test_default_variant_sentinel_is_dropped(self):
+        self._write_session("ses_def", json.dumps({
+            "providerID": "amazon-bedrock", "id": "some-model", "variant": "default",
+        }))
+        self.assertEqual(
+            main._opencode_continue_model("ses_def"),
+            ("amazon-bedrock/some-model", None),
+        )
+
+    def test_unavailable_provider_falls_back_to_default_without_variant(self):
+        # Existing imported-session override keeps working, and the stored
+        # variant (which belongs to the unavailable provider's model) is not
+        # carried over to the default model.
+        self._write_session("ses_foreign", json.dumps({
+            "providerID": "github-copilot", "id": "other-model", "variant": "high",
+        }))
+        self.assertEqual(
+            main._opencode_continue_model("ses_foreign"),
+            ("amazon-bedrock/remote-default", None),
+        )
+
+    def test_missing_session_degrades_to_default(self):
+        self.assertEqual(main._opencode_continue_model(None), (None, None))
+        self.assertEqual(main._opencode_continue_model("ses_absent"), (None, None))
+        # No DB file at all (fresh workspace): same degrade path.
+        main.OPENCODE_DB_LOCAL.unlink(missing_ok=True)
+        self.assertEqual(main._opencode_continue_model("ses_absent"), (None, None))
+
+    def test_malformed_stored_model_degrades_to_default(self):
+        # Configured provider but an unusable stored shape: nothing safe to
+        # forward, so degrade to the harness default.
+        for bad in (
+            "not-json", "[1, 2]", '{"id": "b"}',
+            json.dumps({"providerID": "amazon-bedrock"}),
+            json.dumps({"providerID": "amazon-bedrock", "id": "c d"}),
+            json.dumps({"providerID": "amazon-bedrock", "id": 123}),
+        ):
+            with self.subTest(bad=bad):
+                self._write_session("ses_bad", bad)
+                self.assertEqual(
+                    main._opencode_continue_model("ses_bad"), (None, None)
+                )
+
+    def test_malformed_row_with_unconfigured_provider_uses_default(self):
+        # The pre-existing imported-session override keys off the provider
+        # alone: an unconfigured provider can never serve, whatever else the
+        # row holds, so the runtime default still wins.
+        for bad in (
+            '{"providerID": "a"}',
+            json.dumps({"providerID": "a b", "id": "c"}),
+            json.dumps({"providerID": "a", "id": "c d"}),
+        ):
+            with self.subTest(bad=bad):
+                self._write_session("ses_bad", bad)
+                self.assertEqual(
+                    main._opencode_continue_model("ses_bad"),
+                    ("amazon-bedrock/remote-default", None),
+                )
+
+    def test_missing_model_column_degrades_to_default(self):
+        # Older opencode.db without the model column: SELECT raises, caught.
+        main.OPENCODE_DB_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(str(main.OPENCODE_DB_LOCAL)) as conn:
+            conn.execute(
+                "CREATE TABLE session "
+                "(id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER, title TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO session VALUES (?, ?, ?, ?)",
+                ("ses_old", "/repo", 1, "t"),
+            )
+        self.assertEqual(main._opencode_continue_model("ses_old"), (None, None))
+
+    def test_opencode_argv_carries_model_and_variant_pairs(self):
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+            argv = main._build_headless_argv(
+                "opencode", "ses_tui", "prompt",
+                "amazon-bedrock/muse-spark-1.3", "high",
+            )
+        self.assertEqual(
+            argv,
+            [
+                "/bin/opencode", "run", "--session", "ses_tui",
+                "--model", "amazon-bedrock/muse-spark-1.3",
+                "--variant", "high",
+                "--agent", main._TASK_AGENT,
+                *main._TASK_AUTO_APPROVE_FLAGS, "prompt",
+            ],
+        )
+
+    def test_malformed_variant_is_dropped_but_model_kept(self):
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+            argv = main._build_headless_argv(
+                "opencode", "ses_tui", "prompt", "prov/mod", "bad variant",
+            )
+        self.assertIn("--model", argv)
+        self.assertNotIn("--variant", argv)
+
+    def test_variant_is_ignored_for_other_harnesses(self):
+        argv = main._build_headless_argv("claude", "ses", "prompt", MODEL, "high")
+        self.assertIn("--model", argv)
+        self.assertNotIn("--variant", argv)
+        with patch.object(main.shutil, "which", return_value="/bin/pi"), patch.object(
+            type(main.PI_ROLE_REMOTE_AUTO), "is_file", return_value=False,
+        ):
+            pi_argv = main._build_headless_argv("pi", None, "prompt", MODEL, "high")
+        self.assertNotIn("--variant", pi_argv)
+
+    def test_argv_without_variant_is_byte_identical_to_before(self):
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+            self.assertEqual(
+                main._build_headless_argv("opencode", "ses", "p", MODEL),
+                main._build_headless_argv("opencode", "ses", "p", MODEL, None),
+            )
 
 
 if __name__ == "__main__":
