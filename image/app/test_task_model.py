@@ -383,14 +383,22 @@ class OpencodeContinueModelTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self._saved_db = main.OPENCODE_DB_LOCAL
         self._saved_config = main.OPENCODE_CONFIG_FILE
+        self._saved_keys = main.PROVIDER_KEYS_FILE
         main.OPENCODE_DB_LOCAL = root / "opencode.db"
         main.OPENCODE_CONFIG_FILE = root / "opencode.json"
+        main.PROVIDER_KEYS_FILE = root / "provider-keys.env"
         self.addCleanup(setattr, main, "OPENCODE_DB_LOCAL", self._saved_db)
         self.addCleanup(setattr, main, "OPENCODE_CONFIG_FILE", self._saved_config)
+        self.addCleanup(setattr, main, "PROVIDER_KEYS_FILE", self._saved_keys)
         main.OPENCODE_CONFIG_FILE.write_text(json.dumps({
             "model": "amazon-bedrock/remote-default",
             "provider": {"amazon-bedrock": {"options": {}}},
         }))
+
+    def _stage_keys(self, *names):
+        main.PROVIDER_KEYS_FILE.write_text(
+            "".join("{}=test-value\n".format(name) for name in names)
+        )
 
     def _write_session(self, session_id, model_json):
         main.OPENCODE_DB_LOCAL.parent.mkdir(parents=True, exist_ok=True)
@@ -445,6 +453,39 @@ class OpencodeContinueModelTests(unittest.TestCase):
         }))
         self.assertEqual(
             main._opencode_continue_model("ses_foreign"),
+            ("amazon-bedrock/remote-default", None),
+        )
+
+    def test_staged_key_provider_is_preserved(self):
+        # A key-based provider backed by a staged key CAN serve at runtime
+        # (the key makes it selectable with no login), so it must not hit
+        # the unavailable-provider override — this is the reported case.
+        self._stage_keys("SCH_OPENCODE_API_KEY")
+        self._write_session("ses_keyed", json.dumps({
+            "providerID": "opencode", "id": "muse-spark-1.3-contributor-free",
+            "variant": "xhigh",
+        }))
+        self.assertEqual(
+            main._opencode_continue_model("ses_keyed"),
+            ("opencode/muse-spark-1.3-contributor-free", "xhigh"),
+        )
+
+    def test_key_removed_mid_life_falls_back_to_default(self):
+        # Staging is total replacement ("last invoke wins"): a key removed
+        # after the session was created is gone at runtime, so the override
+        # correctly fires again.
+        self._stage_keys("SCH_OPENCODE_API_KEY")
+        self._write_session("ses_keyed", json.dumps({
+            "providerID": "opencode", "id": "muse-spark-1.3-contributor-free",
+            "variant": "xhigh",
+        }))
+        self.assertEqual(
+            main._opencode_continue_model("ses_keyed")[0],
+            "opencode/muse-spark-1.3-contributor-free",
+        )
+        self._stage_keys()  # user removed the key; empty staging file
+        self.assertEqual(
+            main._opencode_continue_model("ses_keyed"),
             ("amazon-bedrock/remote-default", None),
         )
 

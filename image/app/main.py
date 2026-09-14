@@ -2195,22 +2195,54 @@ def _seeded_opencode_model() -> tuple | None:
 
 
 def _opencode_resume_model(session_id: str | None) -> str | None:
-    """Use the runtime default when an imported session names an unavailable provider."""
+    """Use the runtime default when a session names an unavailable provider."""
     if not session_id or not OPENCODE_DB_LOCAL.exists():
         return None
     try:
-        config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
-        configured = set((config.get("provider") or {}).keys())
-        default_model = config.get("model") or ""
         with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
             row = conn.execute("SELECT model FROM session WHERE id = ?", (session_id,)).fetchone()
         session_model = json.loads(row[0]) if row and row[0] else {}
         provider = session_model.get("providerID") or ""
-        if provider and provider not in configured and isinstance(default_model, str) and "/" in default_model:
-            return default_model
+        if provider and provider not in _opencode_available_providers():
+            config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
+            default_model = config.get("model") or ""
+            if isinstance(default_model, str) and "/" in default_model:
+                return default_model
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+# Staged-key → opencode provider IDs (mirrors the dispatcher mapping in
+# harness-wrapper.sh: a staged key makes its provider selectable in opencode
+# with no `opencode auth login`). The seeded opencode.json names only
+# amazon-bedrock, so judging availability off the file alone would wrongly
+# report every key-based provider as unavailable.
+_STAGED_KEY_PROVIDERS = {
+    "SCH_ANTHROPIC_API_KEY": ("anthropic",),
+    "SCH_OPENCODE_API_KEY": ("opencode", "opencode-go"),
+    "SCH_OPENROUTER_API_KEY": ("openrouter",),
+    "SCH_KILO_API_KEY": ("kilo",),
+    # SCH_BEDROCK_API_KEY re-auths amazon-bedrock itself (bearer token), and
+    # amazon-bedrock additionally rides the execution role — available with or
+    # without any key, hence added unconditionally below.
+}
+
+
+def _opencode_available_providers() -> set:
+    """Provider IDs opencode can serve right now: config-file entries, plus
+    staged-key providers, plus amazon-bedrock via the execution role."""
+    try:
+        config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
+        configured = set((config.get("provider") or {}).keys())
+    except Exception:  # noqa: BLE001
+        configured = set()
+    staged = _read_staged_provider_keys()
+    for key, providers in _STAGED_KEY_PROVIDERS.items():
+        if staged.get(key):
+            configured.update(providers)
+    configured.add("amazon-bedrock")
+    return configured
 
 
 def _opencode_session_model_variant(session_id: str | None) -> tuple[str | None, str | None]:
