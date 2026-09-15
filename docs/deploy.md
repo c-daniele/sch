@@ -152,6 +152,64 @@ The default values remain adequate: 900s tolerates short pauses without
 an open shell; the cost of idle with an open shell is a conscious user
 choice, mitigated by `sch stop`. No changes to the template defaults.
 
+### Memory is billed on peak (TASK-1)
+
+AgentCore bills memory on the peak consumed up to each second (128 MB
+minimum) from boot until microVM shutdown: one transient spike prices the
+whole session, and releasing memory afterwards does not lower the bill.
+Attribution and local evidence: [Memory peak attribution](history/memory-peak-attribution.md).
+Three levers, in order of effect:
+
+1. **Never spike — caps.** Every harness launch path (interactive
+   dispatcher, headless task, serve supervisor) runs under
+   `SCH_NODE_HEAP_MB` (default `1792`, Node `--max-old-space-size`) and
+   `SCH_BUILD_JOBS` (default `2`, fanned out to `MAKEFLAGS`,
+   `CMAKE_BUILD_PARALLEL_LEVEL`, `CARGO_BUILD_JOBS`, restated for repo
+   runners). Deploy-time defaults are the `NodeHeapMb`/`BuildJobs` stack
+   parameters (`SCH_NODE_HEAP_MB=`/`SCH_BUILD_JOBS=` env on deploy);
+   per-workspace overrides are plain env and need no redeploy.
+   **Escape hatch for known-big builds:** `SCH_NODE_HEAP_MB=4096
+   SCH_BUILD_JOBS=1` (or `SCH_NODE_HEAP_MB=0` to uncap); raising the cap
+   re-prices the billed peak, so raise only as far as the build needs.
+   A task killed by the caps fails loudly naming both knobs (spec
+   [runtime-image](specs/platform/runtime-image.md) R47).
+2. **Shrink the checkpoint amplifier.** The repo tarball and fingerprint
+   exclude regenerable dirs (`node_modules`, `.venv`, build outputs —
+   spec [workspace-checkpointing](specs/workspace-lifecycle/workspace-checkpointing.md)
+   R21); the env is rebuilt best-effort after an L2 restore
+   (`SCH_REBUILD_ENV_ON_RESTORE=0` disables). Steady-state floor reference
+   (opencode harness, September 2026): `opencode` ~750 MB RSS, shim
+   ~150 MB, `mcp-proxy` ~100 MB, aws-docs MCP ~65 MB — ~1.4 GB before any
+   workload. Keep `context7` disabled unless needed; audit `serve` + MCP
+   children with `bin/mem-trace.sh` when the floor moves.
+3. **Short sessions after spikes — recycle.** `sch stop <ws>` runs the
+   forced synchronous checkpoint first and then stops the microVM
+   (compute meter stops); reopening starts a fresh `runtimeSessionId` on
+   the same `checkpoints/<ws>/` identity, so no work is lost and the next
+   session bills from a clean peak. Rule of thumb: after a heavy build or
+   test run, `sch stop` and reopen instead of idling — the idle tail after
+   a 7 GB peak bills 7 GB per second until the microVM dies.
+
+### Cost alarm (proposed — not yet in the template)
+
+Roadmap item; target file `infra/agent_runtime.yaml` (conditional alarm
+resource) or `infra/deploy.sh` (opt-in flag). Proposed definition, to be
+validated against one billed week before pinning the threshold:
+
+- Metric: `MemoryUsed-GBHours`, namespace `AWS/Bedrock-AgentCore`,
+  dimension `Resource` = runtime ARN, statistic Sum, period 1 day.
+- Threshold: 2x the trailing-7-day daily average (anomaly-shaped, so
+  workspace growth does not page); evaluate over 2 consecutive days.
+- Draft (tune the threshold first):
+  `aws cloudwatch put-metric-alarm --alarm-name sch-<env>-memory-gb-hours
+  --namespace AWS/Bedrock-AgentCore --metric-name MemoryUsed-GBHours
+  --dimensions Name=Resource,Value=<runtime-arn> --statistic Sum --period
+  86400 --evaluation-periods 2 --threshold <2x-baseline> --comparison-operator
+  GreaterThanThreshold`.
+- Companion: second-granularity cause analysis with
+  `bin/mem-trace.sh -o trace.csv -d <workload_s>` plus the vended
+  1-second `agent.runtime.*.used` logs, per the attribution checklist.
+
 ## Session Storage (Preview) Limits — Observed and Documented
 
 | Limit | Value | Operational Notes |

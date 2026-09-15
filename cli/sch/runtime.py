@@ -153,7 +153,8 @@ def payload_checkpoint(
 
 def payload_task(
     workspace, harness, prompt, continue_flag, timeout_s=None,
-    storage_backend="", session_epoch=0, model="", provider_keys=None,
+    storage_backend="", session_epoch=0, model="", variant="",
+    provider_keys=None,
 ):
     data = _with_storage({
         "action": "task",
@@ -169,6 +170,10 @@ def payload_task(
         # travels with the prompt; key omitted entirely when no model was
         # requested so the no-flag payload stays byte-for-byte identical.
         data["model"] = model
+    if variant:
+        # Same transport as `model` (spec: headless-task-execution R8a):
+        # omitted entirely when not requested.
+        data["variant"] = variant
     return json.dumps(_with_provider_keys(data, provider_keys))
 
 

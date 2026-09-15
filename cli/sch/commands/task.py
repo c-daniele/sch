@@ -13,6 +13,7 @@ from . import handoff as handoff_mod
 
 _USAGE = (
     'usage: sch task <workspace> [--harness <opencode|claude|pi>] [--model <id>] '
+    '[--variant <name>] '
     '[--branch <name>] [--continue] [--handoff [--handoff-session <id>] [--sanitize]] '
     '"<prompt>" [--timeout <s>]'
 )
@@ -29,6 +30,7 @@ def _parse_args(args):
     timeout_raw = ""
     harness_flag = ""
     model = ""
+    variant = ""
     branch_flag = ""
     handoff = False
     handoff_session = ""
@@ -65,6 +67,12 @@ def _parse_args(args):
             if i + 1 >= len(rest):
                 die("usage: --model <id>")
             model = cli_mod.validate_model_or_die(rest[i + 1])
+            i += 2
+            continue
+        if arg == "--variant":
+            if i + 1 >= len(rest):
+                die("usage: --variant <name>")
+            variant = cli_mod.validate_variant_or_die(rest[i + 1])
             i += 2
             continue
         if arg == "--branch":
@@ -104,19 +112,24 @@ def _parse_args(args):
                 harness_flag, "|".join(harness_mod.VALID_HARNESSES)
             )
         )
+    if variant and harness_flag and harness_flag != "opencode":
+        die(
+            "--variant supports only harness='opencode' (reasoning effort is "
+            "an opencode-only concept)"
+        )
 
     prompt = " ".join(prompt_parts)
     if not prompt:
         die(_USAGE)
     return (
-        ws, harness_flag, model, branch_flag, continue_flag, timeout_raw,
+        ws, harness_flag, model, variant, branch_flag, continue_flag, timeout_raw,
         prompt, sync_options, handoff, handoff_session, sanitize,
     )
 
 
 def cmd_task(cfg, args):
     (
-        ws, harness_flag, model, branch_flag, continue_flag, timeout_raw,
+        ws, harness_flag, model, variant, branch_flag, continue_flag, timeout_raw,
         prompt, sync_options, handoff, handoff_session, sanitize,
     ) = _parse_args(args)
 
@@ -163,6 +176,16 @@ def cmd_task(cfg, args):
                     "bound to opencode, or omit '--handoff' to work in this "
                     "one".format(ws, resolved.harness)
                 )
+        if variant and resolved.harness != "opencode":
+            # Enforcing gate for a workspace already bound to another
+            # harness (spec R8a): reasoning effort is opencode-only — fail
+            # before the warmup/seed (no remote mutation). The parse-time
+            # pre-check above already refused a divergent explicit flag.
+            die(
+                "workspace '{}' is bound to harness='{}'; '--variant' supports only "
+                "harness='opencode' (reasoning effort is an opencode-only "
+                "concept)".format(ws, resolved.harness)
+            )
         sid = resolved.sid
         harness = resolved.harness
         storage_backend = resolved.storage
@@ -233,7 +256,7 @@ def cmd_task(cfg, args):
 
         payload = runtime.payload_task(
             runtime_workspace, harness, prompt, continue_flag, timeout_s,
-            storage_backend, session_epoch, model=model,
+            storage_backend, session_epoch, model=model, variant=variant,
         )
 
         print(
@@ -264,6 +287,15 @@ def cmd_task(cfg, args):
                 "sch: warning: runtime did not echo requested model '{}'; "
                 "the runtime image may not support --model and the task runs "
                 "with the default model (continuing)".format(model),
+                file=sys.stderr,
+            )
+        if variant and result.get("variant", "") != variant:
+            # Same contract as --model above (spec R8a): an image predating
+            # the flag runs the turn with the default effort.
+            print(
+                "sch: warning: runtime did not echo requested variant '{}'; "
+                "the runtime image may not support --variant and the task runs "
+                "with the default effort (continuing)".format(variant),
                 file=sys.stderr,
             )
         if continue_flag and result.get("continue", False) is not True:

@@ -114,7 +114,7 @@ default**: a legacy index still reconciles to `opencode`.
 
 | harness   | headless argv (built by the shim)                                                                                  | session-resume flag  | auto-approval flag (argv-only)   |
 | --------- | ------------------------------------------------------------------------------------------------------------------ | -------------------- | -------------------------------- |
-| opencode  | `opencode run [--session <id>] --agent remote-auto --auto <prompt>`                                                | `--session <id>`     | `--auto`                         |
+| opencode  | `opencode run [--session <id>] [--model <id>] [--variant <v>] --agent remote-auto --auto <prompt>`                           | `--session <id>`     | `--auto`                         |
 | claude    | `claude -p [--resume <id>] --agent remote-auto --dangerously-skip-permissions <prompt>`                            | `--resume <id>`      | `--dangerously-skip-permissions` |
 | pi        | `pi -p [--session <path>] [--provider amazon-bedrock --model <id>] --append-system-prompt <role file> <prompt>`     | `--session <path>`   | **none — by design**             |
 
@@ -155,7 +155,14 @@ workspace's persisted harness**:
 
 - **opencode**: queries the `session` table in `opencode.db` for the row
   with the latest `time_updated` in the worktree's `directory`, then passes
-  `--session <id>` to `opencode run`.
+  `--session <id>` to `opencode run`. Without an explicit `--model`, the
+  resumed session's own stored model and reasoning-effort variant are
+  forwarded as `--model <id>`/`--variant <v>`, so a headless `--continue`
+  keeps the model and effort selected in the TUI (a model-less prompt would
+  otherwise resolve to the `remote-auto` agent's configured model and
+  default effort). An explicit `--model` wins (dropping the stored effort);
+  an explicit `--variant` wins over the stored effort. An unreadable session
+  row degrades to the harness default.
 - **claude**: `ls -t $CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/*.jsonl | head -1`,
   basename-strip the `.jsonl` to get the resume handle, then pass
   `--resume <id>` to `claude -p`. `<encoded-cwd>` is Claude's path encoding
@@ -524,8 +531,11 @@ container-level checks (source-building a C extension, `npm ci` driving node-gyp
 seeded-template contents on both harnesses) live in `image/test-local.sh`
 (section 11, plus sections 9 and 10b).
 
-**Known trade-off (follow-up):** project-local `.venv/` and `node_modules/` live
-on `/mnt/workspace`, so they inflate the L2 checkpoint tar (`_create_archive`)
-and the `sch acp` fs-sync mirror. Accepted here and left as an explicit
-follow-up change; the lockfile-first guidance keeps those directories disposable
-(delete them and `uv sync`/`npm ci` recreates them).
+**Resolved (TASK-1):** project-local `.venv/` and `node_modules/` no longer
+ride the L2 checkpoint tar or the repo fingerprint (spec
+[workspace-checkpointing](specs/workspace-lifecycle/workspace-checkpointing.md)
+R21; the `sch acp` fs-sync mirror already ignored them) — the env is rebuilt
+best-effort after an L2 restore. They still live on `/mnt/workspace`, so they
+still count against the 1 GB session-storage budget; the lockfile-first
+guidance keeps them disposable (delete them and `uv sync`/`npm ci` recreates
+them).

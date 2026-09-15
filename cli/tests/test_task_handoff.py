@@ -24,23 +24,23 @@ def _resolved(harness="opencode"):
 class TaskHandoffParseTests(unittest.TestCase):
     def test_handoff_defaults(self):
         result = task_cmd._parse_args(["ws", "build"])
-        self.assertEqual(result[8], False)
-        self.assertEqual(result[9], "")
-        self.assertEqual(result[10], False)
+        self.assertEqual(result[9], False)
+        self.assertEqual(result[10], "")
+        self.assertEqual(result[11], False)
 
     def test_handoff_flag_parses(self):
         result = task_cmd._parse_args(["ws", "--handoff", "build"])
-        self.assertTrue(result[8])
-        self.assertEqual(result[9], "")
-        self.assertFalse(result[10])
+        self.assertTrue(result[9])
+        self.assertEqual(result[10], "")
+        self.assertFalse(result[11])
 
     def test_handoff_session_and_sanitize_parse(self):
         result = task_cmd._parse_args(
             ["ws", "--handoff", "--handoff-session", "ses_x", "--sanitize", "build"]
         )
-        self.assertTrue(result[8])
-        self.assertEqual(result[9], "ses_x")
-        self.assertTrue(result[10])
+        self.assertTrue(result[9])
+        self.assertEqual(result[10], "ses_x")
+        self.assertTrue(result[11])
 
     def test_handoff_session_without_handoff_dies(self):
         with self.assertRaises(SystemExit):
@@ -61,8 +61,8 @@ class TaskHandoffParseTests(unittest.TestCase):
     def test_handoff_after_separator_is_prompt_text(self):
         # `--` contract: flags after it are prompt words, not options.
         result = task_cmd._parse_args(["ws", "--", "--handoff"])
-        self.assertFalse(result[8])
-        self.assertEqual(result[6], "--handoff")
+        self.assertFalse(result[9])
+        self.assertEqual(result[7], "--handoff")
 
 
 class TaskHandoffRejectTests(unittest.TestCase):

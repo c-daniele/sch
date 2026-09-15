@@ -29,6 +29,7 @@ Out of scope:
 
 - **R1.** `sch run <workspace>` SHALL accept an optional `--model <id>` that selects the model with which the harness TUI is started for that single invocation. The value MUST be ephemeral: it is not persisted in the workspace metadata (local index or central registry) and does not affect subsequent invocations.
 - **R2.** Without the flag, behavior SHALL remain identical to the pre-flag behavior: the harness starts without arguments and resolves its own default model.
+- **R2a.** There SHALL be no `--variant` flag on `sch run`: the pinned opencode TUI defines no such option (only `opencode run` does), so the CLI SHALL reject it with a usage error naming the remedy (in-TUI model picker, or `sch task --variant` for headless tasks). Reasoning effort on headless tasks is covered in [headless-task-execution](../access-surfaces/headless-task-execution.md) (R8a/R8b).
 
 ### Payload and marker propagation
 

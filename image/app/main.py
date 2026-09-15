@@ -434,6 +434,58 @@ CHECKPOINT_STATE: dict = {
 # cycle simply delays the next tick rather than piling up work.
 _CHECKPOINT_LOCK = threading.Lock()
 
+# --- Memory-cost footprint (TASK-1: peak-memory billing) -----------------------
+# AgentCore bills memory on the peak consumed up to each second, so one
+# transient spike prices the whole session. Three levers live here:
+# (1) REPO_CHECKPOINT_EXCLUDE_NAMES keeps regenerable dirs out of the repo
+# tarball and the repo fingerprint; (2) the SCH_NODE_HEAP_MB / SCH_BUILD_JOBS
+# caps bound transient build and harness peaks; (3) the env is rebuilt
+# best-effort after an L2 restore, since the excluded dirs no longer ride
+# the checkpoint. Defaults are image ENV / deploy parameters; every knob has
+# a per-workspace escape hatch (a plain env override, never a rebuild).
+#
+# The exclude list mirrors the fs-sync DEFAULT_IGNORE in fs_sync_worker.py
+# MINUS the entries that must stay durable: .git (spec checkpointing R1:
+# the archive includes Git metadata) and anything under state/ (the state
+# tarball is a different artifact with its own excludes). Names match whole
+# path segments at any depth, so nested node_modules/.venv copies are
+# skipped too. Never add source dirs here: an excluded name that also holds
+# operator sources would silently drop them from durability.
+REPO_CHECKPOINT_EXCLUDE_NAMES = frozenset({
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".cache",
+    "dist",
+    "build",
+    "coverage",
+    "htmlcov",
+    ".next",
+    ".nuxt",
+    "target",
+    ".codebase-memory",
+    "dummy_data",
+})
+# Heap cap (MB) for every Node process the shim spawns or fronts
+# (harness, headless tasks, serve supervisor). 1792 keeps a comfortable
+# distance from the ~2 GB mark on the smallest shapes while leaving headroom
+# for the shim + MCP children. "0" disables the cap (escape hatch for big
+# builds that would rather pay the peak than OOM); unparseable falls back
+# to the default so a typo never silently uncaps the session.
+NODE_HEAP_MB_DEFAULT = 1792
+# Build parallelism: one knob, fanned out to the build systems that honor
+# env (MAKEFLAGS, CMAKE_BUILD_PARALLEL_LEVEL, CARGO_BUILD_JOBS) and exported
+# as SCH_BUILD_JOBS for repo runners the shim cannot cap itself
+# (jest/vitest --maxWorkers, pytest -n, tsc -b). Default 2.
+BUILD_JOBS_DEFAULT = 2
+# Rebuild the excluded project env after an L2 restore ("1") or leave the
+# worktree as-restored ("0"). Best-effort either way: never fail-closed.
+REBUILD_ENV_ON_RESTORE_DEFAULT = "1"
+
 # --- Headless task state (Fase 1, sch-headless-tasks) --------------------------
 # Application timeout strictly below AgentCore MaxLifetime (8h) so the shim
 # owns the terminal state (design D7). Default 7h; clamp to safe range.
@@ -489,6 +541,7 @@ _TASK_STATE: dict = {
     "exit_code": None,
     "opencode_session_id": None,
     "model": None,  # explicit per-invocation model, None = harness default
+    "variant": None,  # explicit per-invocation effort, None = model default
     "error": None,
     "thread": None,
     "async_task_handle": None,
@@ -1558,6 +1611,107 @@ def _backup_db_durable() -> dict:
 
 # --- L2 checkpoint engine: fingerprints (design D3) -----------------------------
 
+def _node_heap_mb(env: dict | None = None) -> int:
+    """Heap cap in MB from SCH_NODE_HEAP_MB (TASK-1.2). 0 disables the cap;
+    unparseable falls back to NODE_HEAP_MB_DEFAULT (a typo must never
+    silently uncap the session)."""
+    raw = (env if env is not None else os.environ).get("SCH_NODE_HEAP_MB", "")
+    if raw is None or str(raw).strip() == "":
+        return NODE_HEAP_MB_DEFAULT
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        logger.warning("invalid SCH_NODE_HEAP_MB=%r; using default %s", raw, NODE_HEAP_MB_DEFAULT)
+        return NODE_HEAP_MB_DEFAULT
+    return max(0, value)
+
+
+def _build_jobs(env: dict | None = None) -> int:
+    """Build parallelism from SCH_BUILD_JOBS (TASK-1.2). At least 1;
+    unparseable falls back to BUILD_JOBS_DEFAULT."""
+    raw = (env if env is not None else os.environ).get("SCH_BUILD_JOBS", "")
+    if raw is None or str(raw).strip() == "":
+        return BUILD_JOBS_DEFAULT
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        logger.warning("invalid SCH_BUILD_JOBS=%r; using default %s", raw, BUILD_JOBS_DEFAULT)
+        return BUILD_JOBS_DEFAULT
+    return max(1, value)
+
+
+def _apply_memory_caps(env: dict) -> dict:
+    """Apply the TASK-1.2 caps to a child environment, in place and returned.
+
+    - NODE_OPTIONS gains --max-old-space-size=<heap> unless disabled
+      (SCH_NODE_HEAP_MB=0) or the flag is already present (operator override
+      wins, e.g. a larger heap for a known-big build).
+    - MAKEFLAGS gains -j<jobs> unless -j is already present.
+    - CMAKE_BUILD_PARALLEL_LEVEL / CARGO_BUILD_JOBS default to <jobs> when
+      absent (both are honored by their build systems; never overwrite).
+    - SCH_BUILD_JOBS is always (re)stated to the resolved value so repo
+      runners the shim cannot cap itself (jest/vitest --maxWorkers,
+      pytest -n auto, tsc) can read one knob.
+    """
+    heap_mb = _node_heap_mb(env)
+    jobs = _build_jobs(env)
+    if heap_mb > 0:
+        node_opts = env.get("NODE_OPTIONS", "")
+        if "max-old-space-size" not in node_opts:
+            flag = f"--max-old-space-size={heap_mb}"
+            env["NODE_OPTIONS"] = f"{node_opts} {flag}".strip()
+    makeflags = env.get("MAKEFLAGS", "")
+    if "-j" not in makeflags:
+        env["MAKEFLAGS"] = f"{makeflags} -j{jobs}".strip()
+    if not env.get("CMAKE_BUILD_PARALLEL_LEVEL"):
+        env["CMAKE_BUILD_PARALLEL_LEVEL"] = str(jobs)
+    if not env.get("CARGO_BUILD_JOBS"):
+        env["CARGO_BUILD_JOBS"] = str(jobs)
+    env["SCH_BUILD_JOBS"] = str(jobs)
+    return env
+
+
+# Substrings (lowercased) identifying an out-of-memory kill in harness
+# stderr. Matched only together with a suspicious exit code, or on their
+# own for the unambiguous V8 heap message — see _oom_remediation.
+_OOM_EXIT_CODES = frozenset({134, 137})
+_OOM_STDERR_PATTERNS = (
+    "javascript heap out of memory",
+    "heap out of memory",
+    "allocation failure",
+    "out of memory",
+    "cannot allocate memory",
+    "memory exhausted",
+)
+
+
+def _oom_remediation(stderr_data: str | None, exit_code: int | None) -> str | None:
+    """Return a remediation hint when a headless task died of memory pressure
+    (TASK-1.2: caps convert expensive-success into cheap-OOM, so the OOM must
+    fail loudly with the escape hatch attached). None for ordinary failures.
+
+    V8 prints 'JavaScript heap out of memory' and aborts (exit 134); the
+    kernel OOM-killer prints 'Killed' / 'Killed process' on the victim's
+    terminal (exit 137). Either is conclusive enough to name the knobs.
+    """
+    text = (stderr_data or "").lower()
+    if "javascript heap out of memory" in text or "heap out of memory" in text:
+        oom = True
+    elif exit_code in _OOM_EXIT_CODES and (
+        "killed" in text or any(p in text for p in _OOM_STDERR_PATTERNS)
+    ):
+        oom = True
+    else:
+        return None
+    return (
+        "likely out-of-memory kill under the TASK-1.2 memory caps: "
+        "re-run with a larger heap (SCH_NODE_HEAP_MB, default "
+        f"{NODE_HEAP_MB_DEFAULT}) or lower parallelism (SCH_BUILD_JOBS, "
+        f"default {BUILD_JOBS_DEFAULT}); e.g. SCH_NODE_HEAP_MB=4096 "
+        "SCH_BUILD_JOBS=1 for a known-big build. The uncapped peak is what "
+        "AgentCore bills, so raise the cap only as far as the build needs."
+    )
+
 def _git_head(repo_dir: Path) -> str:
     try:
         out = subprocess.run(
@@ -1585,8 +1739,15 @@ def _tree_fingerprint(
     path: Path,
     exclude_dirs: frozenset = frozenset(),
     exclude_files: frozenset = frozenset(),
+    exclude_dir_names: frozenset = frozenset(),
 ) -> str:
-    """Content-aware identity including paths, modes, content and deletions."""
+    """Content-aware identity including paths, modes, content and deletions.
+
+    exclude_dirs/exclude_files match exact paths; exclude_dir_names (TASK-1.3)
+    prunes every directory whose NAME matches, at any depth (regenerable
+    dirs such as node_modules/.venv live nested too). Pruned subtrees
+    contribute nothing — not even their dir entry — so creating or deleting
+    a regenerable dir never flips the fingerprint."""
     digest = hashlib.sha256()
     if not path.exists():
         digest.update(b"absent")
@@ -1596,7 +1757,7 @@ def _tree_fingerprint(
         kept_dirs = []
         for name in sorted(dirs):
             entry = root_path / name
-            if entry in exclude_dirs:
+            if entry in exclude_dirs or name in exclude_dir_names:
                 continue
             relative = entry.relative_to(path).as_posix().encode()
             if entry.is_symlink():
@@ -1639,7 +1800,12 @@ def _tree_fingerprint(
 
 
 def _fingerprint_repo() -> str:
-    return _tree_fingerprint(REPO_DIR)
+    # TASK-1.3: regenerable dirs are excluded from durability, so they must
+    # also be excluded from change detection — otherwise every `npm ci`
+    # would flip the fingerprint and force a full repo re-upload of content
+    # that is excluded from the archive anyway. First checkpoint after the
+    # upgrade re-uploads the repo once (smaller); later ticks stay quiet.
+    return _tree_fingerprint(REPO_DIR, exclude_dir_names=REPO_CHECKPOINT_EXCLUDE_NAMES)
 
 
 def _fingerprint_state() -> str:
@@ -1699,7 +1865,9 @@ def _run_tar_create(args: list, dest_tar: Path) -> bool:
     return False
 
 
-def _create_archive(src_dir: Path, dest_tar: Path, excludes: tuple = ()) -> bool:
+def _create_archive(
+    src_dir: Path, dest_tar: Path, excludes: tuple = (), exclude_names: frozenset = frozenset(),
+) -> bool:
     if not src_dir.exists():
         return False
     dest_tar.parent.mkdir(parents=True, exist_ok=True)
@@ -1710,6 +1878,20 @@ def _create_archive(src_dir: Path, dest_tar: Path, excludes: tuple = ()) -> bool
         except ValueError:
             continue
         args += ["--exclude", str(rel)]
+    # TASK-1.3: name-based excludes match whole path segments at any depth
+    # (nested node_modules/.venv copies too). In GNU tar `*` crosses `/`,
+    # so `<src>/*/<name>` covers depth >= 1 and `<src>/<name>` the top level;
+    # the trailing `/*` forms drop the contents even when the dir entry
+    # itself is still visited.
+    for name in sorted(exclude_names):
+        if not name or "/" in name or name in (".", ".."):
+            continue
+        args += [
+            "--exclude", f"{src_dir.name}/{name}",
+            "--exclude", f"{src_dir.name}/{name}/*",
+            "--exclude", f"{src_dir.name}/*/{name}",
+            "--exclude", f"{src_dir.name}/*/{name}/*",
+        ]
     args.append(src_dir.name)
     return _run_tar_create(args, dest_tar)
 
@@ -2195,22 +2377,115 @@ def _seeded_opencode_model() -> tuple | None:
 
 
 def _opencode_resume_model(session_id: str | None) -> str | None:
-    """Use the runtime default when an imported session names an unavailable provider."""
+    """Use the runtime default when a session names an unavailable provider."""
     if not session_id or not OPENCODE_DB_LOCAL.exists():
         return None
     try:
-        config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
-        configured = set((config.get("provider") or {}).keys())
-        default_model = config.get("model") or ""
         with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
             row = conn.execute("SELECT model FROM session WHERE id = ?", (session_id,)).fetchone()
         session_model = json.loads(row[0]) if row and row[0] else {}
         provider = session_model.get("providerID") or ""
-        if provider and provider not in configured and isinstance(default_model, str) and "/" in default_model:
-            return default_model
+        if provider and provider not in _opencode_available_providers():
+            config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
+            default_model = config.get("model") or ""
+            if isinstance(default_model, str) and "/" in default_model:
+                return default_model
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+# Staged-key → opencode provider IDs (mirrors the dispatcher mapping in
+# harness-wrapper.sh: a staged key makes its provider selectable in opencode
+# with no `opencode auth login`). The seeded opencode.json names only
+# amazon-bedrock, so judging availability off the file alone would wrongly
+# report every key-based provider as unavailable.
+_STAGED_KEY_PROVIDERS = {
+    "SCH_ANTHROPIC_API_KEY": ("anthropic",),
+    "SCH_OPENCODE_API_KEY": ("opencode", "opencode-go"),
+    "SCH_OPENROUTER_API_KEY": ("openrouter",),
+    "SCH_KILO_API_KEY": ("kilo",),
+    # SCH_BEDROCK_API_KEY re-auths amazon-bedrock itself (bearer token), and
+    # amazon-bedrock additionally rides the execution role — available with or
+    # without any key, hence added unconditionally below.
+}
+
+
+def _opencode_available_providers() -> set:
+    """Provider IDs opencode can serve right now: config-file entries, plus
+    staged-key providers, plus amazon-bedrock via the execution role."""
+    try:
+        config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
+        configured = set((config.get("provider") or {}).keys())
+    except Exception:  # noqa: BLE001
+        configured = set()
+    staged = _read_staged_provider_keys()
+    for key, providers in _STAGED_KEY_PROVIDERS.items():
+        if staged.get(key):
+            configured.update(providers)
+    configured.add("amazon-bedrock")
+    return configured
+
+
+def _opencode_session_model_variant(session_id: str | None) -> tuple[str | None, str | None]:
+    """(model, variant) stored on an opencode session row, validated.
+
+    The session row's ``model`` JSON (``{providerID, id, variant?}``) is the
+    durable record of the model (and reasoning-effort variant, e.g. ``high``)
+    the operator selected in the TUI. Returns ``(None, None)`` when there is
+    no session, no row, no stored model, or anything fails to parse/validate
+    — callers degrade to the previous behavior (harness default). A stored
+    variant of ``"default"`` (opencode's sentinel for "no variant") is
+    normalized to ``None``.
+    """
+    if not session_id or not OPENCODE_DB_LOCAL.exists():
+        return None, None
+    try:
+        with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
+            row = conn.execute("SELECT model FROM session WHERE id = ?", (session_id,)).fetchone()
+        session_model = json.loads(row[0]) if row and row[0] else {}
+        if not isinstance(session_model, dict):
+            return None, None
+        provider = session_model.get("providerID") or session_model.get("provider") or ""
+        model_id = (
+            session_model.get("id") or session_model.get("modelID")
+            or session_model.get("modelId") or ""
+        )
+        if not isinstance(provider, str) or not isinstance(model_id, str):
+            return None, None
+        model = "{}/{}".format(provider, model_id) if provider and model_id else ""
+        if not model or not MODEL_ID_RE.fullmatch(model):
+            return None, None
+        variant = session_model.get("variant") or ""
+        if not isinstance(variant, str) or variant in ("", "default"):
+            return model, None
+        if not MODEL_ID_RE.fullmatch(variant):
+            return model, None
+        return model, variant
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _opencode_continue_model(session_id: str | None) -> tuple[str | None, str | None]:
+    """(model, variant) a headless ``--continue`` should forward for opencode.
+
+    Without an explicit ``--model`` the headless argv switches the agent to
+    ``remote-auto`` while passing no model: opencode resolves such a
+    model-less prompt to the agent's configured model, discarding the model
+    the operator selected in the TUI (and clobbering the session row). The
+    reasoning-effort variant (``--variant``, e.g. ``high``) is likewise lost,
+    since it resolves from the new agent. Forwarding the resumed session's
+    own stored model+variant preserves the TUI selection.
+
+    Precedence: an unavailable-provider session still resolves to the runtime
+    default model with no variant (existing ``_opencode_resume_model``
+    override — the stored provider cannot serve); otherwise the session's own
+    stored model+variant; ``(None, None)`` degrades to the harness default.
+    """
+    override = _opencode_resume_model(session_id)
+    if override:
+        return override, None
+    return _opencode_session_model_variant(session_id)
 
 
 def _opencode_api(method: str, path: str, payload: dict = None, timeout: float = 10.0):
@@ -2657,7 +2932,9 @@ def _do_checkpoint(force: bool) -> dict:
         try:
             if force or new_fp["repo"] != prev_fp.get("repo"):
                 tar_path = tmp_dir / "repo.tar.gz"
-                if _create_archive(REPO_DIR, tar_path):
+                if _create_archive(
+                    REPO_DIR, tar_path, exclude_names=REPO_CHECKPOINT_EXCLUDE_NAMES,
+                ):
                     prev_sizes["repo"] = tar_path.stat().st_size
                     if upload_artifact(tar_path, "repo.tar.gz"):
                         uploaded.append("repo")
@@ -2872,6 +3149,74 @@ def _download_manifest(workspace: str) -> dict | None:
         raise ManifestReadError(f"manifest download failed: {exc}") from exc
 
 
+def _project_env_plan(repo_dir: Path) -> list:
+    """Which regenerable project envs need rebuilding (TASK-1.3).
+
+    Returns [(label, argv)] for envs whose manifest exists but whose
+    directory is absent — the exact state an L2 restore produces now that
+    node_modules/.venv no longer ride the repo tarball. Labels are stable
+    strings consumed by _maybe_rebuild_project_env and tests.
+    """
+    plan: list = []
+    if (repo_dir / "package.json").is_file() and not (repo_dir / "node_modules").is_dir():
+        if (repo_dir / "package-lock.json").is_file():
+            plan.append(("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"]))
+        else:
+            plan.append(("npm-install", ["npm", "install", "--no-audit", "--no-fund"]))
+    if not (repo_dir / ".venv").is_dir():
+        if (repo_dir / "uv.lock").is_file() or (repo_dir / "pyproject.toml").is_file():
+            plan.append(("uv-sync", ["uv", "sync"]))
+        elif (repo_dir / "requirements.txt").is_file():
+            plan.append((
+                "pip-install",
+                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+            ))
+    return plan
+
+
+def _maybe_rebuild_project_env() -> str:
+    """Best-effort rebuild of the excluded project env after an L2 restore
+    (TASK-1.3). Never fail-closed: every failure mode returns a
+    skipped-*/rebuild-failed status and logs loudly, so boot always proceeds.
+
+    Runs under the TASK-1.2 caps (a restore-time `npm ci` is itself a
+    transient spike candidate) with a bounded timeout per step.
+    """
+    if os.environ.get("SCH_REBUILD_ENV_ON_RESTORE", REBUILD_ENV_ON_RESTORE_DEFAULT) == "0":
+        return "skipped-disabled"
+    plan = _project_env_plan(REPO_DIR)
+    if not plan:
+        return "skipped-noop"
+    env = _apply_memory_caps(_child_env_with_provider_keys())
+    outcomes: list = []
+    for label, argv in plan:
+        if shutil.which(argv[0]) is None:
+            logger.warning("env rebuild: %s unavailable, skipping (%s)", argv[0], label)
+            outcomes.append(f"{label}:unavailable")
+            continue
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(REPO_DIR), env=env,
+                capture_output=True, text=True, timeout=600,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            logger.warning("env rebuild %s failed: %s", label, exc)
+            outcomes.append(f"{label}:failed")
+            continue
+        if proc.returncode != 0:
+            tail = ((proc.stderr or "")[-2000:] or f"exit {proc.returncode}").strip()
+            logger.warning("env rebuild %s failed: %s", label, tail)
+            outcomes.append(f"{label}:failed")
+        else:
+            logger.info("env rebuild %s succeeded", label)
+            outcomes.append(f"{label}:ok")
+    if any(o.endswith(":ok") for o in outcomes):
+        return "rebuilt"
+    if all(o.endswith(":unavailable") for o in outcomes):
+        return "skipped-unavailable"
+    return "rebuild-failed"
+
+
 def _restore_l2(workspace: str) -> dict:
     """Download + extract the S3 checkpoint into the active workspace root.
     Caller is responsible for the anti-clobber guard (_mount_storage_empty).
@@ -3026,11 +3371,18 @@ def _restore_l2(workspace: str) -> dict:
     if errors:
         logger.error("L2 restore for workspace '%s' incomplete: %s", workspace, errors)
         return {"attempted": True, "result": "error", "errors": errors, "harness": _resolve_harness()}
+    # TASK-1.3: node_modules/.venv no longer ride the checkpoint — rebuild
+    # them best-effort so the restored workspace is immediately usable.
+    # Never fail-closed: _maybe_rebuild_project_env only logs on failure.
+    env_rebuild = _maybe_rebuild_project_env()
     logger.info(
-        "L2 restore for workspace '%s' downloaded+extracted (harness=%s)",
-        workspace, _resolve_harness(),
+        "L2 restore for workspace '%s' downloaded+extracted (harness=%s, env_rebuild=%s)",
+        workspace, _resolve_harness(), env_rebuild,
     )
-    return {"attempted": True, "result": "downloaded", "harness": _resolve_harness()}
+    return {
+        "attempted": True, "result": "downloaded",
+        "harness": _resolve_harness(), "env_rebuild": env_rebuild,
+    }
 
 
 def _bootstrap() -> None:
@@ -3413,11 +3765,12 @@ def _resolve_latest_opencode_session() -> str | None:
 
 def _run_task_heartbeat(
     workspace: str, task_id: str, stop_event: threading.Event, harness: str,
-    model: str | None = None,
+    model: str | None = None, variant: str | None = None,
 ) -> None:
     """Daemon heartbeat: PUT heartbeat_utc every ~30s while running (task 5.7:
     harness field preserved on every heartbeat write; model field present on
-    every heartbeat when one was requested — add-task-model-flag task 2.2)."""
+    every heartbeat when one was requested — add-task-model-flag task 2.2;
+    same for variant — spec R8a)."""
     task_started = time.time()
     while not stop_event.is_set():
         stop_event.wait(30)
@@ -3437,6 +3790,8 @@ def _run_task_heartbeat(
             status["harness"] = harness  # preserve harness field on heartbeat
             if model:
                 status["model"] = model  # preserve model field on heartbeat
+            if variant:
+                status["variant"] = variant  # preserve variant field on heartbeat
             _upload_task_status(workspace, status)
 
 
@@ -4207,6 +4562,21 @@ def _handle_task_action(payload: dict) -> dict:
         }
     model = model if model_present else None
 
+    # Optional per-invocation reasoning-effort variant (spec:
+    # headless-task-execution R8a; opencode-only `--variant`). Same
+    # second-line-of-defense contract as `model` above: a present-but-
+    # malformed value is rejected BEFORE any mutation.
+    variant_present = "variant" in payload
+    variant = payload.get("variant")
+    if variant_present and (
+        not isinstance(variant, str) or not MODEL_ID_RE.fullmatch(variant)
+    ):
+        return {
+            "status": "error",
+            "message": "invalid variant: expected non-empty [A-Za-z0-9._:/-]+",
+        }
+    variant = variant if variant_present else None
+
     timeout_s = payload.get("timeout_s")
     try:
         timeout_s = int(timeout_s) if timeout_s is not None else SCH_TASK_TIMEOUT_S
@@ -4260,6 +4630,7 @@ def _handle_task_action(payload: dict) -> dict:
             "exit_code": None,
             "harness": harness,
             "model": model,
+            "variant": variant,
             "harness_session_id": session_id_hint if continue_session else None,
             # Back-compat: keep the opencode-specific field name populated for
             # harness=opencode (existing `sch status` reads may still
@@ -4296,6 +4667,11 @@ def _handle_task_action(payload: dict) -> dict:
         # previous model-bearing task so "no model requested" always renders
         # as an absent field.
         _TASK_STATUS.pop("model", None)
+    if variant:
+        # Same present-iff-requested contract as `model` (spec R8a).
+        initial_status["variant"] = variant
+    else:
+        _TASK_STATUS.pop("variant", None)
     # Same leftover discipline for the terminal-notification fields (TASK-28):
     # they describe the previous task's delivery, never this running one.
     for field in NOTIFICATION_FIELDS:
@@ -4316,6 +4692,7 @@ def _handle_task_action(payload: dict) -> dict:
         "task_id": task_id,
         "harness": harness,
         "model": model,
+        "variant": variant,
         "prompt": prompt,
     }, workspace)
 
@@ -4323,7 +4700,7 @@ def _handle_task_action(payload: dict) -> dict:
         target=_run_task,
         name=f"sch-task-{task_id}",
         daemon=True,
-        args=(task_id, prompt, timeout_s, continue_session, session_id_hint, workspace, harness, model),
+        args=(task_id, prompt, timeout_s, continue_session, session_id_hint, workspace, harness, model, variant),
     )
     with _TASK_LOCK:
         _TASK_STATE["thread"] = thread
@@ -4335,6 +4712,10 @@ def _handle_task_action(payload: dict) -> dict:
         # client uses the missing echo to detect a runtime image that
         # predates the feature. Key present only when a model was requested.
         response["model"] = model
+    if variant:
+        # Same echo contract as `model` (spec R8a): present only when a
+        # variant was requested.
+        response["variant"] = variant
     if continue_session:
         # Echo the accepted continuation request (TASK-27, same contract as
         # the prepare-run action and the model echo above): the client uses
@@ -4424,12 +4805,13 @@ def _ensure_serve_supervisor_started() -> None:
 
 
 def _build_headless_argv(
-    harness: str, session_id: str | None, prompt: str, model: str | None = None
+    harness: str, session_id: str | None, prompt: str, model: str | None = None,
+    variant: str | None = None,
 ) -> list:
     """Per-harness headless argv builder (design D6, tasks 5.2/5.3; model
     mapping: design D3 of add-task-model-flag).
 
-    - opencode: `opencode run --session <id>? --model <id>? --agent remote-auto? --auto <prompt>`
+    - opencode: `opencode run --session <id>? --model <id>? --variant <v>? --agent remote-auto? --auto <prompt>`
     - claude:   `claude -p --resume <id>? --model <id>? --agent remote-auto? --dangerously-skip-permissions <prompt>`
     - pi:       `pi -p --session <path>? --provider amazon-bedrock --model <id>?
                  --append-system-prompt <remote-auto role file>? <prompt>`
@@ -4440,7 +4822,11 @@ def _build_headless_argv(
     default-on; OQ-MCP2 stays open — to be lifted empirically for claude only
     if `claude -p` is confirmed not to hang with a TTY). The optional model
     is inserted as a discrete `--model <id>` argv pair (no shell
-    interpolation); when empty the argv is byte-for-byte unchanged.
+    interpolation); when empty the argv is byte-for-byte unchanged. The
+    optional variant (opencode only: `--variant`, the provider-specific
+    reasoning effort such as `high`) follows the same discrete-pair rule and
+    is ignored for the other harnesses, which have no such flag on their
+    headless argv.
 
     add-pi-harness (design D3/D4): the pi argv carries NO auto-approval flag —
     Pi has no permission prompt by design, so the unattended-execution
@@ -4486,6 +4872,11 @@ def _build_headless_argv(
         argv += ["--session", session_id]
     if model:
         argv += ["--model", model]
+    if variant and MODEL_ID_RE.fullmatch(variant):
+        # Reasoning-effort variant (e.g. `high`): discrete pair like --model.
+        # A malformed value is dropped rather than failing the task — the turn
+        # then runs with the model's default effort.
+        argv += ["--variant", variant]
     if _TASK_AGENT:
         argv += ["--agent", _TASK_AGENT]  # default "remote-auto" (sch-remote-agents)
     argv += _TASK_AUTO_APPROVE_FLAGS  # default ["--auto"]
@@ -4506,6 +4897,11 @@ def _headless_harness_env(harness: str) -> dict[str, str]:
     env = _child_env_with_provider_keys()
     env["SCH_HARNESS"] = harness
     env["SCH_EXECUTION_MODE"] = "headless"
+    # TASK-1.2: bound the transient spikes that poison peak billing on the
+    # headless path too (harness heap, build argv). Escape hatches are plain
+    # env overrides (SCH_NODE_HEAP_MB=0 / larger, SCH_BUILD_JOBS=N), honored
+    # by _apply_memory_caps without overwriting operator-set values.
+    _apply_memory_caps(env)
     for name in (
         "SCH_TELEGRAM_BOT_TOKEN",
         "SCH_TELEGRAM_CHAT_ID",
@@ -4571,6 +4967,7 @@ def _run_task(
     workspace: str,
     harness: str,
     model: str | None = None,
+    variant: str | None = None,
 ) -> None:
     """Background worker for a headless task (design D1, D5, D6, D7, D8)."""
     started = _utcnow()
@@ -4600,7 +4997,7 @@ def _run_task(
     heartbeat_stop = threading.Event()
     heartbeat_thread = threading.Thread(
         target=_run_task_heartbeat,
-        args=(workspace, task_id, heartbeat_stop, harness, model),
+        args=(workspace, task_id, heartbeat_stop, harness, model, variant),
         name=f"sch-task-hb-{task_id}",
         daemon=True,
     )
@@ -4634,6 +5031,7 @@ def _run_task(
             heartbeat_stop=heartbeat_stop,
             heartbeat_thread=heartbeat_thread,
             model=model,
+            variant=variant,
             continue_requested=continue_session,
             continue_resolved=continue_resolved,
         )
@@ -4665,14 +5063,31 @@ def _run_task(
     # is applied even on the headless path (spec: runtime-image,
     # "Esecuzione headless riusa il wrapper dispatcher").
     effective_model = model
+    effective_variant = variant
     if harness == "opencode" and not effective_model:
-        effective_model = _opencode_resume_model(harness_session_id)
+        # No explicit --model: forward the resumed session's own stored
+        # model+variant so a headless --continue keeps the TUI selection
+        # (model and reasoning effort, e.g. `high`). Without this the
+        # --agent remote-auto switch resolves the turn to the agent's
+        # configured model and default effort, discarding the selection and
+        # clobbering the session row. An explicit --model always wins — and
+        # skips this lookup entirely, since its variant is the model's
+        # default (a stored variant belongs to the previous model) — while
+        # an explicit --variant always wins over the stored one.
+        # (None, None) degrades to the harness default.
+        stored_model, stored_variant = _opencode_continue_model(harness_session_id)
+        effective_model = stored_model
+        if not effective_variant:
+            effective_variant = stored_variant
         if effective_model:
             logger.info(
-                "task %s overriding unavailable imported-session provider with model %s",
-                task_id, effective_model,
+                "task %s continuing opencode session %s with model %s%s",
+                task_id, harness_session_id, effective_model,
+                " variant {}".format(effective_variant) if effective_variant else "",
             )
-    argv = _build_headless_argv(harness, harness_session_id, prompt, effective_model)
+    argv = _build_headless_argv(
+        harness, harness_session_id, prompt, effective_model, effective_variant,
+    )
 
     proc = None
     exit_code = None
@@ -4707,7 +5122,14 @@ def _run_task(
             else:
                 state = "failed"
                 stderr_tail = (stderr_data or "")[-4000:]
-                error = stderr_tail or f"exit code {exit_code}"
+                # TASK-1.2: caps trade expensive-success for cheap-OOM — an
+                # OOM must fail loudly with the remediation attached, never
+                # as a bare non-zero exit.
+                oom_hint = _oom_remediation(stderr_data, exit_code)
+                if oom_hint:
+                    error = f"{stderr_tail or f'exit code {exit_code}'}\n{oom_hint}"
+                else:
+                    error = stderr_tail or f"exit code {exit_code}"
         except subprocess.TimeoutExpired:
             # Kill the entire process group (negative PID) so children die too.
             try:
@@ -4743,12 +5165,13 @@ def _run_task(
         output_truncated=output_truncated,
         workspace=workspace,
         async_handle=async_handle,
-        heartbeat_stop=heartbeat_stop,
-        heartbeat_thread=heartbeat_thread,
-        model=model,
-        continue_requested=continue_session,
-        continue_resolved=continue_resolved,
-    )
+            heartbeat_stop=heartbeat_stop,
+            heartbeat_thread=heartbeat_thread,
+            model=model,
+            variant=variant,
+            continue_requested=continue_session,
+            continue_resolved=continue_resolved,
+        )
 
 
 def _finish_task(
@@ -4769,6 +5192,7 @@ def _finish_task(
     heartbeat_stop: threading.Event,
     heartbeat_thread: threading.Thread,
     model: str | None = None,
+    variant: str | None = None,
     continue_requested: bool = False,
     continue_resolved: bool | None = None,
 ) -> None:
@@ -4832,6 +5256,9 @@ def _finish_task(
         # Terminal record keeps the model for post-hoc provenance (spec:
         # headless-task-execution, "Task model observability").
         terminal_status["model"] = model
+    if variant:
+        # Same provenance contract as `model` (spec R8a).
+        terminal_status["variant"] = variant
     if continue_requested:
         # Continuation provenance (TASK-27): present iff requested, like the
         # model field. continue_resolved is present iff the worker resolved
@@ -4899,6 +5326,9 @@ def _task_info_field() -> dict:
                 # headless-task-execution, "Info live durante il task");
                 # absent when no model was requested.
                 running["model"] = _TASK_STATE.get("model")
+            if _TASK_STATE.get("variant"):
+                # Same contract as `model` (spec R8a).
+                running["variant"] = _TASK_STATE.get("variant")
             return running
         # Idle: surface the last terminal record for observability (task 5.8).
         return {
@@ -5743,6 +6173,16 @@ def invoke(payload, context=None):
             "last_result": CHECKPOINT_STATE.get("last_result"),
             "last_attempt_utc": CHECKPOINT_STATE.get("last_attempt_utc"),
             "last_success_utc": CHECKPOINT_STATE.get("last_success_utc"),
+            # TASK-1: regenerable dirs excluded from the repo tarball +
+            # fingerprint, and the caps bounding transient peaks.
+            "repo_excludes": sorted(REPO_CHECKPOINT_EXCLUDE_NAMES),
+            "memory_caps": {
+                "node_heap_mb": _node_heap_mb(),
+                "build_jobs": _build_jobs(),
+                "rebuild_env_on_restore": os.environ.get(
+                    "SCH_REBUILD_ENV_ON_RESTORE", REBUILD_ENV_ON_RESTORE_DEFAULT,
+                ) != "0",
+            },
         }
         response["task"] = _task_info_field()
         # add-user-provider-keys: NAMES only, never values (spec:

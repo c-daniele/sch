@@ -89,6 +89,14 @@
 #     (records without it are never re-sent).
 #   SCH_PI_DEFAULT_MODEL=<model-id>            (default: region-derived)
 #     Pi-specific runtime model setting.
+#   SCH_NODE_HEAP_MB=<MB>                     (default: 1792, 0 disables)
+#     TASK-1 (peak-memory billing): default Node heap cap applied to the
+#     harness, builds and headless tasks. Per-workspace override needs no
+#     redeploy (same-named env); raising it re-prices the billed peak, see
+#     docs/deploy.md "Lifecycle and Costs".
+#   SCH_BUILD_JOBS=<N>                        (default: 2)
+#     TASK-1 (peak-memory billing): default build parallelism (MAKEFLAGS,
+#     CMAKE_BUILD_PARALLEL_LEVEL, CARGO_BUILD_JOBS, restated SCH_BUILD_JOBS).
 #   Runtime capability tuning (docs/specs/security/runtime-capability-tuning.md) —
 #   deploy-time shaping of the runtime execution role. All defaults are inert:
 #   unset variables deploy a role byte-identical to the pre-tuning one, and any
@@ -205,6 +213,8 @@ ENABLE_TASK_WATCHDOG="${ENABLE_TASK_WATCHDOG:-true}"
 TASK_WATCHDOG_STALE_SECONDS="${TASK_WATCHDOG_STALE_SECONDS:-600}"
 TASK_WATCHDOG_NOTIFY_AFTER_SECONDS="${TASK_WATCHDOG_NOTIFY_AFTER_SECONDS:-300}"
 SCH_PI_DEFAULT_MODEL="${SCH_PI_DEFAULT_MODEL:-}"
+SCH_NODE_HEAP_MB="${SCH_NODE_HEAP_MB:-1792}"
+SCH_BUILD_JOBS="${SCH_BUILD_JOBS:-2}"
 RUNTIME_CAPABILITIES="${RUNTIME_CAPABILITIES:-}"
 RUNTIME_BEDROCK_ACCESS="${RUNTIME_BEDROCK_ACCESS:-true}"
 RUNTIME_BEDROCK_MODEL_ALLOWLIST="${RUNTIME_BEDROCK_MODEL_ALLOWLIST:-}"
@@ -686,6 +696,8 @@ aws cloudformation deploy \
         "TaskWatchdogStaleSeconds=${TASK_WATCHDOG_STALE_SECONDS}" \
         "TaskWatchdogNotifyAfterSeconds=${TASK_WATCHDOG_NOTIFY_AFTER_SECONDS}" \
         "PiDefaultModel=${SCH_PI_DEFAULT_MODEL}" \
+        "NodeHeapMb=${SCH_NODE_HEAP_MB}" \
+        "BuildJobs=${SCH_BUILD_JOBS}" \
         "RuntimeCapabilities=${TUNING_CAPS}" \
         "RuntimeBedrockAccess=${RUNTIME_BEDROCK_ACCESS}" \
         "RuntimeBedrockModelAllowlist=${TUNING_ALLOWLIST}" \
