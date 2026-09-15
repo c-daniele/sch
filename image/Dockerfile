@@ -282,7 +282,7 @@ FROM ${RUNTIME_BASE} AS runtime
 # leaving the parent task tool running forever when a subagent needed
 # permission. Keep the default on the latest validated patch and enforce the
 # floor after installation below.
-ARG OPENCODE_VERSION=1.18.30
+ARG OPENCODE_VERSION=1.18.31
 # Claude Code (sch-multi-harness, design D10): pinned via npm-22, binary lands
 # at /usr/local/bin/claude. OQ-CLAUDE-VERSION (design Open Questions) calls for
 # a pinned @anthropic-ai/claude-code version that honors BOTH
@@ -291,7 +291,7 @@ ARG OPENCODE_VERSION=1.18.30
 # the current Anthropic aliases require a recent binary.
 # No `latest` tag (spec: runtime-image, "Claude Code installato a versione
 # pinnata").
-ARG CLAUDE_CODE_VERSION=2.1.266
+ARG CLAUDE_CODE_VERSION=2.1.272
 
 # Pi (add-pi-harness, design D10): third harness, pinned like everything else in
 # this image. 0.84.2 is the version whose behavior was verified empirically in a
