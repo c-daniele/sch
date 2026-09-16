@@ -35,6 +35,7 @@ class SessionImportTests(unittest.TestCase):
         main.REPO_DIR = self.repo
         main.BUNDLE_STAGING_DIR = self.staging
         main.OPENCODE_DB_LOCAL = root / "opencode.db"
+        main.OPENCODE_AUTH_FILE = root / "auth.json"
         main.DB_BACKUP_PATH = root / "backup.db"
         main._WORKSPACE_READY.set()
         main._WORKSPACE_NAME["value"] = "ws"

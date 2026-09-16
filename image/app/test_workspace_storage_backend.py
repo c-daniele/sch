@@ -85,6 +85,9 @@ with tempfile.TemporaryDirectory() as td:
     assert main._set_storage_backend("s3")
     assert main.WORKSPACE_ROOT == main.S3_WORKSPACE_ROOT
     assert main.REPO_DIR == main.S3_WORKSPACE_ROOT / "repo"
+    assert main.OPENCODE_AUTH_FILE == (
+        main.S3_WORKSPACE_ROOT / "state" / "data" / "opencode" / "auth.json"
+    )
     assert json.loads(main.ACTIVE_WORKSPACE_FILE.read_text())["storage"] == "s3"
     assert not main._set_storage_backend("session")
 
