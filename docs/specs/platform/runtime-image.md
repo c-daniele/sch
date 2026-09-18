@@ -154,9 +154,9 @@ Pinned versions (single source of truth: `image/Dockerfile` `ARG`s; current valu
 
 | Tool | ARG | Pinned |
 | --- | --- | --- |
-| OpenCode | `OPENCODE_VERSION` | 1.18.26 |
-| Claude Code | `CLAUDE_CODE_VERSION` | 2.1.258 |
-| Pi | `PI_VERSION` | 0.84.4 |
+| OpenCode | `OPENCODE_VERSION` | 1.18.31 |
+| Claude Code | `CLAUDE_CODE_VERSION` | 2.1.272 |
+| Pi | `PI_VERSION` | 0.85.1 |
 | AWS CLI | `AWS_CLI_VERSION` | 2.36.8 |
 | uv | `UV_VERSION` | 0.12.5 |
 | aws-docs MCP | `AWS_DOCS_MCP_VERSION` | 1.1.30 |

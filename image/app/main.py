@@ -69,6 +69,7 @@ INIT_SCRIPT = Path("/app/init-workspace.sh")
 # to confirm the seed actually landed on the real mount (see FRESH_SETTLE_WAIT).
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", str(STATE_DIR / "config")))
 OPENCODE_CONFIG_FILE = CONFIG_DIR / "opencode" / "opencode.json"
+OPENCODE_AUTH_FILE = STATE_DIR / "data" / "opencode" / "auth.json"
 
 # --- Multi-harness (sch-multi-harness, design D1/D2/D3) ------------------------
 # Claude Code state lives on LOCAL disk (CLAUDE_CONFIG_DIR) and is mirrored to
@@ -911,7 +912,8 @@ def _checkpoint_enabled() -> bool:
 
 def _configure_workspace_paths(storage_backend: str) -> None:
     global WORKSPACE_ROOT, REPO_DIR, STATE_DIR, CONFIG_DIR  # noqa: PLW0603
-    global OPENCODE_CONFIG_FILE, CLAUDE_STATE_REPLICA, CLAUDE_MCP_FILE  # noqa: PLW0603
+    global OPENCODE_CONFIG_FILE, OPENCODE_AUTH_FILE  # noqa: PLW0603
+    global CLAUDE_STATE_REPLICA, CLAUDE_MCP_FILE  # noqa: PLW0603
     global PI_STATE_REPLICA  # noqa: PLW0603
     global DB_BACKUP_PATH, MOUNT_MARKER  # noqa: PLW0603
     global BUNDLE_STAGING_DIR, GIT_NATIVE_STATE_FILE  # noqa: PLW0603
@@ -921,6 +923,7 @@ def _configure_workspace_paths(storage_backend: str) -> None:
     STATE_DIR = WORKSPACE_ROOT / "state"
     CONFIG_DIR = STATE_DIR / "config"
     OPENCODE_CONFIG_FILE = CONFIG_DIR / "opencode" / "opencode.json"
+    OPENCODE_AUTH_FILE = STATE_DIR / "data" / "opencode" / "auth.json"
     CLAUDE_STATE_REPLICA = STATE_DIR / "claude"
     CLAUDE_MCP_FILE = REPO_DIR / ".mcp.json"
     # add-pi-harness: the pi L2 replica follows the storage backend's root like
@@ -2412,13 +2415,64 @@ _STAGED_KEY_PROVIDERS = {
 
 
 def _opencode_available_providers() -> set:
-    """Provider IDs opencode can serve right now: config-file entries, plus
-    staged-key providers, plus amazon-bedrock via the execution role."""
+    """Provider IDs opencode can serve through config, auth, keys, or IAM."""
     try:
         config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
         configured = set((config.get("provider") or {}).keys())
     except Exception:  # noqa: BLE001
         configured = set()
+
+    # OpenCode stores `/connect` and `auth login` credentials under its XDG
+    # data directory, keyed by provider ID. Validate the pinned version's
+    # credential shapes without retaining or logging any credential values.
+    try:
+        auth = json.loads(OPENCODE_AUTH_FILE.read_text(encoding="utf-8"))
+        if isinstance(auth, dict):
+            for provider, credential in auth.items():
+                if not isinstance(provider, str) or not MODEL_ID_RE.fullmatch(provider):
+                    continue
+                if not isinstance(credential, dict):
+                    continue
+                auth_type = credential.get("type")
+                valid = False
+                if auth_type == "oauth":
+                    expires = credential.get("expires")
+                    valid = (
+                        isinstance(credential.get("refresh"), str)
+                        and isinstance(credential.get("access"), str)
+                        and isinstance(expires, int)
+                        and not isinstance(expires, bool)
+                        and expires >= 0
+                        and all(
+                            name not in credential or isinstance(credential[name], str)
+                            for name in ("accountId", "enterpriseUrl")
+                        )
+                    )
+                elif auth_type == "api":
+                    metadata = credential.get("metadata")
+                    valid = (
+                        isinstance(credential.get("key"), str)
+                        and (
+                            "metadata" not in credential
+                            or (
+                                isinstance(metadata, dict)
+                                and all(
+                                    isinstance(key, str) and isinstance(value, str)
+                                    for key, value in metadata.items()
+                                )
+                            )
+                        )
+                    )
+                elif auth_type == "wellknown":
+                    valid = (
+                        isinstance(credential.get("key"), str)
+                        and isinstance(credential.get("token"), str)
+                    )
+                if valid:
+                    configured.add(provider)
+    except Exception:  # noqa: BLE001
+        pass
+
     staged = _read_staged_provider_keys()
     for key, providers in _STAGED_KEY_PROVIDERS.items():
         if staged.get(key):

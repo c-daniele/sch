@@ -387,12 +387,15 @@ class OpencodeContinueModelTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self._saved_db = main.OPENCODE_DB_LOCAL
         self._saved_config = main.OPENCODE_CONFIG_FILE
+        self._saved_auth = main.OPENCODE_AUTH_FILE
         self._saved_keys = main.PROVIDER_KEYS_FILE
         main.OPENCODE_DB_LOCAL = root / "opencode.db"
         main.OPENCODE_CONFIG_FILE = root / "opencode.json"
+        main.OPENCODE_AUTH_FILE = root / "auth.json"
         main.PROVIDER_KEYS_FILE = root / "provider-keys.env"
         self.addCleanup(setattr, main, "OPENCODE_DB_LOCAL", self._saved_db)
         self.addCleanup(setattr, main, "OPENCODE_CONFIG_FILE", self._saved_config)
+        self.addCleanup(setattr, main, "OPENCODE_AUTH_FILE", self._saved_auth)
         self.addCleanup(setattr, main, "PROVIDER_KEYS_FILE", self._saved_keys)
         main.OPENCODE_CONFIG_FILE.write_text(json.dumps({
             "model": "amazon-bedrock/remote-default",
@@ -403,6 +406,9 @@ class OpencodeContinueModelTests(unittest.TestCase):
         main.PROVIDER_KEYS_FILE.write_text(
             "".join("{}=test-value\n".format(name) for name in names)
         )
+
+    def _write_auth(self, data):
+        main.OPENCODE_AUTH_FILE.write_text(json.dumps(data))
 
     def _write_session(self, session_id, model_json):
         main.OPENCODE_DB_LOCAL.parent.mkdir(parents=True, exist_ok=True)
@@ -459,6 +465,42 @@ class OpencodeContinueModelTests(unittest.TestCase):
             main._opencode_continue_model("ses_foreign"),
             ("amazon-bedrock/remote-default", None),
         )
+
+    def test_persisted_oauth_provider_is_preserved(self):
+        self._write_auth({
+            "github-copilot": {
+                "type": "oauth",
+                "refresh": "test-refresh",
+                "access": "test-access",
+                "expires": 1,
+            },
+        })
+        self._write_session("ses_copilot", json.dumps({
+            "providerID": "github-copilot", "id": "gpt-5.6-sol", "variant": "high",
+        }))
+        self.assertEqual(
+            main._opencode_continue_model("ses_copilot"),
+            ("github-copilot/gpt-5.6-sol", "high"),
+        )
+
+    def test_malformed_auth_data_does_not_mark_provider_available(self):
+        self._write_session("ses_copilot", json.dumps({
+            "providerID": "github-copilot", "id": "gpt-5.6-sol",
+        }))
+        malformed = (
+            "not-json",
+            "[]",
+            json.dumps({"github-copilot": {"type": "oauth", "access": "test-access"}}),
+            json.dumps({"github-copilot": {"type": "api", "key": "test-key", "metadata": None}}),
+            json.dumps({"github-copilot": {"type": "unknown"}}),
+        )
+        for auth_data in malformed:
+            with self.subTest(auth_data=auth_data):
+                main.OPENCODE_AUTH_FILE.write_text(auth_data)
+                self.assertEqual(
+                    main._opencode_continue_model("ses_copilot"),
+                    ("amazon-bedrock/remote-default", None),
+                )
 
     def test_staged_key_provider_is_preserved(self):
         # A key-based provider backed by a staged key CAN serve at runtime
