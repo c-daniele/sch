@@ -39,7 +39,7 @@ AWS-native tooling ready to use, with no manual configuration.
 - aws-docs (self-hosted) and the proxy installed at build time with `uv tool install` (isolated venvs under `/opt/uv-tools`,
   entrypoint in `/usr/local/bin` — local disk, not shadowed by the mount) — no download
   at runtime, deterministic versions. Config seeded by `init-workspace.sh` (only if
-  absent): `mcp` section with both `enabled: true`, and explicit `provider.amazon-bedrock`
+  absent): `mcp` section with both `enabled: true`, and an explicit `providers.amazon-bedrock`
   block (see below). Verified live on deployed runtime: `opencode mcp list` shows
   both `✓ connected`.
 - **`context7`** (`@upstash/context7-mcp`, pinned `3.2.3`): built-in MCP server for
@@ -109,16 +109,69 @@ variables, the OpenCode log loads config from `/mnt/workspace/state/config/openc
 `opencode mcp list` shows `aws-docs`/`aws-mcp` connected, and a test prompt correctly
 invokes the `websearch` (Exa) tool.
 
-The seeded config still declares `provider.amazon-bedrock` **explicitly**
+The seeded config still declares the `amazon-bedrock` provider **explicitly**
 (design D3), independently of this fix: it makes the behavior deterministic even
 if the upstream autoload gate changes in the future, and it is the method recommended by
-the OpenCode documentation.
+the OpenCode documentation. Since OpenCode 2 the block uses the native V2 shape,
+`providers.amazon-bedrock` with the region under `settings.region`. Do not add a V1
+`provider.amazon-bedrock` block next to it: OpenCode 2 then ignores the V1 block,
+region included.
+
+### Bedrock output cap on OpenCode 2
+
+OpenCode 2 sends no output-token cap (`inferenceConfig.maxTokens`) to Bedrock unless
+the config sets one, so Bedrock applies its own default of 4096 tokens to Claude
+models. Long answers and large file edits then get cut off and the session appears
+to hang. The seeded config therefore sets `body.inferenceConfig.maxTokens` for the
+default model and the most used Claude inference profiles (global and EU). The list
+and values are in the [runtime-image spec](specs/platform/runtime-image.md) (R20).
+A model that is not on the list keeps the 4096 default. Two limits apply when you
+change a value: it must not exceed the model's Bedrock max output (Bedrock rejects
+the request), and Bedrock reserves input plus `maxTokens` from your tokens-per-minute
+quota when each request starts, so a very high cap throttles sooner.
+
+Workspaces created before this change keep their existing `opencode.json` (it is
+never overwritten), so they still have the 4096 default until the block is edited
+by hand.
+
+**Fixing a workspace seeded by an older image.** Either edit the config or let the
+current image re-seed it:
+
+- *Edit by hand* (keeps your customizations): in
+  `/mnt/workspace/state/config/opencode/opencode.json`, **replace** the old block
+
+  ```json
+  "provider": { "amazon-bedrock": { "options": { "region": "eu-west-1" } } }
+  ```
+
+  with the V2 block, keeping your region, and add further models the same way:
+
+  ```json
+  "providers": {
+    "amazon-bedrock": {
+      "settings": { "region": "eu-west-1" },
+      "models": {
+        "eu.anthropic.claude-sonnet-4-6": { "body": { "inferenceConfig": { "maxTokens": 64000 } } }
+      }
+    }
+  }
+  ```
+
+  Replace, never add next to the old block: with both present OpenCode 2 drops the
+  V1 block and its region. Restart the TUI afterwards.
+- *Re-seed* (when there is nothing in the file worth keeping): delete the file inside
+  the microVM, then run `sch stop <ws>` and `sch shell <ws>`. The shim runs
+  `init-workspace.sh` on every boot, after any checkpoint restore, and it seeds the
+  config only when the file is absent, so the next boot writes the current image's
+  version. This path follows from the boot code but has not yet been run on a live
+  runtime.
 
 **Troubleshooting — `/models` or MCP tools are not visible**:
 1. Check the image version in use: `printenv SCH_IMAGE_VERSION` (must be ≥ `v8`
    to have the ENV fix in the interactive shell).
 2. Seeded config: `cat /mnt/workspace/state/config/opencode/opencode.json` must
-   contain `provider.amazon-bedrock.options.region` and the `mcp` section.
+   contain `providers.amazon-bedrock.settings.region` (or, in a workspace seeded by
+   an older image, `provider.amazon-bedrock.options.region`) and the `mcp` section.
 3. Shell signals: `printenv | grep -E 'XDG|OPENCODE_DB|AWS_PROFILE|AWS_REGION'` — must
    all be set (via `/etc/profile.d/sch-env.sh` + `~/.bashrc` by `sch`).
 4. `opencode mcp list` and `opencode providers list` for connection/autoload status.

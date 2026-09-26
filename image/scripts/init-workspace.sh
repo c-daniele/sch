@@ -200,6 +200,16 @@ if [ "${HARNESS}" = "opencode" ]; then
     # servers/ — "disable a server by setting enabled to false"). `command`
     # points at the globally-installed binary `/usr/local/bin/context7-mcp`
     # (no `npx` at runtime, no env entries — anonymous access).
+    # TASK-9: the provider block uses the native OpenCode 2 shape
+    # (`providers`/`settings`) because it carries per-model overrides, and a V2
+    # `providers.amazon-bedrock` entry next to a V1 `provider.amazon-bedrock`
+    # one makes OpenCode drop the V1 block (region included). OpenCode 2 sends
+    # no `inferenceConfig.maxTokens` to Bedrock unless configured, so Bedrock
+    # caps Claude output at its own 4096-token default and long turns stall;
+    # each `body` below sets the cap explicitly. Values stay within each
+    # model's AWS max output (a larger value is rejected) and are not maximized
+    # blindly: Bedrock reserves input + maxTokens from the TPM quota at request
+    # start. A model missing from this map keeps the Bedrock default.
     if [ ! -f "${OPENCODE_CONFIG_FILE}" ]; then
         cat > "${OPENCODE_CONFIG_FILE}" <<EOF
 {
@@ -207,10 +217,36 @@ if [ "${HARNESS}" = "opencode" ]; then
   "model": "amazon-bedrock/eu.anthropic.claude-sonnet-4-6",
   "small_model": "amazon-bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0",
   "default_agent": "remote-interactive",
-  "provider": {
+  "providers": {
     "amazon-bedrock": {
-      "options": {
+      "settings": {
         "region": "${SEED_REGION}"
+      },
+      "models": {
+        "eu.anthropic.claude-sonnet-4-6": {
+          "body": { "inferenceConfig": { "maxTokens": 64000 } }
+        },
+        "global.anthropic.claude-fable-5": {
+          "body": { "inferenceConfig": { "maxTokens": 64000 } }
+        },
+        "global.anthropic.claude-fable-5-1": {
+          "body": { "inferenceConfig": { "maxTokens": 128000 } }
+        },
+        "global.anthropic.claude-opus-5": {
+          "body": { "inferenceConfig": { "maxTokens": 64000 } }
+        },
+        "global.anthropic.claude-opus-5-5": {
+          "body": { "inferenceConfig": { "maxTokens": 128000 } }
+        },
+        "eu.anthropic.claude-fable-5": {
+          "body": { "inferenceConfig": { "maxTokens": 64000 } }
+        },
+        "eu.anthropic.claude-opus-5": {
+          "body": { "inferenceConfig": { "maxTokens": 64000 } }
+        },
+        "eu.anthropic.claude-opus-5-5": {
+          "body": { "inferenceConfig": { "maxTokens": 128000 } }
+        }
       }
     }
   },
@@ -237,7 +273,7 @@ if [ "${HARNESS}" = "opencode" ]; then
   }
 }
 EOF
-        log "seeded default OpenCode config (provider.amazon-bedrock region=${SEED_REGION}, default_agent=remote-interactive, mcp.aws-docs, mcp.aws-mcp, mcp.context7 disabled) at ${OPENCODE_CONFIG_FILE}"
+        log "seeded default OpenCode config (providers.amazon-bedrock region=${SEED_REGION} with Claude maxTokens overrides, default_agent=remote-interactive, mcp.aws-docs, mcp.aws-mcp, mcp.context7 disabled) at ${OPENCODE_CONFIG_FILE}"
     else
         log "OpenCode config already present, leaving untouched"
     fi

@@ -62,7 +62,7 @@ Out of scope:
 ### Cross-account Bedrock (TASK-19)
 
 - **R11.** A staged `BEDROCK_API_KEY` SHALL re-authenticate only Bedrock clients: the value reaches harness processes exclusively as `AWS_BEARER_TOKEN_BEDROCK`, and every non-Bedrock AWS call (checkpoint S3, DynamoDB, AgentCore, the aws-mcp MCP server) MUST keep authenticating with the execution role.
-- **R12.** Cross-account inference is defined for account Y with model access in the SAME region as the runtime: the harnesses call the bedrock-runtime endpoint of the runtime region and need no extra configuration. Account Y outside the runtime region is out of scope for the dispatcher: the operator may only redirect individual harnesses by hand (e.g. `env.AWS_REGION` in Claude settings, `provider.amazon-bedrock.options.region` in `opencode.json`), because a process-wide region override would apply to every harness at once instead of one (the aws-mcp operation region itself stays frozen at its seeded `--metadata AWS_REGION` value; only Bedrock clients follow the override).
+- **R12.** Cross-account inference is defined for account Y with model access in the SAME region as the runtime: the harnesses call the bedrock-runtime endpoint of the runtime region and need no extra configuration. Account Y outside the runtime region is out of scope for the dispatcher: the operator may only redirect individual harnesses by hand (e.g. `env.AWS_REGION` in Claude settings, `providers.amazon-bedrock.settings.region` in `opencode.json`), because a process-wide region override would apply to every harness at once instead of one (the aws-mcp operation region itself stays frozen at its seeded `--metadata AWS_REGION` value; only Bedrock clients follow the override).
 
 ### GitHub token (TASK-26)
 

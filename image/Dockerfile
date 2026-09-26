@@ -274,6 +274,14 @@
 # SCH process keeps its V1 topology: TUI and headless tasks run
 # `--standalone`, the supervised `serve` on :4096 is only the attach/web/
 # injection backend. Fresh installation: no V1 session/credential compatibility.
+# v34: Bedrock output cap (TASK-9) — OpenCode 2 sends no
+# `inferenceConfig.maxTokens` to Bedrock unless configured, so Bedrock capped
+# Claude output at its 4096-token default and long turns stalled. The seeded
+# opencode.json (init-workspace.sh) moves the provider block to the native V2
+# `providers.amazon-bedrock` shape (`settings.region`; mixing it with the V1
+# `provider` block drops the V1 block) and sets a per-model maxTokens for the
+# default model and the main global/EU Claude profiles. Fresh workspaces only:
+# an existing opencode.json is never overwritten.
 
 # Must stay in the GLOBAL ARG scope (before the first FROM): an ARG declared
 # after a FROM belongs to that build stage and expands to "" in later FROM

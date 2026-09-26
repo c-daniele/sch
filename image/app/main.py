@@ -2465,7 +2465,13 @@ def _opencode_available_providers() -> set:
     staged keys, or IAM."""
     try:
         config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
-        configured = set((config.get("provider") or {}).keys())
+        # OpenCode 2 accepts both the V1 `provider` map and the native V2
+        # `providers` map (the seed uses the V2 one, TASK-9).
+        configured = set()
+        for key in ("provider", "providers"):
+            section = config.get(key)
+            if isinstance(section, dict):
+                configured.update(section.keys())
     except Exception:  # noqa: BLE001
         configured = set()
 

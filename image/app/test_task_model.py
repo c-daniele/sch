@@ -483,6 +483,44 @@ class OpencodeContinueModelTests(unittest.TestCase):
             ("amazon-bedrock/remote-default", None),
         )
 
+    def _write_config_with_provider(self, key):
+        main.OPENCODE_CONFIG_FILE.write_text(json.dumps({
+            "model": "amazon-bedrock/remote-default",
+            key: {"acme": {"models": {"coder": {}}}},
+        }))
+        self._write_session("ses_acme", json.dumps({
+            "providerID": "acme", "id": "coder", "variant": "high",
+        }))
+
+    def test_provider_declared_in_v2_providers_map_is_preserved(self):
+        # The seed uses the native OpenCode 2 `providers` map (TASK-9), and an
+        # operator may declare a custom provider there.
+        self._write_config_with_provider("providers")
+        self.assertEqual(
+            main._opencode_continue_model("ses_acme"),
+            ("acme/coder", "high"),
+        )
+
+    def test_provider_declared_in_v1_provider_map_is_preserved(self):
+        self._write_config_with_provider("provider")
+        self.assertEqual(
+            main._opencode_continue_model("ses_acme"),
+            ("acme/coder", "high"),
+        )
+
+    def test_malformed_providers_section_is_ignored(self):
+        main.OPENCODE_CONFIG_FILE.write_text(json.dumps({
+            "model": "amazon-bedrock/remote-default",
+            "providers": ["acme"],
+        }))
+        self._write_session("ses_acme", json.dumps({
+            "providerID": "acme", "id": "coder",
+        }))
+        self.assertEqual(
+            main._opencode_continue_model("ses_acme"),
+            ("amazon-bedrock/remote-default", None),
+        )
+
     def test_persisted_credential_provider_is_preserved(self):
         # OpenCode 2 keeps `auth login` / `/connect` credentials in the DB
         # `credential` table (one row per provider integration).

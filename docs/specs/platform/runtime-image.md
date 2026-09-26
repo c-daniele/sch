@@ -69,7 +69,7 @@ Out of scope:
 
 **R19.** The image SHALL include an `init-workspace.sh` script, executed by the shim at startup, that creates the canonical directories (`/mnt/workspace/repo`, `/mnt/workspace/state/data`, `/mnt/workspace/state/config`, `/mnt/workspace/state/claude`) if absent and seeds the selected harness's configuration only when it does not already exist. Before a fresh seed, when the workspace identity is known, the bootstrap SHALL check for an S3 checkpoint and, if present, perform the L2 restore instead of the seed. The script MUST be idempotent: repeated executions never overwrite existing state or config; the L2 restore MUST honor the same property (never overwrite pre-existing L1 content). The verify-and-retry logic (`FRESH_SETTLE_WAIT` + `seed_verified`) SHALL extend to `${REPO_DIR}/.mcp.json` as the seeded canary when harness=claude (equivalent of `opencode.json` for opencode).
 
-**R20.** Seeded OpenCode configuration (`opencode.json`) SHALL include: the default models of the `amazon-bedrock` provider, an explicit `provider.amazon-bedrock` block (with region), the `mcp` section with `aws-docs`/`aws-mcp` enabled (`aws-mcp`: `type: local`, command `mcp-proxy-for-aws-cli` with the managed endpoint, `--metadata AWS_REGION=<seed region>`, `--read-only`, no `environment` block and no static keys), `mcp.context7` disabled (R24), and `default_agent=remote-interactive`.
+**R20.** Seeded OpenCode configuration (`opencode.json`) SHALL include: the default models of the `amazon-bedrock` provider, an explicit `providers.amazon-bedrock` block in the native OpenCode 2 shape (region under `settings.region`), the `mcp` section with `aws-docs`/`aws-mcp` enabled (`aws-mcp`: `type: local`, command `mcp-proxy-for-aws-cli` with the managed endpoint, `--metadata AWS_REGION=<seed region>`, `--read-only`, no `environment` block and no static keys), `mcp.context7` disabled (R24), and `default_agent=remote-interactive`. The seed MUST NOT also carry a V1 `provider.amazon-bedrock` block: OpenCode 2 drops a V1 provider entry when a V2 entry for the same provider exists, region included. Because OpenCode 2 sends no Bedrock output cap unless configured (Bedrock then applies its own default, 4096 tokens for Claude), the `providers.amazon-bedrock.models` map SHALL set `body.inferenceConfig.maxTokens` for the seeded default model and for the listed Claude inference profiles, each value at or below that model's Amazon Bedrock max output (a larger value is rejected). Models absent from the map keep the Bedrock default.
 
 **R21.** Seeded Claude Code configuration SHALL include: Bedrock linkage via `CLAUDE_CODE_USE_BEDROCK=1`; a `.mcp.json` in `${REPO_DIR}` (`/mnt/workspace/repo/.mcp.json`, excluded from versioning via `.git/info/exclude`, since Claude Code does not read `.mcp.json` from `$CLAUDE_CONFIG_DIR`) with `aws-docs`/`aws-mcp` enabled (`aws-mcp`: command `mcp-proxy-for-aws-cli` with the managed endpoint in `args`, `--metadata AWS_REGION=<seed region>`, `--read-only`, empty `env`, no static credentials) and `mcpServers.context7` disabled (R25); context7 blocked via `disabledMcpjsonServers` in `~/.claude/settings.json`; and the optional Claude Code `settings.json` in its local config root, seeded via idempotent JSON merge preserving pre-existing fields.
 
@@ -168,6 +168,18 @@ Pinned versions (single source of truth: `image/Dockerfile` `ARG`s; current valu
 | Backlog.md | `BACKLOG_MD_VERSION` | 1.50.1 |
 | GitHub CLI | `GH_VERSION` | 2.100.0 |
 
+Seeded Bedrock output caps (R20; single source of truth: `image/scripts/init-workspace.sh`; current values):
+
+| OpenCode model ID (`amazon-bedrock/…`) | `inferenceConfig.maxTokens` | Bedrock max output |
+| --- | --- | --- |
+| `eu.anthropic.claude-sonnet-4-6` (seeded default) | 64000 | 64K |
+| `global.anthropic.claude-fable-5`, `eu.anthropic.claude-fable-5` | 64000 | 128K |
+| `global.anthropic.claude-fable-5-1` | 128000 | 128K |
+| `global.anthropic.claude-opus-5`, `eu.anthropic.claude-opus-5` | 64000 | 128K |
+| `global.anthropic.claude-opus-5-5`, `eu.anthropic.claude-opus-5-5` | 128000 | 128K |
+
+Bedrock reserves input plus `maxTokens` from the tokens-per-minute quota at request start, so a cap below the maximum is a deliberate concurrency trade-off, not an error.
+
 Typical flows:
 - `sch open myws` → shim warms up (`noop`), seed-or-restore runs, readiness marker written, TUI launches through the dispatcher with the ENV bridge and `SCH_EXECUTION_MODE=interactive`.
 - `sch task myws --continue "..."` → `task` action returns a `task_id` sub-second, `/ping` is `HealthyBusy` until completion, `info` exposes the running task, Telegram receives the terminal event.
@@ -200,3 +212,4 @@ Typical flows:
 - [MANIFESTO](../../../MANIFESTO.md)
 - Code: `image/Dockerfile`, `image/app/main.py` (shim), `image/app/telegram_notifier.py`, `image/scripts/init-workspace.sh`, `image/scripts/harness-wrapper.sh` (dispatcher), `image/scripts/sch-build-image.sh`, `image/claude-templates/`, `image/opencode-templates/`, `image/pi-templates/`, `bin/verify-multi-harness.sh`, `bin/verify-l2.sh`, `bin/verify-headless-tasks.sh`
 - Memory-cost footprint: `image/app/test_memory_footprint.py`, `bin/mem-trace.sh`, [memory peak attribution](../../history/memory-peak-attribution.md)
+- Seeded OpenCode config and Bedrock output caps (R20): `image/app/test_opencode_workspace_seed.py`, `image/test-local.sh` section 9; verified in TASK-9 against OpenCode 2.0.18 with an offline fake Bedrock endpoint
