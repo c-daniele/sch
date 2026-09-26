@@ -45,7 +45,7 @@ AWS-native tooling ready to use, with no manual configuration.
 - **`context7`** (`@upstash/context7-mcp`, pinned `3.2.3`): built-in MCP server for
   up-to-date, version-specific library documentation (resolves a library name to a
   Context7-compatible ID, then fetches docs for that ID). Installed via `npm install -g`
-  alongside `opencode-ai` / `@anthropic-ai/claude-code`; entrypoint `context7-mcp` lands
+  alongside `@opencode/cli` / `@anthropic-ai/claude-code`; entrypoint `context7-mcp` lands
   in `/usr/local/bin/` (local disk, not shadowed by the mount). **Disabled by default**
   on both harnesses — OpenCode uses the official `mcp.context7.enabled = false` flag
   (https://opencode.ai/docs/mcp-servers/), Claude Code ships the entry in `.mcp.json` but

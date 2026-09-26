@@ -257,6 +257,23 @@
 # see app/main.py REPO_CHECKPOINT_EXCLUDE_NAMES) and rebuilds the project env
 # best-effort after a restore (SCH_REBUILD_ENV_ON_RESTORE=1); the v29
 # follow-up debt note above is resolved by that change.
+# v33: harness pins (TASK-7) — OpenCode 1.18.31 -> 2.0.18, Pi 0.85.1 -> 0.87.1,
+# Claude Code 2.1.272 -> 2.1.282. OpenCode 2 is a MAJOR release the image had to
+# be ported to, not just re-pinned: the npm package moved from `opencode-ai` to
+# `@opencode/cli` (postinstall selects the platform binary; bins `opencode` and
+# `opencode2`); `opencode --version` prints `opencode v2.0.18`; `opencode web`
+# is gone (the `serve` subcommand now serves the web UI on `/` plus the API
+# under `/api/*`) and `serve` REQUIRES HTTP basic auth (`opencode:<password>`,
+# pinned via OPENCODE_SERVER_PASSWORD, clients use OPENCODE_PASSWORD); the TUI
+# client `opencode attach <url>` became `opencode --server <url>`; the root TUI
+# lost `--model` (SCH passes the model through OPENCODE_CONFIG_CONTENT);
+# `run --variant` merged into `--model provider/model#variant`; `export`/
+# `import` moved under `session`; the SQLite `session` table is `session_v2`
+# and auth.json credentials live in the `credential` table; V1 plugins do not
+# load (the seeded sch-telegram plugin is ported to the V2 plugin API). Every
+# SCH process keeps its V1 topology: TUI and headless tasks run
+# `--standalone`, the supervised `serve` on :4096 is only the attach/web/
+# injection backend. Fresh installation: no V1 session/credential compatibility.
 
 # Must stay in the GLOBAL ARG scope (before the first FROM): an ARG declared
 # after a FROM belongs to that build stage and expands to "" in later FROM
@@ -277,30 +294,32 @@ RUN if ls /tmp/certs/*.pem >/dev/null 2>&1; then \
 
 FROM ${RUNTIME_BASE} AS runtime
 
-# 1.18.20 is the minimum safe headless version (anomalyco/opencode#43675):
-# older `opencode run --auto` ignored permission requests from child sessions,
-# leaving the parent task tool running forever when a subagent needed
-# permission. Keep the default on the latest validated patch and enforce the
-# floor after installation below.
-ARG OPENCODE_VERSION=1.18.31
+# OpenCode 2 (TASK-7, v33 banner above). The 1.x line had a 1.18.20 headless
+# floor (anomalyco/opencode#43675: `run --auto` ignored child-session
+# permission requests); 2.x is past it by construction, so the build asserts
+# the exact pin and the 2.x CLI surface SCH depends on instead of a floor.
+# npm package: `@opencode/cli` (the 1.x `opencode-ai` package stops at 1.18.x).
+ARG OPENCODE_VERSION=2.0.18
 # Claude Code (sch-multi-harness, design D10): pinned via npm-22, binary lands
 # at /usr/local/bin/claude. OQ-CLAUDE-VERSION (design Open Questions) calls for
 # a pinned @anthropic-ai/claude-code version that honors BOTH
-# CLAUDE_CODE_USE_BEDROCK=1 AND --dangerously-skip-permissions. v14 bumps the
-# pin to 2.1.210: the /model picker lineup is baked per-binary-version, and
-# the current Anthropic aliases require a recent binary.
+# CLAUDE_CODE_USE_BEDROCK=1 AND --dangerously-skip-permissions. The /model
+# picker lineup is baked per-binary-version, and the current Anthropic aliases
+# require a recent binary — bump the pin when the aliases move.
 # No `latest` tag (spec: runtime-image, "Claude Code installato a versione
 # pinnata").
-ARG CLAUDE_CODE_VERSION=2.1.272
+ARG CLAUDE_CODE_VERSION=2.1.282
 
 # Pi (add-pi-harness, design D10): third harness, pinned like everything else in
 # this image. 0.84.2 is the version whose behavior was verified empirically in a
 # live SCH microVM (Bedrock via the execution role with zero extra config, print
 # mode not hanging on stdin, session layout, extension hooks) — see the change's
-# design.md Open Questions. Pi is PRE-1.0: expect breaking changes between bumps,
-# which is exactly why the capability asserts below fail the BUILD (never degrade
-# at runtime) and why the session-layout resolver keeps a documented `-c` fallback.
-ARG PI_VERSION=0.85.1
+# design.md Open Questions; 0.87.1 re-verified the CLI flags and the session
+# layout (getDefaultSessionDirPath, CURRENT_SESSION_VERSION=3) unchanged. Pi is
+# PRE-1.0: expect breaking changes between bumps, which is exactly why the
+# capability asserts below fail the BUILD (never degrade at runtime) and why the
+# session-layout resolver keeps a documented `-c` fallback.
+ARG PI_VERSION=0.87.1
 ARG SCH_IMAGE_VERSION=dev
 # v31: migrate-aws-api-to-managed-mcp — replaces the self-hosted
 # `awslabs.aws-api-mcp-server` (pinned 1.3.46, entering end-of-development
@@ -460,22 +479,44 @@ RUN case "$(uname -m)" in \
     && aws --version \
     && test "$(aws --version 2>&1 | awk '{print $1}')" = "aws-cli/${AWS_CLI_VERSION}"
 
-# --- OpenCode, pinned ---------------------------------------------------------
-RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
-    && test "$(opencode --version | tr -d '[:space:]')" = "${OPENCODE_VERSION}" \
-    && node -e "const have=process.argv[1].split('.').map(Number), min=[1,18,20]; for(let i=0;i<3;i++){if((have[i]||0)>min[i])process.exit(0);if((have[i]||0)<min[i])process.exit(1)}" "${OPENCODE_VERSION}" \
-    || { echo "OpenCode ${OPENCODE_VERSION} is unsafe for headless subagents; require >= 1.18.20" >&2; exit 1; }
+# --- OpenCode 2, pinned (TASK-7) ------------------------------------------------
+# `@opencode/cli` ships a tiny launcher plus per-platform optional dependencies;
+# its postinstall copies the matching native binary into place (linux x64/arm64,
+# glibc and musl, avx2 or baseline picked from /proc/cpuinfo). The postinstall
+# therefore MUST run (no --ignore-scripts here, unlike pi). The image's npm 10
+# runs install scripts by default; npm >= 11.19 blocks them unless
+# `--allow-scripts=@opencode/cli` is passed — if the toolchain moves, the
+# version assert below fails the build. `opencode --version` prints
+# `opencode v2.0.18`, so the assert strips the prefix before comparing.
+RUN npm install -g --no-fund --no-audit "@opencode/cli@${OPENCODE_VERSION}" \
+    && test "$(opencode --version | sed -E 's/^opencode[[:space:]]+v?//' | tr -d '[:space:]')" = "${OPENCODE_VERSION}"
 
-# Build-time assert (sch-remote-ui-tunnel, design D7): the pinned OpenCode
-# version MUST expose `serve` (sch attach's remote HTTP server) and `acp`
-# (sch acp's stdio ACP agent for harness=opencode). Verified at design time
-# against 1.18.4: both present, plus `opencode attach <url>` client-side
-# (not checked here — that runs on the OPERATOR's laptop, not in this
-# image). A future OPENCODE_VERSION bump that drops either subcommand fails
-# the build loudly instead of producing an image where `sch attach`/`sch
-# acp` silently do not work.
-RUN opencode serve --help >/dev/null \
-    && opencode acp --help >/dev/null
+# Build-time assert on the 2.x CLI surface SCH depends on (spec: runtime-image
+# R4/I1; findings in .backlog/brainstorming/2026-09-25.AgentVersionUpgrade).
+# A future OPENCODE_VERSION bump that renames or drops any of these fails the
+# build loudly instead of producing an image where a surface silently breaks:
+#   serve --hostname --port   supervised attach/web/injection backend
+#                             (V1's `opencode web`; authenticated in 2.x)
+#   acp                       stdio ACP agent for `sch acp` (harness=opencode)
+#   run --session/--model/--agent/--auto  headless task argv (--variant is
+#                             gone: SCH composes `--model provider/model#variant`)
+#   session export/import     `sch handoff` transport (top-level in 1.x)
+#   debug paths               local paths (V1 `db path`), used by test-local.sh
+# `opencode --server <url>` (the 1.x `attach` client) runs on the OPERATOR's
+# laptop and is not checked here.
+RUN opencode serve --help > /tmp/oc-serve.txt \
+    && grep -q -- '--hostname' /tmp/oc-serve.txt \
+    && grep -q -- '--port' /tmp/oc-serve.txt \
+    && opencode acp --help >/dev/null \
+    && opencode run --help > /tmp/oc-run.txt \
+    && for flag in '--session' '--model' '--agent' '--auto' '--standalone'; do \
+        grep -q -- "${flag}" /tmp/oc-run.txt \
+            || { echo "opencode ${OPENCODE_VERSION} run is missing required flag '${flag}'" >&2; exit 1; }; \
+    done \
+    && opencode session export --help | grep -q -- '--sanitize' \
+    && opencode session import --help | grep -q -- '--directory' \
+    && opencode debug paths --help >/dev/null \
+    && rm -f /tmp/oc-serve.txt /tmp/oc-run.txt
 
 # --- Claude Code, pinned (sch-multi-harness, design D10) ----------------------
 # Installed alongside OpenCode via the same npm-22 toolchain (already symlinked
@@ -845,8 +886,9 @@ RUN test -f /app/opencode-templates/AGENTS.md \
     && grep -q 'bootstrap to run, not a blocker' /app/opencode-templates/agents/remote-auto.md
 
 # Claude Code main-thread agents and global microVM instructions. Claude Code
-# 2.1.210 is pinned above and build-checked for the --agent CLI surface. The
-# files are seeded user-scoped under $CLAUDE_CONFIG_DIR by init-workspace.sh.
+# is pinned above (CLAUDE_CODE_VERSION) and build-checked for the --agent CLI
+# surface. The files are seeded user-scoped under $CLAUDE_CONFIG_DIR by
+# init-workspace.sh.
 COPY --chown=sch:sch claude-templates/ /app/claude-templates/
 RUN test -f /app/claude-templates/CLAUDE.md \
     && test -f /app/claude-templates/agents/remote-interactive.md \

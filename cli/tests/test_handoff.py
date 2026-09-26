@@ -154,14 +154,20 @@ class HandoffTests(unittest.TestCase):
             region = "eu-west-1"
         export = json.dumps({"info": {"id": "ses_x"}, "messages": []})
         processes = [
-            type("P", (), {"returncode": 0, "stdout": "1.18.19\n", "stderr": ""})(),
+            type("P", (), {"returncode": 0, "stdout": "opencode v2.0.18\n", "stderr": ""})(),
             type("P", (), {"returncode": 0, "stdout": export, "stderr": ""})(),
         ]
+        seen_argv = []
+        fake_run = _fake_run_opencode(processes)
+
+        def recording_run(argv, cwd=None, stdout_path=None):
+            seen_argv.append(list(argv))
+            return fake_run(argv, cwd=cwd, stdout_path=stdout_path)
         warm = runtime.InvocationResult(True, json.dumps({"status": "ok", "storage": "session"}))
         imported = runtime.InvocationResult(True, json.dumps({"status": "ok", "sessionID": "ses_x", "reimported": True, "repoEmpty": True}))
         out, err = io.StringIO(), io.StringIO()
         with patch.object(handoff.deps, "which_opencode", return_value="/bin/opencode"), \
-             patch.object(handoff, "_run_opencode", side_effect=_fake_run_opencode(processes)), \
+             patch.object(handoff, "_run_opencode", side_effect=recording_run), \
              patch.object(handoff.harness_mod, "resolve_harness", return_value=ResolvedHarness("sid", "opencode", False, storage="session", epoch=1)), \
              patch.object(handoff.runtime, "invoke_verified", side_effect=[warm, imported]), \
              patch.object(handoff.bundlexfer, "bundle_helper_argv", return_value=["helper"]), \
@@ -172,6 +178,34 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(out.getvalue().strip(), "ses_x")
         self.assertIn("overwritten", err.getvalue())
         self.assertIn("--sync", err.getvalue())
+        # OpenCode 2: `session export --standalone <id>` (top-level `export` in 1.x).
+        self.assertEqual(seen_argv[1], ["/bin/opencode", "session", "export", "--standalone", "ses_x"])
+
+    def test_local_version_strips_the_2x_prefix(self):
+        processes = [type("P", (), {"returncode": 0, "stdout": "opencode v2.0.18\n", "stderr": ""})()]
+        with patch.object(handoff, "_run_opencode", side_effect=_fake_run_opencode(processes)):
+            self.assertEqual(handoff._version("/bin/opencode"), "2.0.18")
+        processes = [type("P", (), {"returncode": 1, "stdout": "", "stderr": "boom"})()]
+        with patch.object(handoff, "_run_opencode", side_effect=_fake_run_opencode(processes)):
+            self.assertEqual(handoff._version("/bin/opencode"), "unknown")
+
+    def test_latest_session_uses_standalone_json_listing(self):
+        listing = json.dumps([
+            {"id": "ses_old", "directory": os.getcwd(), "updated": 1, "title": "old"},
+            {"id": "ses_new", "directory": os.getcwd(), "updated": 5, "title": "new"},
+            {"id": "ses_other", "directory": "/elsewhere", "updated": 9},
+        ])
+        processes = [type("P", (), {"returncode": 0, "stdout": listing, "stderr": ""})()]
+        seen = []
+        fake = _fake_run_opencode(processes)
+
+        def recording(argv, cwd=None, stdout_path=None):
+            seen.append(list(argv))
+            return fake(argv, cwd=cwd, stdout_path=stdout_path)
+        with patch.object(handoff, "_run_opencode", side_effect=recording), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(handoff._latest_session("/bin/opencode"), "ses_new")
+        self.assertEqual(seen[0], ["/bin/opencode", "session", "list", "--standalone", "--format", "json"])
 
     def test_unknown_action_has_rebuild_remedy(self):
         class Cfg:

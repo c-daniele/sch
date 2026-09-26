@@ -29,7 +29,7 @@ Out of scope:
 
 - **R1.** `sch run <workspace>` SHALL accept an optional `--model <id>` that selects the model with which the harness TUI is started for that single invocation. The value MUST be ephemeral: it is not persisted in the workspace metadata (local index or central registry) and does not affect subsequent invocations.
 - **R2.** Without the flag, behavior SHALL remain identical to the pre-flag behavior: the harness starts without arguments and resolves its own default model.
-- **R2a.** There SHALL be no `--variant` flag on `sch run`: the pinned opencode TUI defines no such option (only `opencode run` does), so the CLI SHALL reject it with a usage error naming the remedy (in-TUI model picker, or `sch task --variant` for headless tasks). Reasoning effort on headless tasks is covered in [headless-task-execution](../access-surfaces/headless-task-execution.md) (R8a/R8b).
+- **R2a.** There SHALL be no `--variant` flag on `sch run`: the opencode TUI defines no such option (OpenCode 2's `opencode run` folds the variant into `--model provider/model#variant`), so the CLI SHALL reject it with a usage error naming the remedy (in-TUI model picker, or `sch task --variant` for headless tasks). Reasoning effort on headless tasks is covered in [headless-task-execution](../access-surfaces/headless-task-execution.md) (R8a/R8b).
 
 ### Payload and marker propagation
 
@@ -38,10 +38,10 @@ Out of scope:
 
 ### Harness-specific mapping
 
-- **R5.** The autostart SHALL translate the marker's model field into the harness-specific argument: `opencode --model <id>` for harness `opencode`, `claude --model <id>` for harness `claude`, and Pi's native provider/model pair for harness `pi` — through the harness dispatcher, with the ENV bridge and readiness gating unchanged.
-- **R6.** Each value MUST be passed as a discrete argv element, without shell interpolation.
+- **R5.** The autostart SHALL translate the marker's model field into the harness-specific selector: for harness `opencode` the OpenCode 2 TUI has no `--model` flag, so the model is merged for that process only through the `OPENCODE_CONFIG_CONTENT` environment variable (`{"model": "<id>"}`, JSON-encoded by the autostart, never written to the seeded `opencode.json`), and the TUI runs `opencode --standalone` (private embedded server, no per-user background service); `claude --model <id>` for harness `claude`; Pi's native provider/model pair for harness `pi` — through the harness dispatcher, with the ENV bridge and readiness gating unchanged.
+- **R6.** Each value MUST be passed as a discrete argv element (or, for the opencode model, as a JSON-encoded environment value), without shell interpolation.
 - **R7.** The value is opaque to `sch`: any id accepted by the harness (e.g. `provider/model-id` for opencode, a Bedrock inference-profile ID for claude or for pi) is forwarded without interpretation, and an unrecognized model produces the harness's native error, not an `sch` error.
-- **R10.** `--model` SHALL compose with `sch run --continue`: the autostart forwards both the resume selector (`--session`/`--resume`) and `--model` as discrete argv elements (Pi: `--session` plus the provider/model pair); either flag absent leaves the other's behavior unchanged.
+- **R10.** `--model` SHALL compose with `sch run --continue`: the autostart forwards both the resume selector (`opencode --standalone --session <id>` with the model in `OPENCODE_CONFIG_CONTENT`; `claude --resume <id> --model <id>`; Pi: `--session` plus the provider/model pair) and the model; either flag absent leaves the other's behavior unchanged.
 
 ### Syntactic validation (two lines of defense)
 

@@ -336,7 +336,7 @@ Where the moving parts live:
 | `image/app/telegram_interaction.py` | Inbound side: command queue poll (exactly-once consume), approval broker, keyboard/outcome message sync. |
 | `image/app/main.py` | Lifecycle emission points (task submit/terminal, stall detection, shutdown flush), free-text dispatch (D5), opencode injection. |
 | `image/claude-templates/hooks/telegram-hook.py` | Claude Code milestone hook + decisional PreToolUse (remote approval). |
-| `image/opencode-templates/plugin/sch-telegram.js` | OpenCode milestone plugin + decisional permission.ask. |
+| `image/opencode-templates/plugin/sch-telegram.js` | OpenCode 2 plugin (default export `{id, setup}`): milestones via the event stream, activity markers via tool hooks, decisional `evaluate` permission hook (remote approval). |
 | `image/scripts/init-workspace.sh` | Idempotently seeds the hook/plugin into each workspace. |
 | `infra/agent_runtime.yaml`, `infra/deploy.sh` | Parameters and wiring. |
 | `infra/telegram_webhook_handler.py` | Central webhook router Lambda (secret check, chat allowlist, topic→workspace routing, command enqueue). |

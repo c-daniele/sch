@@ -104,7 +104,8 @@ echo "${INFO}" | grep -q '"status": *"ok"' && { echo "PASS: info invocation"; PA
 
 echo "== 4. opencode pin =="
 PINNED=$(docker exec "${CONTAINER}" printenv OPENCODE_VERSION)
-INSTALLED=$(docker exec "${CONTAINER}" opencode --version | tr -d '[:space:]')
+# OpenCode 2 prints `opencode v2.0.18`; compare the bare version with the pin.
+INSTALLED=$(docker exec "${CONTAINER}" opencode --version | sed -E 's/^opencode[[:space:]]+v?//' | tr -d '[:space:]')
 echo "pinned=${PINNED} installed=${INSTALLED}"
 [ "${INSTALLED}" = "${PINNED}" ] && { echo "PASS: opencode version matches pin"; PASS=$((PASS+1)); } \
     || { echo "FAIL: opencode ${INSTALLED} != pin ${PINNED}"; FAIL=$((FAIL+1)); }
@@ -122,7 +123,8 @@ echo "== 5. XDG env =="
 check "XDG_DATA_HOME"   docker exec "${CONTAINER}" sh -c '[ "$XDG_DATA_HOME" = "/mnt/workspace/state/data" ]'
 check "XDG_CONFIG_HOME" docker exec "${CONTAINER}" sh -c '[ "$XDG_CONFIG_HOME" = "/mnt/workspace/state/config" ]'
 check "OPENCODE_DB on local disk" docker exec "${CONTAINER}" sh -c '[ "$OPENCODE_DB" = "/home/sch/.opencode/opencode.db" ]'
-check "opencode db path honors OPENCODE_DB" docker exec "${CONTAINER}" sh -c '[ "$(opencode db path 2>/dev/null)" = "/home/sch/.opencode/opencode.db" ]'
+# OpenCode 2: `debug paths db` (1.x had `db path`). Does not start a server.
+check "opencode debug paths db honors OPENCODE_DB" docker exec "${CONTAINER}" sh -c '[ "$(opencode debug paths db 2>/dev/null)" = "/home/sch/.opencode/opencode.db" ]'
 check "git safe.directory configured" docker exec "${CONTAINER}" sh -c 'git config --system --get-all safe.directory | grep -q /mnt/workspace/repo'
 check "non-root user"   docker exec "${CONTAINER}" sh -c '[ "$(id -u)" = "1000" ]'
 # add-user-provider-keys (design D3): the provider-key staging dir must exist,

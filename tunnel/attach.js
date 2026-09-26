@@ -86,9 +86,17 @@ async function main() {
   const { localPort } = bridge;
   process.stderr.write(`sch: attach bridge listening on 127.0.0.1:${localPort} -> remote port ${opts.remotePort}\n`);
 
-  const attachArgv = [opts.opencodeBin, 'attach', `http://127.0.0.1:${localPort}`, ...opts.extraAttachArgs];
+  const attachArgv = [opts.opencodeBin, '--server', `http://127.0.0.1:${localPort}`, ...opts.extraAttachArgs];
   process.stderr.write(`sch: launching local TUI: ${attachArgv.join(' ')}\n`);
-  const child = spawn(attachArgv[0], attachArgv.slice(1), { stdio: 'inherit' });
+  // OpenCode 2: the remote `opencode serve` requires basic auth. The password
+  // arrives from `sch attach` in SCH_OPENCODE_SERVER_PASSWORD (env, never argv
+  // — it must not show up in `ps`) and is handed to the TUI client as
+  // OPENCODE_PASSWORD, the variable `opencode --server <url>` reads.
+  const childEnv = { ...process.env };
+  const serverPassword = childEnv.SCH_OPENCODE_SERVER_PASSWORD;
+  delete childEnv.SCH_OPENCODE_SERVER_PASSWORD;
+  if (serverPassword) childEnv.OPENCODE_PASSWORD = serverPassword;
+  const child = spawn(attachArgv[0], attachArgv.slice(1), { stdio: 'inherit', env: childEnv });
 
   await new Promise((resolve) => {
     child.on('exit', async (code, signal) => {

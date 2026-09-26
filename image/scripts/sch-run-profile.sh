@@ -93,11 +93,23 @@ except Exception:
                 fi
                 unset _SCH_RUN_PI_ROLE
                 exec pi "${_SCH_RUN_PI_ARGS[@]}"
-            elif [ "${_SCH_RUN_HARNESS}" = "opencode" ] && [ -n "${_SCH_RUN_SESSION}" ]; then
+            elif [ "${_SCH_RUN_HARNESS}" = "opencode" ]; then
+                # OpenCode 2 (TASK-7): the TUI runs `--standalone` (a private
+                # embedded server, V1 semantics — never the per-user background
+                # service the shim does not supervise). The root command has no
+                # `--model` flag any more: an explicit model rides the
+                # OPENCODE_CONFIG_CONTENT env merge (`{"model": "provider/id"}`),
+                # scoped to this process only — the seeded opencode.json on the
+                # mount is never rewritten. The value is JSON-encoded by python
+                # (already validated by `sch run` against [A-Za-z0-9._:/-]+).
                 if [ -n "${_SCH_RUN_MODEL}" ]; then
-                    exec opencode --session "${_SCH_RUN_SESSION}" --model "${_SCH_RUN_MODEL}"
+                    OPENCODE_CONFIG_CONTENT="$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1]}))' "${_SCH_RUN_MODEL}")"
+                    export OPENCODE_CONFIG_CONTENT
+                fi
+                if [ -n "${_SCH_RUN_SESSION}" ]; then
+                    exec opencode --standalone --session "${_SCH_RUN_SESSION}"
                 else
-                    exec opencode --session "${_SCH_RUN_SESSION}"
+                    exec opencode --standalone
                 fi
             elif [ "${_SCH_RUN_HARNESS}" = "claude" ] && [ -n "${_SCH_RUN_SESSION}" ]; then
                 if [ -n "${_SCH_RUN_MODEL}" ]; then

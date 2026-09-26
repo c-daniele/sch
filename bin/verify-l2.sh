@@ -237,7 +237,7 @@ do_setup() {
         remote_stdout "echo ${new_b64} | base64 -d > ${STATE_DIR}/config/opencode/opencode.json && grep -o ${magic} ${STATE_DIR}/config/opencode/opencode.json"
 
         echo "-- OpenCode session with a remembered keyword (stdin redirected to /dev/null, see README operational note)"
-        remote_stdout "cd ${REPO_DIR} && opencode run --title sch-verify-l2-${magic} \"Remember this keyword: ${magic}. Reply with exactly: ${magic}\" < /dev/null 2>&1 | tail -3"
+        remote_stdout "cd ${REPO_DIR} && opencode run --standalone --title sch-verify-l2-${magic} \"Remember this keyword: ${magic}. Reply with exactly: ${magic}\" < /dev/null 2>&1 | tail -3"
 
         echo "-- recording OpenCode session list"
         remote_stdout "cd ${REPO_DIR} && opencode session list 2>/dev/null | head -20"

@@ -20,6 +20,7 @@ import glob
 import os
 import re
 import shutil
+import subprocess
 
 from .config import die
 
@@ -164,3 +165,28 @@ def which_opencode():
     ``sch attach``).
     """
     return shutil.which("opencode")
+
+
+_OPENCODE_VERSION_RE = re.compile(r"\bv?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b")
+
+
+def normalize_opencode_version(raw):
+    """Bare ``X.Y.Z`` from ``opencode --version`` output. OpenCode 2 prints
+    ``opencode v2.0.18`` (1.x printed the bare version); the microVM shim
+    reports the bare form, so the two sides stay comparable."""
+    match = _OPENCODE_VERSION_RE.search(raw or "")
+    return match.group(1) if match else (raw or "unknown").strip() or "unknown"
+
+
+def local_opencode_version(opencode_bin=None):
+    """Installed local OpenCode version (bare) or ``"unknown"``."""
+    exe = opencode_bin or which_opencode()
+    if not exe:
+        return "unknown"
+    try:
+        result = subprocess.run([exe, "--version"], capture_output=True, text=True)
+    except OSError:
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return normalize_opencode_version(result.stdout or result.stderr)

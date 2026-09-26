@@ -23,6 +23,7 @@ The OpenCode TUI is launched by the user inside the interactive shell
 
 import atexit
 import asyncio
+import base64
 import calendar
 import contextlib
 import hashlib
@@ -30,6 +31,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import shutil
 import sqlite3
@@ -156,6 +158,12 @@ SUPPORTED_STORAGE_BACKENDS = ("s3", "session")
 # Fix: every pass backs up into a FRESH temp file (equivalent to the
 # always-working first pass) and atomically renames it over DB_BACKUP_PATH.
 OPENCODE_DB_LOCAL = Path(os.environ.get("OPENCODE_DB", "/home/sch/.opencode/opencode.db"))
+# OpenCode 2 schema (TASK-7): sessions live in `session_v2` (columns SCH reads:
+# id, directory, parent_id, model JSON {id, providerID, variant}, time_updated)
+# and provider credentials in `credential` (integration_id = provider id). The
+# 1.x `session` table and `auth.json` are not read: fresh installation.
+OPENCODE_SESSION_TABLE = "session_v2"
+OPENCODE_CREDENTIAL_TABLE = "credential"
 DB_BACKUP_PATH = Path(
     os.environ.get(
         "SCH_DB_BACKUP_PATH", str(STATE_DIR / "data" / "opencode" / "opencode.db.backup")
@@ -241,10 +249,10 @@ GIT_CREDENTIALS_FILE = Path(
 # (see the `@app.websocket` handler below), and this same shim process pumps
 # bytes directly via asyncio. No shared budget with `sch shell`/`sch open`/
 # `sch run` (D9 resolved by removal of the shared-channel dependency).
-# Fixed local port `opencode web` listens on inside the microVM for `sch
+# Fixed local port `opencode serve` listens on inside the microVM for `sch
 # attach` and `sch web`. Fixed (not random) so `serve-ensure` can probe
-# liveness without an extra discovery round-trip; matches OpenCode's own
-# documented example port for `opencode attach <url>` (opencode --help).
+# liveness without an extra discovery round-trip; 4096 is OpenCode's own
+# documented example port for `opencode --server <url>`.
 OPENCODE_SERVE_PORT = int(os.environ.get("SCH_OPENCODE_SERVE_PORT", "4096"))
 # Orphan timeout for the websocket tunnel handler: if the local bridge dies
 # without sending a clean close frame, tear down the target after this many
@@ -510,7 +518,7 @@ NOTIFICATION_FIELDS = (NOTIFICATION_STATUS_FIELD, "notified_utc", "notified_by")
 # letting an unexpectedly verbose task create an oversized status object.
 TASK_OUTPUT_MAX_CHARS = 12000
 # Per-invocation auto-approval flag(s) for `opencode run` headless (OQ3).
-# The pinned opencode-ai (OPENCODE_VERSION in image/Dockerfile) uses `--auto`
+# The pinned OpenCode (OPENCODE_VERSION in image/Dockerfile) uses `--auto`
 # for auto-approving permissions that are not explicitly denied. This is
 # scoped to the argv of the headless run only; the TUI path is unchanged.
 _TASK_AUTO_APPROVE_FLAGS = [
@@ -525,9 +533,10 @@ _TASK_AUTO_APPROVE_FLAGS = [
 # image/opencode-templates/agents/remote-auto.md). Argv-only, same scoping
 # rationale as the auto-approve flag above: the TUI path keeps the seeded
 # `default_agent` (remote-interactive). Override with SCH_TASK_AGENT; set it
-# to the empty string to fall back to OpenCode's default agent. Unknown agent
-# names are safe: `opencode run --agent <missing>` warns and falls back to
-# the default agent instead of failing.
+# to the empty string to fall back to OpenCode's default agent. OpenCode 2
+# hard-errors on an unknown agent (`Agent not found`), so the argv builder
+# passes `--agent` only when the seeded agent file is on disk and otherwise
+# degrades to the default agent (see _opencode_agent_available).
 _TASK_AGENT = os.environ.get("SCH_TASK_AGENT", "remote-auto").strip()
 
 # Single in-process task slot per workspace (design D2/D3).
@@ -553,7 +562,7 @@ _TASK_STATUS: dict = {"state": "none"}
 _INTERACTIVE_ACTIVE: bool = False
 
 # --- Remote UI tunnel (sch-remote-ui-tunnel, design D5) -------------------------
-# Supervised `opencode web` process for `sch attach` and `sch web`. Started lazily on the
+# Supervised `opencode serve` process for `sch attach` and `sch web`. Started lazily on the
 # first `serve-ensure` action, restarted on crash by the supervisor thread.
 # Single instance per microVM (one workspace = one microVM = at most one
 # opencode harness process), so no per-shellId dimension here (unlike a
@@ -568,6 +577,42 @@ _SERVE_STATE: dict = {
     "restart_count": 0,
     "supervisor_started": False,
 }
+
+# OpenCode 2 `serve` requires HTTP basic auth (`opencode:<password>`) on every
+# `/api/*` route and on the web UI. The supervisor pins the password through
+# OPENCODE_SERVER_PASSWORD so it survives a backend restart, and persists it
+# 0600 on LOCAL disk next to opencode.db (never on the checkpointed mount, never
+# in a log): every in-VM client — the Telegram injector below, `sch attach`'s
+# `opencode --server`, `sch web`'s browser — reads it from here through the
+# `serve-ensure` response. Regenerating it is as simple as deleting the file
+# (next `serve-ensure` mints a new one and restarts nothing: the running
+# backend keeps the old password until its next restart — documented).
+OPENCODE_SERVE_PASSWORD_FILE = Path(
+    os.environ.get("SCH_OPENCODE_SERVE_PASSWORD_FILE", "/home/sch/.opencode/serve.password")
+)
+OPENCODE_SERVE_USER = "opencode"
+
+
+def _opencode_serve_password() -> str:
+    """Return the pinned serve password, minting it on first use."""
+    try:
+        existing = OPENCODE_SERVE_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("cannot read %s: %s", OPENCODE_SERVE_PASSWORD_FILE, exc)
+    password = secrets.token_urlsafe(32)
+    try:
+        OPENCODE_SERVE_PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = OPENCODE_SERVE_PASSWORD_FILE.with_suffix(".tmp")
+        tmp.write_text(password, encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, OPENCODE_SERVE_PASSWORD_FILE)
+    except OSError as exc:
+        logger.warning("cannot persist %s: %s", OPENCODE_SERVE_PASSWORD_FILE, exc)
+    return password
 
 
 def _utcnow() -> str:
@@ -1159,7 +1204,7 @@ def _child_env_with_provider_keys(env: dict = None) -> dict:
     """A child-process environment carrying exactly the staged key set.
 
     Used for every process this shim spawns that may talk to a provider
-    (headless tasks, the `opencode web`/serve supervisor, init-workspace.sh).
+    (headless tasks, the `opencode serve` supervisor, init-workspace.sh).
     The names are POPPED first: the set is authoritative, so a key removed
     by the user must disappear from the child's environment even if this shim
     process (or a previous deployment's container ENV) still had it — that is
@@ -2365,8 +2410,7 @@ def _telegram_interaction_gate() -> bool:
 
 
 def _seeded_opencode_model() -> tuple | None:
-    """(providerID, modelID) from the seeded opencode config, for the
-    injection fallback when the serve API requires an explicit model."""
+    """(providerID, modelID) from the seeded opencode config."""
     try:
         config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
         model = config.get("model") or ""
@@ -2385,7 +2429,9 @@ def _opencode_resume_model(session_id: str | None) -> str | None:
         return None
     try:
         with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
-            row = conn.execute("SELECT model FROM session WHERE id = ?", (session_id,)).fetchone()
+            row = conn.execute(
+                f"SELECT model FROM {OPENCODE_SESSION_TABLE} WHERE id = ?", (session_id,)
+            ).fetchone()
         session_model = json.loads(row[0]) if row and row[0] else {}
         provider = session_model.get("providerID") or ""
         if provider and provider not in _opencode_available_providers():
@@ -2415,63 +2461,20 @@ _STAGED_KEY_PROVIDERS = {
 
 
 def _opencode_available_providers() -> set:
-    """Provider IDs opencode can serve through config, auth, keys, or IAM."""
+    """Provider IDs opencode can serve through config, stored credentials,
+    staged keys, or IAM."""
     try:
         config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
         configured = set((config.get("provider") or {}).keys())
     except Exception:  # noqa: BLE001
         configured = set()
 
-    # OpenCode stores `/connect` and `auth login` credentials under its XDG
-    # data directory, keyed by provider ID. Validate the pinned version's
-    # credential shapes without retaining or logging any credential values.
-    try:
-        auth = json.loads(OPENCODE_AUTH_FILE.read_text(encoding="utf-8"))
-        if isinstance(auth, dict):
-            for provider, credential in auth.items():
-                if not isinstance(provider, str) or not MODEL_ID_RE.fullmatch(provider):
-                    continue
-                if not isinstance(credential, dict):
-                    continue
-                auth_type = credential.get("type")
-                valid = False
-                if auth_type == "oauth":
-                    expires = credential.get("expires")
-                    valid = (
-                        isinstance(credential.get("refresh"), str)
-                        and isinstance(credential.get("access"), str)
-                        and isinstance(expires, int)
-                        and not isinstance(expires, bool)
-                        and expires >= 0
-                        and all(
-                            name not in credential or isinstance(credential[name], str)
-                            for name in ("accountId", "enterpriseUrl")
-                        )
-                    )
-                elif auth_type == "api":
-                    metadata = credential.get("metadata")
-                    valid = (
-                        isinstance(credential.get("key"), str)
-                        and (
-                            "metadata" not in credential
-                            or (
-                                isinstance(metadata, dict)
-                                and all(
-                                    isinstance(key, str) and isinstance(value, str)
-                                    for key, value in metadata.items()
-                                )
-                            )
-                        )
-                    )
-                elif auth_type == "wellknown":
-                    valid = (
-                        isinstance(credential.get("key"), str)
-                        and isinstance(credential.get("token"), str)
-                    )
-                if valid:
-                    configured.add(provider)
-    except Exception:  # noqa: BLE001
-        pass
+    # OpenCode 2 keeps `/connect` and `auth login` credentials in the SQLite
+    # `credential` table, one row per stored credential with `integration_id`
+    # = the provider ID (1.x kept them in $XDG_DATA_HOME/opencode/auth.json,
+    # which 2.x imports once and then ignores). Only the provider IDs are read;
+    # credential values are never retained or logged.
+    configured.update(_opencode_stored_credential_providers())
 
     staged = _read_staged_provider_keys()
     for key, providers in _STAGED_KEY_PROVIDERS.items():
@@ -2479,6 +2482,24 @@ def _opencode_available_providers() -> set:
             configured.update(providers)
     configured.add("amazon-bedrock")
     return configured
+
+
+def _opencode_stored_credential_providers() -> set:
+    if not OPENCODE_DB_LOCAL.exists():
+        return set()
+    providers: set = set()
+    try:
+        with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
+            rows = conn.execute(
+                f"SELECT integration_id FROM {OPENCODE_CREDENTIAL_TABLE} "
+                "WHERE integration_id IS NOT NULL AND value IS NOT NULL AND value != ''"
+            ).fetchall()
+        for (provider,) in rows:
+            if isinstance(provider, str) and MODEL_ID_RE.fullmatch(provider):
+                providers.add(provider)
+    except Exception:  # noqa: BLE001
+        pass
+    return providers
 
 
 def _opencode_session_model_variant(session_id: str | None) -> tuple[str | None, str | None]:
@@ -2496,7 +2517,9 @@ def _opencode_session_model_variant(session_id: str | None) -> tuple[str | None,
         return None, None
     try:
         with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
-            row = conn.execute("SELECT model FROM session WHERE id = ?", (session_id,)).fetchone()
+            row = conn.execute(
+                f"SELECT model FROM {OPENCODE_SESSION_TABLE} WHERE id = ?", (session_id,)
+            ).fetchone()
         session_model = json.loads(row[0]) if row and row[0] else {}
         if not isinstance(session_model, dict):
             return None, None
@@ -2543,11 +2566,19 @@ def _opencode_continue_model(session_id: str | None) -> tuple[str | None, str | 
 
 
 def _opencode_api(method: str, path: str, payload: dict = None, timeout: float = 10.0):
+    """Call the supervised OpenCode 2 backend. Paths are given WITHOUT the
+    `/api` prefix (added here); every route needs basic auth `opencode:<pw>`."""
     port = _SERVE_STATE.get("port") or OPENCODE_SERVE_PORT
-    url = f"http://127.0.0.1:{port}{path}"
+    url = f"http://127.0.0.1:{port}/api{path}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    token = base64.b64encode(
+        f"{OPENCODE_SERVE_USER}:{_opencode_serve_password()}".encode("utf-8")
+    ).decode("ascii")
     request = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method=method
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "Authorization": f"Basic {token}"},
+        method=method,
     )
     with urllib.request.urlopen(request, timeout=timeout) as resp:
         body = resp.read().decode("utf-8")
@@ -2555,21 +2586,22 @@ def _opencode_api(method: str, path: str, payload: dict = None, timeout: float =
 
 
 def _opencode_inject_text(text: str) -> dict:
-    """Inject ``text`` as a user message into the most recent session of the
-    supervised ``opencode web`` backend (design D5 case 2 / task 4.1).
+    """Inject ``text`` as a user message into the most recent top-level session
+    of the supervised ``opencode serve`` backend (design D5 case 2 / task 4.1).
 
-    Returns {ok, session_id?, title?, error?}. The message POST runs the
-    whole turn server-side, so it is fired on a worker thread: we wait a
-    short beat to catch immediate errors (bad session, schema rejection).
-    The turn-end milestone is the only success response sent to Telegram."""
+    Returns {ok, session_id?, title?, error?}. OpenCode 2's
+    ``POST /api/session/{id}/prompt`` enqueues the message (delivery "steer")
+    and returns immediately; the turn runs server-side and its end is the only
+    success milestone Telegram gets (session.idle via the seeded plugin)."""
     if not _serve_is_alive():
         return {"ok": False, "error": "backend opencode non attivo"}
     try:
-        sessions = _opencode_api("GET", "/session") or []
+        listing = _opencode_api("GET", "/session") or {}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"lista sessioni non disponibile ({exc})"}
+    sessions = listing.get("data") if isinstance(listing, dict) else listing
     candidates = [
-        s for s in sessions
+        s for s in (sessions or [])
         if isinstance(s, dict) and s.get("id") and not s.get("parentID")
     ]
     if not candidates:
@@ -2579,55 +2611,14 @@ def _opencode_inject_text(text: str) -> dict:
     )
     target = candidates[0]
     session_id = target["id"]
-
-    outcome: dict = {}
-
-    def _post() -> None:
-        # Preference order (verified against the opencode server API):
-        # /prompt_async (204, does not wait for the turn) then /message
-        # (synchronous, waits for the whole turn); each optionally retried
-        # with the seeded model when the server rejects a model-less body.
-        base = {"parts": [{"type": "text", "text": text}]}
-        model = _seeded_opencode_model()
-        attempts = [("/prompt_async", base, 15.0)]
-        if model:
-            attempts.append((
-                "/prompt_async",
-                dict(base, model={"providerID": model[0], "modelID": model[1]}),
-                15.0,
-            ))
-        attempts.append(("/message", base, 1800.0))
-        if model:
-            attempts.append((
-                "/message",
-                dict(base, model={"providerID": model[0], "modelID": model[1]}),
-                1800.0,
-            ))
-        last_error = None
-        for suffix, payload, timeout in attempts:
-            try:
-                _opencode_api(
-                    "POST", f"/session/{session_id}{suffix}", payload, timeout=timeout
-                )
-                outcome["done"] = True
-                return
-            except urllib.error.HTTPError as exc:
-                last_error = f"HTTP {exc.code}"
-                if exc.code in (400, 404, 422):
-                    continue  # older/newer API shape: try the next form
-                break
-            except Exception as exc:  # noqa: BLE001
-                last_error = str(exc)
-                break
-        outcome["error"] = last_error or "iniezione fallita"
-
-    worker = threading.Thread(
-        target=_post, name="sch-telegram-inject", daemon=True
-    )
-    worker.start()
-    worker.join(2.5)
-    if outcome.get("error"):
-        return {"ok": False, "error": outcome["error"], "session_id": session_id}
+    try:
+        _opencode_api(
+            "POST", f"/session/{session_id}/prompt", {"text": text}, timeout=15.0
+        )
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "error": f"HTTP {exc.code}", "session_id": session_id}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "session_id": session_id}
     return {
         "ok": True,
         "session_id": session_id,
@@ -3733,14 +3724,24 @@ def _run_init_workspace() -> dict:
 
 
 def _opencode_version() -> str:
+    """Installed OpenCode version as a bare `X.Y.Z`. OpenCode 2 prints
+    `opencode v2.0.18` (1.x printed the bare version); the prefix is stripped so
+    the value stays comparable with the Dockerfile pin and the laptop CLI's
+    version-parity check."""
     exe = shutil.which("opencode")
     if not exe:
         return "not-installed"
     try:
         out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
-        return out.stdout.strip() or out.stderr.strip() or "unknown"
+        raw = out.stdout.strip() or out.stderr.strip() or "unknown"
+        return _normalize_opencode_version(raw)
     except Exception as exc:  # noqa: BLE001
         return f"error: {exc}"
+
+
+def _normalize_opencode_version(raw: str) -> str:
+    match = re.search(r"\bv?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b", raw or "")
+    return match.group(1) if match else (raw or "unknown").strip()
 
 
 def _claude_version() -> str:
@@ -3793,22 +3794,20 @@ def _workspace_info() -> dict:
 
 
 def _resolve_latest_opencode_session() -> str | None:
-    """Return the latest OpenCode session associated with this worktree."""
+    """Return the latest top-level OpenCode session associated with this
+    worktree. OpenCode 2 stores sessions in the `session_v2` table (the 1.x
+    `session` table is not read: fresh installation, TASK-7); child sessions
+    (subagents, `parent_id` set) are never resumed."""
     if not OPENCODE_DB_LOCAL.exists():
         return None
     try:
         conn = sqlite3.connect(str(OPENCODE_DB_LOCAL))
         try:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(session)")}
-            if "directory" in columns:
-                rows = conn.execute(
-                    "SELECT id FROM session WHERE directory = ? "
-                    "ORDER BY time_updated DESC LIMIT 1", (str(REPO_DIR),),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT id FROM session ORDER BY time_updated DESC LIMIT 1"
-                ).fetchall()
+            rows = conn.execute(
+                f"SELECT id FROM {OPENCODE_SESSION_TABLE} "
+                "WHERE directory = ? AND parent_id IS NULL "
+                "ORDER BY time_updated DESC LIMIT 1", (str(REPO_DIR),),
+            ).fetchall()
             return rows[0][0] if rows else None
         finally:
             conn.close()
@@ -4534,7 +4533,7 @@ def _handle_session_import(payload: dict) -> dict:  # noqa: ARG001
         try:
             with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
                 reimported = conn.execute(
-                    "SELECT 1 FROM session WHERE id = ?", (session_id,)
+                    f"SELECT 1 FROM {OPENCODE_SESSION_TABLE} WHERE id = ?", (session_id,)
                 ).fetchone() is not None
         except sqlite3.Error:
             pass
@@ -4545,32 +4544,36 @@ def _handle_session_import(payload: dict) -> dict:  # noqa: ARG001
     # Same child-environment discipline as the task/serve spawns: this runs the
     # real `opencode` binary through the dispatcher, so it gets the staged key
     # set (import itself needs no provider, but no shim-spawned harness process
-    # is left with a stale key set).
+    # is left with a stale key set). OpenCode 2: `session import` (1.x had a
+    # top-level `import`), `--standalone` so no background service is spawned,
+    # `--directory` binds the session to the worktree explicitly.
     env = _child_env_with_provider_keys()
     env["SCH_HARNESS"] = "opencode"
     try:
         proc = subprocess.run(
-            [exe, "import", str(staged)], cwd=str(REPO_DIR), env=env,
-            capture_output=True, text=True, timeout=600,
+            [exe, "session", "import", "--standalone", "--directory", str(REPO_DIR), str(staged)],
+            cwd=str(REPO_DIR), env=env, capture_output=True, text=True, timeout=600,
         )
     except Exception as exc:  # noqa: BLE001
         return {"status": "error", "action": action, "opencodeVersion": version,
-                "error": f"opencode import failed: {exc}"}
+                "error": f"opencode session import failed: {exc}"}
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "unknown error").strip()[-4000:]
         return {"status": "error", "action": action, "opencodeVersion": version,
-                "error": f"opencode import failed: {detail}"}
+                "error": f"opencode session import failed: {detail}"}
     try:
         with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
             row = conn.execute(
-                "SELECT time_updated FROM session WHERE id = ?", (session_id,)
+                f"SELECT time_updated FROM {OPENCODE_SESSION_TABLE} WHERE id = ?", (session_id,)
             ).fetchone()
             if row is None:
                 raise RuntimeError("imported session is absent from opencode.db")
             if _resolve_latest_opencode_session() != session_id:
-                maximum = conn.execute("SELECT COALESCE(MAX(time_updated), 0) FROM session").fetchone()[0]
+                maximum = conn.execute(
+                    f"SELECT COALESCE(MAX(time_updated), 0) FROM {OPENCODE_SESSION_TABLE}"
+                ).fetchone()[0]
                 conn.execute(
-                    "UPDATE session SET time_updated = ? WHERE id = ?",
+                    f"UPDATE {OPENCODE_SESSION_TABLE} SET time_updated = ? WHERE id = ?",
                     (max(int(time.time() * 1000), int(maximum) + 1), session_id),
                 )
                 conn.commit()
@@ -4790,7 +4793,9 @@ def _serve_is_alive() -> bool:
 
 
 def _serve_supervisor_loop() -> None:
-    """Background supervisor for the shared `opencode web` backend.
+    """Background supervisor for the shared `opencode serve` backend (OpenCode
+    2: the `serve` subcommand hosts both the HTTP API under `/api/*` and the web
+    UI on `/`, replacing 1.x's `opencode web`).
 
     Mirrors the Popen conventions of _run_task (process-group start,
     inherited+overridden env so harness-wrapper.sh dispatches to opencode
@@ -4801,6 +4806,8 @@ def _serve_supervisor_loop() -> None:
     workspace never gets a server started against an empty/default config.
     Never started eagerly at boot — only lazily, on the first `serve-ensure`
     action — so workspaces that never use `sch attach` or `sch web` pay no cost.
+    The basic-auth password is pinned through OPENCODE_SERVER_PASSWORD (see
+    _opencode_serve_password) so clients keep working across restarts.
     """
     while True:
         with _SERVE_LOCK:
@@ -4810,13 +4817,13 @@ def _serve_supervisor_loop() -> None:
             if not alive and ready:
                 if proc is not None:
                     logger.warning(
-                        "opencode web exited (code=%s); restarting (restart #%d)",
+                        "opencode serve exited (code=%s); restarting (restart #%d)",
                         proc.returncode, _SERVE_STATE["restart_count"] + 1,
                     )
                     _SERVE_STATE["restart_count"] += 1
                 opencode_exe = shutil.which("opencode") or "opencode"
                 argv = [
-                    opencode_exe, "web",
+                    opencode_exe, "serve",
                     "--hostname", "127.0.0.1",
                     "--port", str(OPENCODE_SERVE_PORT),
                 ]
@@ -4828,6 +4835,7 @@ def _serve_supervisor_loop() -> None:
                     # from its next restart — accepted, documented (design D4).
                     proc_env = _child_env_with_provider_keys()
                     proc_env["SCH_HARNESS"] = "opencode"
+                    proc_env["OPENCODE_SERVER_PASSWORD"] = _opencode_serve_password()
                     new_proc = subprocess.Popen(
                         argv,
                         stdin=subprocess.DEVNULL,
@@ -4842,10 +4850,10 @@ def _serve_supervisor_loop() -> None:
                     _SERVE_STATE["port"] = OPENCODE_SERVE_PORT
                     _SERVE_STATE["started_utc"] = _utcnow()
                     logger.info(
-                        "opencode web started: pid=%d port=%d", new_proc.pid, OPENCODE_SERVE_PORT,
+                        "opencode serve started: pid=%d port=%d", new_proc.pid, OPENCODE_SERVE_PORT,
                     )
                 except Exception as exc:  # noqa: BLE001 — supervisor must never die
-                    logger.error("failed to start opencode web: %s", exc, exc_info=True)
+                    logger.error("failed to start opencode serve: %s", exc, exc_info=True)
         time.sleep(3)
 
 
@@ -4919,23 +4927,51 @@ def _build_headless_argv(
             argv += ["--agent", _TASK_AGENT]
         argv += ["--dangerously-skip-permissions", prompt]
         return argv
-    # opencode (default)
+    # opencode (default) — OpenCode 2 `run` (TASK-7):
+    #   --standalone  embed a private server in this process (V1 semantics);
+    #                 without it 2.x would discover/start a per-user background
+    #                 service the shim does not supervise;
+    #   --model p/m#variant  the reasoning-effort variant rides the model
+    #                 reference (the 1.x `--variant` flag is gone); a variant
+    #                 with no model to attach to is dropped — the turn then runs
+    #                 with the model's default effort;
+    #   --agent       only when the seeded agent file exists: 2.x hard-errors on
+    #                 an unknown agent (1.x warned and fell back);
+    #   `--`          guards the prompt: 2.x boolean flags (`--auto`) consume a
+    #                 following boolean-literal token (`y`, `n`, `true`...) as
+    #                 their value, which would leave `run` with no message.
     opencode_exe = shutil.which("opencode") or "opencode"
-    argv = [opencode_exe, "run"]
+    argv = [opencode_exe, "run", "--standalone"]
     if session_id:
         argv += ["--session", session_id]
-    if model:
-        argv += ["--model", model]
-    if variant and MODEL_ID_RE.fullmatch(variant):
-        # Reasoning-effort variant (e.g. `high`): discrete pair like --model.
-        # A malformed value is dropped rather than failing the task — the turn
-        # then runs with the model's default effort.
-        argv += ["--variant", variant]
-    if _TASK_AGENT:
+    model_ref = _opencode_model_ref(model, variant)
+    if model_ref:
+        argv += ["--model", model_ref]
+    if _TASK_AGENT and _opencode_agent_available(_TASK_AGENT):
         argv += ["--agent", _TASK_AGENT]  # default "remote-auto" (sch-remote-agents)
     argv += _TASK_AUTO_APPROVE_FLAGS  # default ["--auto"]
-    argv += [prompt]
+    argv += ["--", prompt]
     return argv
+
+
+def _opencode_model_ref(model: str | None, variant: str | None) -> str | None:
+    """Compose OpenCode 2's `provider/model#variant` reference. A malformed
+    variant is dropped rather than failing the task."""
+    if not model:
+        return None
+    if variant and MODEL_ID_RE.fullmatch(variant) and "#" not in model:
+        return f"{model}#{variant}"
+    return model
+
+
+def _opencode_agent_available(agent: str) -> bool:
+    """True when the seeded agent definition `<XDG_CONFIG_HOME>/opencode/
+    agents/<agent>.md` (or the 1.x `agent/` spelling) is on disk."""
+    config_dir = OPENCODE_CONFIG_FILE.parent
+    return any(
+        (config_dir / folder / f"{agent}.md").is_file()
+        for folder in ("agents", "agent")
+    )
 
 
 def _resolve_latest_harness_session(harness: str) -> str | None:
@@ -6142,6 +6178,10 @@ def invoke(payload, context=None):
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline and not _serve_is_alive():
             time.sleep(0.5)
+        # OpenCode 2 `serve` requires basic auth (user "opencode"); the pinned
+        # password travels to the caller inside the SigV4-authenticated invoke
+        # response only — `sch attach` hands it to the local TUI as
+        # OPENCODE_PASSWORD, `sch web` embeds it in the browser URL.
         return {
             "status": "ok" if _serve_is_alive() else "starting",
             "action": "serve-ensure",
@@ -6149,6 +6189,11 @@ def invoke(payload, context=None):
             "opencode_version": _opencode_version(),
             "workspace_ready": READY_MARKER.exists() and REPO_DIR.exists(),
             "capabilities": {"web": True},
+            "auth": {
+                "scheme": "basic",
+                "user": OPENCODE_SERVE_USER,
+                "password": _opencode_serve_password(),
+            },
         }
 
     if action == "task":

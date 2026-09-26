@@ -60,9 +60,9 @@ def _parse_args(args):
 
 def _run_opencode(argv, cwd=None, stdout_path=None):
     """Run a local opencode command. With ``stdout_path``, stdout is redirected
-    straight to that file instead of a pipe: opencode (bun) exits without
-    flushing pending stdout writes to a pipe, silently truncating payloads
-    beyond the ~64KB pipe buffer — large `export` outputs were cut mid-JSON."""
+    straight to that file instead of a pipe: opencode exits without flushing
+    pending stdout writes to a pipe, silently truncating payloads beyond the
+    ~64KB pipe buffer — large `export` outputs were cut mid-JSON."""
     try:
         if stdout_path is None:
             return subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
@@ -73,8 +73,12 @@ def _run_opencode(argv, cwd=None, stdout_path=None):
 
 
 def _latest_session(opencode_bin, cwd=None):
+    # OpenCode 2: `--standalone` keeps the lookup inside this process (no
+    # per-user background service is discovered or started on the laptop).
     cwd = os.path.realpath(cwd or os.getcwd())
-    result = _run_opencode([opencode_bin, "session", "list", "--format", "json"], cwd=cwd)
+    result = _run_opencode(
+        [opencode_bin, "session", "list", "--standalone", "--format", "json"], cwd=cwd
+    )
     if result.returncode != 0:
         die("cannot list local OpenCode sessions: {}".format((result.stderr or result.stdout).strip()))
     try:
@@ -90,7 +94,9 @@ def _latest_session(opencode_bin, cwd=None):
 
 def _version(opencode_bin):
     result = _run_opencode([opencode_bin, "--version"])
-    return (result.stdout or result.stderr).strip() if result.returncode == 0 else "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return deps.normalize_opencode_version(result.stdout or result.stderr)
 
 
 def _reject_non_opencode_harness_flag(ws, harness_flag):
@@ -124,7 +130,9 @@ def export_local_session(opencode_bin, session_id, sanitize):
     fd, export_path = tempfile.mkstemp(prefix="sch-handoff-", suffix=".json")
     os.close(fd)
     try:
-        argv = [opencode_bin, "export", session_id]
+        # OpenCode 2: `session export` (top-level `export` in 1.x); the JSON
+        # payload shape ({info: {id...}, messages}) is unchanged.
+        argv = [opencode_bin, "session", "export", "--standalone", session_id]
         if sanitize:
             argv.append("--sanitize")
         exported = _run_opencode(argv, cwd=os.getcwd(), stdout_path=export_path)

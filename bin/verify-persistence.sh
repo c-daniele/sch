@@ -149,7 +149,7 @@ do_setup() {
     # backgrounding the same command, or enabling only one MCP server, both
     # complete in seconds. Forcing stdin to /dev/null avoids the hang. Does
     # NOT affect the interactive TUI path (`sch shell` uses a real `--it` pty).
-    remote_stdout "cd ${REPO_DIR} && opencode run --title sch-verify-${magic} \"Reply with exactly: ${magic}\" < /dev/null 2>&1 | tail -3"
+    remote_stdout "cd ${REPO_DIR} && opencode run --standalone --title sch-verify-${magic} \"Reply with exactly: ${magic}\" < /dev/null 2>&1 | tail -3"
 
     echo "-- recording session list"
     remote_stdout "cd ${REPO_DIR} && opencode session list 2>/dev/null | head -20"

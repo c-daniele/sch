@@ -270,14 +270,16 @@ class TaskModelTests(unittest.TestCase):
     # --- argv mapping (design D3) --------------------------------------------
 
     def test_opencode_argv_includes_discrete_model_pair(self):
-        with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"), patch.object(
+            main, "_opencode_agent_available", return_value=True,
+        ):
             argv = main._build_headless_argv("opencode", "oc-session", "prompt", MODEL)
         self.assertEqual(
             argv,
             [
-                "/bin/opencode", "run", "--session", "oc-session",
+                "/bin/opencode", "run", "--standalone", "--session", "oc-session",
                 "--model", MODEL, "--agent", main._TASK_AGENT,
-                *main._TASK_AUTO_APPROVE_FLAGS, "prompt",
+                *main._TASK_AUTO_APPROVE_FLAGS, "--", "prompt",
             ],
         )
 
@@ -379,7 +381,8 @@ class TaskModelTests(unittest.TestCase):
 
 class OpencodeContinueModelTests(unittest.TestCase):
     """`sch task --continue` without `--model` preserves the TUI-selected
-    model and reasoning-effort variant stored on the resumed session row."""
+    model and reasoning-effort variant stored on the resumed session row
+    (OpenCode 2: `session_v2` table; credentials in the `credential` table)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -387,43 +390,57 @@ class OpencodeContinueModelTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self._saved_db = main.OPENCODE_DB_LOCAL
         self._saved_config = main.OPENCODE_CONFIG_FILE
-        self._saved_auth = main.OPENCODE_AUTH_FILE
         self._saved_keys = main.PROVIDER_KEYS_FILE
         main.OPENCODE_DB_LOCAL = root / "opencode.db"
-        main.OPENCODE_CONFIG_FILE = root / "opencode.json"
-        main.OPENCODE_AUTH_FILE = root / "auth.json"
+        main.OPENCODE_CONFIG_FILE = root / "opencode" / "opencode.json"
         main.PROVIDER_KEYS_FILE = root / "provider-keys.env"
         self.addCleanup(setattr, main, "OPENCODE_DB_LOCAL", self._saved_db)
         self.addCleanup(setattr, main, "OPENCODE_CONFIG_FILE", self._saved_config)
-        self.addCleanup(setattr, main, "OPENCODE_AUTH_FILE", self._saved_auth)
         self.addCleanup(setattr, main, "PROVIDER_KEYS_FILE", self._saved_keys)
+        main.OPENCODE_CONFIG_FILE.parent.mkdir(parents=True)
         main.OPENCODE_CONFIG_FILE.write_text(json.dumps({
             "model": "amazon-bedrock/remote-default",
             "provider": {"amazon-bedrock": {"options": {}}},
         }))
+        # The seeded remote-auto agent file: `--agent` is emitted only when it
+        # exists (OpenCode 2 hard-errors on an unknown agent).
+        agents = main.OPENCODE_CONFIG_FILE.parent / "agents"
+        agents.mkdir()
+        (agents / f"{main._TASK_AGENT}.md").write_text("---\nmode: primary\n---\n")
 
     def _stage_keys(self, *names):
         main.PROVIDER_KEYS_FILE.write_text(
             "".join("{}=test-value\n".format(name) for name in names)
         )
 
-    def _write_auth(self, data):
-        main.OPENCODE_AUTH_FILE.write_text(json.dumps(data))
+    def _connect(self):
+        main.OPENCODE_DB_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(main.OPENCODE_DB_LOCAL))
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {main.OPENCODE_SESSION_TABLE} "
+            "(id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, "
+            "time_updated INTEGER, title TEXT, model TEXT)"
+        )
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {main.OPENCODE_CREDENTIAL_TABLE} "
+            "(id TEXT PRIMARY KEY, integration_id TEXT, label TEXT, value TEXT)"
+        )
+        return conn
+
+    def _write_credential(self, provider, value='{"type":"key","key":"test-key"}'):
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT OR REPLACE INTO {main.OPENCODE_CREDENTIAL_TABLE} "
+                "(id, integration_id, label, value) VALUES (?, ?, ?, ?)",
+                (f"cred_{provider}", provider, "API key", value),
+            )
 
     def _write_session(self, session_id, model_json):
-        main.OPENCODE_DB_LOCAL.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(main.OPENCODE_DB_LOCAL)) as conn:
+        with self._connect() as conn:
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS session "
-                "(id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER, title TEXT)"
-            )
-            try:
-                conn.execute("ALTER TABLE session ADD COLUMN model TEXT")
-            except sqlite3.OperationalError:
-                pass  # column already present on a second write
-            conn.execute(
-                "INSERT OR REPLACE INTO session (id, directory, time_updated, title, model)"
-                " VALUES (?, ?, ?, ?, ?)",
+                f"INSERT OR REPLACE INTO {main.OPENCODE_SESSION_TABLE} "
+                "(id, directory, parent_id, time_updated, title, model)"
+                " VALUES (?, ?, NULL, ?, ?, ?)",
                 (session_id, "/repo", 1, "t", model_json),
             )
 
@@ -466,15 +483,13 @@ class OpencodeContinueModelTests(unittest.TestCase):
             ("amazon-bedrock/remote-default", None),
         )
 
-    def test_persisted_oauth_provider_is_preserved(self):
-        self._write_auth({
-            "github-copilot": {
-                "type": "oauth",
-                "refresh": "test-refresh",
-                "access": "test-access",
-                "expires": 1,
-            },
-        })
+    def test_persisted_credential_provider_is_preserved(self):
+        # OpenCode 2 keeps `auth login` / `/connect` credentials in the DB
+        # `credential` table (one row per provider integration).
+        self._write_credential(
+            "github-copilot",
+            json.dumps({"type": "oauth", "refresh": "r", "access": "a", "expires": 1}),
+        )
         self._write_session("ses_copilot", json.dumps({
             "providerID": "github-copilot", "id": "gpt-5.6-sol", "variant": "high",
         }))
@@ -483,24 +498,47 @@ class OpencodeContinueModelTests(unittest.TestCase):
             ("github-copilot/gpt-5.6-sol", "high"),
         )
 
-    def test_malformed_auth_data_does_not_mark_provider_available(self):
+    def test_empty_or_foreign_credential_rows_do_not_mark_provider_available(self):
         self._write_session("ses_copilot", json.dumps({
             "providerID": "github-copilot", "id": "gpt-5.6-sol",
         }))
-        malformed = (
-            "not-json",
-            "[]",
-            json.dumps({"github-copilot": {"type": "oauth", "access": "test-access"}}),
-            json.dumps({"github-copilot": {"type": "api", "key": "test-key", "metadata": None}}),
-            json.dumps({"github-copilot": {"type": "unknown"}}),
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT INTO {main.OPENCODE_CREDENTIAL_TABLE} VALUES (?, ?, ?, ?)",
+                ("cred_empty", "github-copilot", "API key", ""),
+            )
+            conn.execute(
+                f"INSERT INTO {main.OPENCODE_CREDENTIAL_TABLE} VALUES (?, ?, ?, ?)",
+                ("cred_null", None, "API key", '{"type":"key","key":"k"}'),
+            )
+            conn.execute(
+                f"INSERT INTO {main.OPENCODE_CREDENTIAL_TABLE} VALUES (?, ?, ?, ?)",
+                ("cred_bad_id", "not a provider id", "API key", '{"type":"key","key":"k"}'),
+            )
+        self.assertEqual(
+            main._opencode_continue_model("ses_copilot"),
+            ("amazon-bedrock/remote-default", None),
         )
-        for auth_data in malformed:
-            with self.subTest(auth_data=auth_data):
-                main.OPENCODE_AUTH_FILE.write_text(auth_data)
-                self.assertEqual(
-                    main._opencode_continue_model("ses_copilot"),
-                    ("amazon-bedrock/remote-default", None),
-                )
+
+    def test_missing_credential_table_degrades_to_default(self):
+        # DB without the credential table (should not happen on 2.x, but the
+        # reader must never raise): the provider is simply not available.
+        main.OPENCODE_DB_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(str(main.OPENCODE_DB_LOCAL)) as conn:
+            conn.execute(
+                f"CREATE TABLE {main.OPENCODE_SESSION_TABLE} "
+                "(id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, "
+                "time_updated INTEGER, title TEXT, model TEXT)"
+            )
+            conn.execute(
+                f"INSERT INTO {main.OPENCODE_SESSION_TABLE} VALUES (?, ?, NULL, ?, ?, ?)",
+                ("ses_copilot", "/repo", 1, "t",
+                 json.dumps({"providerID": "github-copilot", "id": "gpt-5.6-sol"})),
+            )
+        self.assertEqual(
+            main._opencode_continue_model("ses_copilot"),
+            ("amazon-bedrock/remote-default", None),
+        )
 
     def test_staged_key_provider_is_preserved(self):
         # A key-based provider backed by a staged key CAN serve at runtime
@@ -574,20 +612,23 @@ class OpencodeContinueModelTests(unittest.TestCase):
                 )
 
     def test_missing_model_column_degrades_to_default(self):
-        # Older opencode.db without the model column: SELECT raises, caught.
+        # A session_v2 without the model column: SELECT raises, caught.
         main.OPENCODE_DB_LOCAL.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(main.OPENCODE_DB_LOCAL)) as conn:
             conn.execute(
-                "CREATE TABLE session "
-                "(id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER, title TEXT)"
+                f"CREATE TABLE {main.OPENCODE_SESSION_TABLE} "
+                "(id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, "
+                "time_updated INTEGER, title TEXT)"
             )
             conn.execute(
-                "INSERT INTO session VALUES (?, ?, ?, ?)",
+                f"INSERT INTO {main.OPENCODE_SESSION_TABLE} VALUES (?, ?, NULL, ?, ?)",
                 ("ses_old", "/repo", 1, "t"),
             )
         self.assertEqual(main._opencode_continue_model("ses_old"), (None, None))
 
     def test_opencode_argv_carries_model_and_variant_pairs(self):
+        # OpenCode 2: --standalone, the variant rides the model reference
+        # (`provider/model#variant`), `--` guards the prompt.
         with patch.object(main.shutil, "which", return_value="/bin/opencode"):
             argv = main._build_headless_argv(
                 "opencode", "ses_tui", "prompt",
@@ -596,11 +637,10 @@ class OpencodeContinueModelTests(unittest.TestCase):
         self.assertEqual(
             argv,
             [
-                "/bin/opencode", "run", "--session", "ses_tui",
-                "--model", "amazon-bedrock/muse-spark-1.3",
-                "--variant", "high",
+                "/bin/opencode", "run", "--standalone", "--session", "ses_tui",
+                "--model", "amazon-bedrock/muse-spark-1.3#high",
                 "--agent", main._TASK_AGENT,
-                *main._TASK_AUTO_APPROVE_FLAGS, "prompt",
+                *main._TASK_AUTO_APPROVE_FLAGS, "--", "prompt",
             ],
         )
 
@@ -610,7 +650,35 @@ class OpencodeContinueModelTests(unittest.TestCase):
                 "opencode", "ses_tui", "prompt", "prov/mod", "bad variant",
             )
         self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "prov/mod")
         self.assertNotIn("--variant", argv)
+
+    def test_variant_without_model_is_dropped(self):
+        # The variant has nothing to attach to: no --model at all rather than
+        # a bare `#high` reference.
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+            argv = main._build_headless_argv("opencode", "ses", "prompt", None, "high")
+        self.assertNotIn("--model", argv)
+        self.assertNotIn("--variant", argv)
+
+    def test_agent_flag_is_omitted_when_agent_file_is_missing(self):
+        # OpenCode 2 hard-errors on `--agent <unknown>`: the argv degrades to
+        # the default agent instead of failing the task.
+        (main.OPENCODE_CONFIG_FILE.parent / "agents" / f"{main._TASK_AGENT}.md").unlink()
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+            argv = main._build_headless_argv("opencode", None, "prompt", None, None)
+        self.assertNotIn("--agent", argv)
+        self.assertEqual(argv[-2:], ["--", "prompt"])
+
+    def test_agent_flag_accepts_legacy_singular_agent_dir(self):
+        agents = main.OPENCODE_CONFIG_FILE.parent / "agents"
+        (agents / f"{main._TASK_AGENT}.md").unlink()
+        legacy = main.OPENCODE_CONFIG_FILE.parent / "agent"
+        legacy.mkdir()
+        (legacy / f"{main._TASK_AGENT}.md").write_text("---\nmode: primary\n---\n")
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+            argv = main._build_headless_argv("opencode", None, "prompt", None, None)
+        self.assertIn("--agent", argv)
 
     def test_variant_is_ignored_for_other_harnesses(self):
         argv = main._build_headless_argv("claude", "ses", "prompt", MODEL, "high")

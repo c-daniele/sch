@@ -97,7 +97,7 @@ shell channel originally planned).
 
 `sch web <workspace> [--harness opencode] [--storage s3|session]
 [--no-browser]` exposes the OpenCode UI and API through an ephemeral local URL
-such as `http://127.0.0.1:49152`. It requires Node.js and the `tunnel/`
+such as `http://opencode:<password>@127.0.0.1:49152`. It requires Node.js and the `tunnel/`
 dependencies, but does not require a local `opencode` binary or a client/server
 version match. `--harness` and `--storage` follow the same creation-only rules
 as `sch attach`; web access is unavailable for a claude- or pi-bound workspace.
@@ -106,9 +106,13 @@ SCH still prints the URL and keeps the bridge in the foreground until Ctrl+C.
 
 The local listener and the remote OpenCode backend both bind only to
 `127.0.0.1`. Access to the remote byte bridge is authorized with the
-operator's AWS credentials and SigV4; SCH intentionally does not configure an
-additional OpenCode HTTP password. This is a local, credentialed tunnel, not a
-network-exposed web service or a multi-device URL.
+operator's AWS credentials and SigV4. OpenCode 2's backend additionally
+requires HTTP basic auth on every route: the shim mints one password per
+microVM (kept `0600` on the microVM's local disk, never checkpointed), returns
+it inside the SigV4-authenticated `serve-ensure` response, and `sch web` embeds
+it in the printed URL so the browser opens the UI without a prompt. This is a
+local, credentialed tunnel, not a network-exposed web service or a multi-device
+URL.
 
 `sch web` is interactive and best-effort. Closing a tab or stopping the bridge
 does not cancel a turn already running in the remote backend, but it also does
@@ -129,14 +133,19 @@ stop/checkpoint workspaces whose state must survive the L1 session-storage
 reset described under Deploy and L2 Durability.
 
 - **`sch attach <workspace> [--harness opencode] [--storage s3|session] [--force]`**: launches the local `opencode`
-  binary's `attach <url>` mode against the shared remote `opencode web`
-  backend supervised by the shim inside the microVM; that mode serves the
-  same API used by attach plus the browser UI. Rendering, clipboard, and
+  binary as a client (`opencode --server <local-bridge-url>`, OpenCode 2)
+  against the shared remote `opencode serve` backend supervised by the shim
+  inside the microVM; that backend serves the same API used by attach plus
+  the browser UI, behind basic auth — the shim mints a per-microVM password
+  and `sch attach` hands it to the local TUI as `OPENCODE_PASSWORD` (never
+  on the argv). Rendering, clipboard, and
   keybinding stay on your laptop; only API traffic crosses the network. **opencode
   harness only** (fails fast, no runtime call, on a workspace bound to
   claude or pi — no client/server split exists for those harnesses). Checks that the
   local `opencode --version` matches the remote's before connecting
-  (`--force` to override). Select the model interactively from the OpenCode
+  (`--force` to override; your laptop needs OpenCode 2 — `npm i -g
+  @opencode/cli@<pinned>` — the 1.x `opencode-ai` package cannot talk to a
+  2.x server). Select the model interactively from the OpenCode
   TUI with `/models`. Each local TCP connection the TUI opens gets its
   own dedicated tunnel channel (soft cap `SCH_TUNNEL_MAX_CHANNELS`, default
   32 — a safety net, not a hard architectural limit, since this transport

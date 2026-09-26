@@ -29,7 +29,7 @@ Out of scope:
 
 **R3.** The image SHALL include AWS CLI v2 at a fixed version declared as an `ARG` (`AWS_CLI_VERSION`), available as `aws` in interactive and login shells, installed on local disk outside `/mnt/workspace`. The installer MUST use a versioned URL; the CLI MUST disable the pager and use the existing credential chain without static credentials.
 
-**R4.** The image SHALL include OpenCode at a fixed version declared as an `ARG` (`OPENCODE_VERSION`) with its runtime dependencies (Node.js/bun) and basic tooling (`git`, `tar`, `unzip`, shell utils). It MUST NOT use floating tags (`latest`) for OpenCode. Two builds with the same `ARG` SHALL contain the same OpenCode version.
+**R4.** The image SHALL include OpenCode 2 at a fixed version declared as an `ARG` (`OPENCODE_VERSION`), installed from the `@opencode/cli` npm package (the 1.x `opencode-ai` package stops at 1.18.x) with its runtime dependencies (Node.js) and basic tooling (`git`, `tar`, `unzip`, shell utils). The package's postinstall step selects the platform binary and MUST run (no `--ignore-scripts`). It MUST NOT use floating tags (`latest`) for OpenCode. Two builds with the same `ARG` SHALL contain the same OpenCode version. The build SHALL assert the installed version equals the pin (stripping the `opencode v` prefix `opencode --version` prints on 2.x) and SHALL assert the 2.x CLI surface SCH depends on: `serve --hostname/--port`, `acp`, `run --session/--model/--agent/--auto/--standalone`, `session export --sanitize`, `session import --directory`, `debug paths`.
 
 **R5.** The image SHALL include Claude Code at a fixed version declared as an `ARG` (`CLAUDE_CODE_VERSION`), alongside OpenCode, using the same Node 22 toolchain (npm-22, symlinked to `npm`); the binary SHALL be at `/usr/local/bin/claude`. No floating tags.
 
@@ -37,7 +37,7 @@ Out of scope:
 
 **R7.** The image SHALL include the MCP servers `awslabs.aws-documentation-mcp-server` (aws-docs, self-hosted) and `mcp-proxy-for-aws-cli` (aws-mcp: SigV4 proxy to the managed AWS MCP Server) at fixed versions declared as `ARG`s (`AWS_DOCS_MCP_VERSION`, `MCP_PROXY_VERSION`) plus the managed endpoint as `ARG AWS_MCP_ENDPOINT`, in isolated Python environments on the image's local disk (not under paths shadowed by the session storage mount, e.g. `/opt/uv-tools`), entrypoints in the `PATH`. Starting the servers MUST NOT require network downloads at runtime (the proxy reaches the managed endpoint over the network at tool-call time; its code is fully installed at build time).
 
-**R8.** The image SHALL include the MCP server `@upstash/context7-mcp` (context7) at a fixed version declared as `ARG CONTEXT7_MCP_VERSION`, via `npm install -g` (same toolchain as `opencode-ai` and `@anthropic-ai/claude-code`), with the `context7-mcp` entrypoint in the `PATH` from `/usr/local/bin/` and the version exported as image `ENV` `CONTEXT7_MCP_VERSION`. Self-contained and independent of the session storage mount; no runtime npm downloads.
+**R8.** The image SHALL include the MCP server `@upstash/context7-mcp` (context7) at a fixed version declared as `ARG CONTEXT7_MCP_VERSION`, via `npm install -g` (same toolchain as `@opencode/cli` and `@anthropic-ai/claude-code`), with the `context7-mcp` entrypoint in the `PATH` from `/usr/local/bin/` and the version exported as image `ENV` `CONTEXT7_MCP_VERSION`. Self-contained and independent of the session storage mount; no runtime npm downloads.
 
 **R9.** The image SHALL include the OpenSpec (`@fission-ai/openspec`) and Backlog.md (`backlog.md`) CLIs at fixed versions declared as `ARG OPENSPEC_VERSION` and `ARG BACKLOG_MD_VERSION`; `openspec` and `backlog` SHALL be in the `PATH`, executable by the non-root user `sch`, installed on local disk, versions exported as image `ENV`.
 
@@ -115,7 +115,7 @@ Out of scope:
 
 **R39.** The shim SHALL expose an advisory, fire-and-forget `mark-interactive` action set by `sch open` (TUI opens) and `sch stop` (TUI closes). The `task` action SHALL consult it to emit a double-writer `WARNING` (see `headless-task-execution`) but MUST NOT block submission: the flag is advisory, its absence is not a guarantee of non-concurrency, and its loss (unrehydrated after restart) degrades to the pre-warning behavior.
 
-**R40.** The shim SHALL handle a `session-import` action via `/invocations` that imports into the workspace's OpenCode session store a session previously uploaded to the bundle staging (`STATE_DIR/bundles/handoff.json`). The action SHALL: wait for workspace readiness with the same gate as other mutating actions; fail with an explicit error if the staged file is absent; import via the OpenCode CLI (`opencode import`) with cwd in the repo worktree and the standard harness environment, without writing session structures into the db itself (the only allowed exception is the recency bump below, limited to the timestamp); guarantee last-write-wins when the session id already exists (re-remove-and-reimport if the CLI does not update in place), reporting `reimported` in the response; guarantee the imported session is the workspace's most-recently-updated (explicit timestamp bump only if the import does not already produce it); complete the durable backup of `opencode.db` (db-only checkpoint path, including durable storage on the active backend) before responding ok; delete the staged file after a successful import and backup (on failure it SHALL remain in staging for diagnosis); and return the imported sessionID, the remote OpenCode version, an empty/uninitialized-worktree indicator, and the `reimported` flag. An older image without the action SHALL produce the usual "unknown action" error listing supported actions, on which the client applies its readable fail-fast.
+**R40.** The shim SHALL handle a `session-import` action via `/invocations` that imports into the workspace's OpenCode session store a session previously uploaded to the bundle staging (`STATE_DIR/bundles/handoff.json`). The action SHALL: wait for workspace readiness with the same gate as other mutating actions; fail with an explicit error if the staged file is absent; import via the OpenCode CLI (`opencode session import --standalone --directory <worktree> <file>`) with cwd in the repo worktree and the standard harness environment, without writing session structures into the db itself (the only allowed exception is the recency bump below, limited to the timestamp of the `session_v2` row); guarantee last-write-wins when the session id already exists (re-remove-and-reimport if the CLI does not update in place), reporting `reimported` in the response; guarantee the imported session is the workspace's most-recently-updated (explicit timestamp bump only if the import does not already produce it); complete the durable backup of `opencode.db` (db-only checkpoint path, including durable storage on the active backend) before responding ok; delete the staged file after a successful import and backup (on failure it SHALL remain in staging for diagnosis); and return the imported sessionID, the remote OpenCode version, an empty/uninitialized-worktree indicator, and the `reimported` flag. An older image without the action SHALL produce the usual "unknown action" error listing supported actions, on which the client applies its readable fail-fast.
 
 ### Notifications and remote interaction
 
@@ -154,9 +154,9 @@ Pinned versions (single source of truth: `image/Dockerfile` `ARG`s; current valu
 
 | Tool | ARG | Pinned |
 | --- | --- | --- |
-| OpenCode | `OPENCODE_VERSION` | 1.18.31 |
-| Claude Code | `CLAUDE_CODE_VERSION` | 2.1.272 |
-| Pi | `PI_VERSION` | 0.85.1 |
+| OpenCode | `OPENCODE_VERSION` | 2.0.18 (`@opencode/cli`) |
+| Claude Code | `CLAUDE_CODE_VERSION` | 2.1.282 |
+| Pi | `PI_VERSION` | 0.87.1 |
 | AWS CLI | `AWS_CLI_VERSION` | 2.36.8 |
 | uv | `UV_VERSION` | 0.12.5 |
 | aws-docs MCP | `AWS_DOCS_MCP_VERSION` | 1.1.30 |

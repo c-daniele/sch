@@ -341,7 +341,7 @@ elif [ "${HARNESS}" = "pi" ]; then
         bad "Pi remote-interactive seed did not create a valid resumable session"
     fi
 else
-    remote_stdout "cd ${REPO_DIR} && SCH_HARNESS=opencode opencode run --title ${BRAINSTORM_MAGIC} \"Remember this keyword: ${BRAINSTORM_MAGIC}\" < /dev/null 2>&1 | tail -3"
+    remote_stdout "cd ${REPO_DIR} && SCH_HARNESS=opencode opencode run --standalone --title ${BRAINSTORM_MAGIC} \"Remember this keyword: ${BRAINSTORM_MAGIC}\" < /dev/null 2>&1 | tail -3"
 fi
 "${SCH}" stop "${WS}" >/dev/null 2>&1 || true
 sleep 15

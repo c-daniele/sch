@@ -7,7 +7,8 @@
 #      client-side, with the documented error and WITHOUT any runtime call
 #      (task 7.4 / spec "Attach rifiutato su workspace con harness claude").
 #   2. (live) the shim's `serve-ensure` action starts/reuses the shared
-#      `opencode web` backend and reports web capability, port, and version.
+#      `opencode serve` backend (OpenCode 2: web UI + `/api/*`, basic auth) and
+#      reports web capability, port, version and the pinned password.
 #   3. (live) the byte bridge carries real HTTP traffic from the LOCAL machine,
 #      over InvokeAgentRuntimeWithWebSocketStream to the shim's @app.websocket
 #      handler, through a remote TCP hop, to the REMOTE OpenCode backend, and
@@ -16,13 +17,14 @@
 #      on the network").
 #
 # Why a scripted stand-in instead of the real TUI
-#   A real `opencode attach <url>` renders an interactive TUI that cannot be
+#   A real `opencode --server <url>` renders an interactive TUI that cannot be
 #   driven head-lessly. `sch attach` hard-codes that TUI, but the piece under
 #   test is the *byte bridge*, not terminal rendering. So the live path invokes
 #   `tunnel/attach.js` directly with the exact args `cmd_attach` passes, plus
 #   `--opencode-bin <driver>`: a small Node client that receives the same
-#   `attach <local-bridge-url>` argv the TUI would, drives a few HTTP ops
-#   against the remote server through the bridge, and exits. This exercises the
+#   `--server <local-bridge-url>` argv and OPENCODE_PASSWORD env the TUI would,
+#   drives a few authenticated HTTP ops against the remote server through the
+#   bridge, and exits. This exercises the
 #   full local data path (attach.js -> transport.js -> websocket-stream-channel
 #   -> live AgentCore -> shim -> remote opencode serve) end to end; only the
 #   terminal front-end is stubbed. The `cmd_attach` orchestration it bypasses
@@ -237,6 +239,7 @@ wait_boot_ready 240 || warn "boot not confirmed ready; continuing (serve-ensure 
 
 SERVE_OUT="${TMPDIR:-/tmp}/sch-tunnel-serve-$$.json"
 REMOTE_PORT=""; REMOTE_VERSION=""; SERVE_STATUS=""
+REMOTE_PASSWORD=""
 WEB_CAPABLE=""
 attempt=0
 while [ "${attempt}" -lt 5 ]; do
@@ -252,6 +255,9 @@ while [ "${attempt}" -lt 5 ]; do
         if [ "${SERVE_STATUS}" = "ok" ]; then
             REMOTE_PORT=$(python3 -c "import json; print(json.load(open('${SERVE_OUT}')).get('port',''))" 2>/dev/null || echo "")
             REMOTE_VERSION=$(python3 -c "import json; print(json.load(open('${SERVE_OUT}')).get('opencode_version',''))" 2>/dev/null || echo "")
+            # OpenCode 2: `serve` requires basic auth (opencode:<password>); the
+            # shim mints and pins the password and returns it in `auth`.
+            REMOTE_PASSWORD=$(python3 -c "import json; print((json.load(open('${SERVE_OUT}')).get('auth') or {}).get('password',''))" 2>/dev/null || echo "")
             WEB_CAPABLE=$(python3 -c "import json; print(str(json.load(open('${SERVE_OUT}')).get('capabilities',{}).get('web',False)).lower())" 2>/dev/null || echo "false")
             break
         fi
@@ -263,6 +269,11 @@ done
 rm -f "${SERVE_OUT}"
 if [ "${SERVE_STATUS}" = "ok" ] && [ -n "${REMOTE_PORT}" ]; then
     ok "serve-ensure ok after ${attempt} attempt(s): port=${REMOTE_PORT} opencode_version=${REMOTE_VERSION:-unknown}"
+    if [ -n "${REMOTE_PASSWORD}" ]; then
+        ok "serve-ensure returned the basic-auth password for the OpenCode 2 backend"
+    else
+        bad "serve-ensure returned no auth.password (OpenCode 2 serve rejects unauthenticated /api/* calls)"
+    fi
 else
     bad "serve-ensure did not report status=ok with a port (last status: ${SERVE_STATUS})"
     [ "${KEEP}" -eq 1 ] || "${SCH}" stop "${WS}" >/dev/null 2>&1 || true
@@ -318,27 +329,34 @@ rm -f "${DRIVER_OUT}"
 
 cat > "${DRIVER}" <<'NODE'
 #!/usr/bin/env node
-// Scripted stand-in for the local `opencode attach <url>` TUI. attach.js spawns
-// us with argv `attach <local-bridge-url> [...]`; <url> tunnels to the REMOTE
-// OpenCode backend. We drive a few HTTP ops to prove the bridge works and that
-// the server we reached is the remote workspace's. Results -> $SCH_VERIFY_DRIVER_OUT.
+// Scripted stand-in for the local `opencode --server <url>` TUI (OpenCode 2).
+// attach.js spawns us with argv `--server <local-bridge-url> [...]` and the
+// backend's basic-auth password in OPENCODE_PASSWORD; <url> tunnels to the
+// REMOTE OpenCode backend. We drive a few HTTP ops against its `/api/*`
+// routes to prove the bridge works and that the server we reached is the
+// remote workspace's. Results -> $SCH_VERIFY_DRIVER_OUT.
 'use strict';
 const fs = require('fs');
 const OUT = process.env.SCH_VERIFY_DRIVER_OUT || '';
 const REMOTE = process.env.SCH_VERIFY_REMOTE_WORKTREE || '/mnt/workspace/repo';
+const PASSWORD = process.env.OPENCODE_PASSWORD || '';
+const AUTH = PASSWORD ? { authorization: 'Basic ' + Buffer.from('opencode:' + PASSWORD).toString('base64') } : {};
 const R = {};
 const save = () => { if (OUT) { try { fs.writeFileSync(OUT, Object.entries(R).map(([k, v]) => `${k}=${v}`).join('\n') + '\n'); } catch (_) {} } };
 
 let base = '';
-for (const a of process.argv.slice(2)) { if (/^https?:\/\//.test(a)) { base = a.replace(/\/+$/, ''); break; } }
+const argv = process.argv.slice(2);
+R.server_flag = argv.includes('--server') ? 1 : 0;
+R.password_in_env = PASSWORD ? 1 : 0;
+for (const a of argv) { if (/^https?:\/\//.test(a)) { base = a.replace(/\/+$/, ''); break; } }
 R.base = base;
 
 async function req(method, path, body) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 20000);
   try {
-    const opt = { method, signal: ctrl.signal };
-    if (body !== undefined) { opt.headers = { 'content-type': 'application/json' }; opt.body = JSON.stringify(body); }
+    const opt = { method, signal: ctrl.signal, headers: { ...AUTH } };
+    if (body !== undefined) { opt.headers['content-type'] = 'application/json'; opt.body = JSON.stringify(body); }
     const r = await fetch(base + path, opt);
     const text = await r.text();
     return { status: r.status, text };
@@ -350,7 +368,7 @@ async function req(method, path, body) {
 
   // (a) transport proof: any well-formed HTTP response from the remote server.
   let transport = false;
-  for (const p of ['/app', '/config', '/project', '/doc', '/']) {
+  for (const p of ['/api/info', '/api/project', '/api/session', '/']) {
     try {
       const { status } = await req('GET', p);
       if (typeof status === 'number') { transport = true; R.transport_status = status; R.transport_path = p; break; }
@@ -359,9 +377,21 @@ async function req(method, path, body) {
   R.transport_ok = transport ? 1 : 0;
   if (!transport) { save(); process.exit(4); }
 
-  // (b) does the reached server report the REMOTE worktree? (info shape varies by version)
+  // (a2) auth proof: /api/* is 401 without credentials and 200 with them.
+  try {
+    const r = await fetch(base + '/api/info');
+    R.unauth_status = r.status;
+    await r.text();
+  } catch (_) {}
+  try {
+    const { status } = await req('GET', '/api/info');
+    R.auth_status = status;
+  } catch (_) {}
+  R.auth_ok = (R.unauth_status === 401 && R.auth_status === 200) ? 1 : 0;
+
+  // (b) does the reached server report the REMOTE worktree?
   let remoteBound = false;
-  for (const p of ['/app', `/config?directory=${encodeURIComponent(REMOTE)}`, '/project']) {
+  for (const p of ['/api/project', `/api/session?directory=${encodeURIComponent(REMOTE)}`, '/api/location']) {
     try {
       const { status, text } = await req('GET', p);
       if (status >= 200 && status < 300 && text.includes(REMOTE)) { remoteBound = true; R.remote_info_path = p; break; }
@@ -373,18 +403,14 @@ async function req(method, path, body) {
   //     created session is server state living in the REMOTE workspace.
   let created = false, dir = '';
   try {
-    let projectID = '';
-    try {
-      const { status, text } = await req('GET', '/project');
-      if (status >= 200 && status < 300) { const arr = JSON.parse(text); if (Array.isArray(arr) && arr[0] && arr[0].id) projectID = arr[0].id; }
-    } catch (_) {}
-    let resp;
-    if (projectID) resp = await req('POST', `/project/${projectID}/session`, { directory: REMOTE });
-    if (!resp || resp.status >= 400) resp = await req('POST', '/session', { directory: REMOTE }); // older API fallback
+    const resp = await req('POST', '/api/session', { directory: REMOTE });
     R.session_status = resp ? resp.status : 'none';
     if (resp && resp.status >= 200 && resp.status < 300) {
       created = true;
-      try { const obj = JSON.parse(resp.text); const info = obj.data || obj; dir = info.directory || info.path || ''; } catch (_) {}
+      try {
+        const obj = JSON.parse(resp.text); const info = obj.data || obj;
+        dir = (info.location && info.location.directory) || info.directory || info.path || '';
+      } catch (_) {}
     }
   } catch (e) { R.session_err = String(e.message || e).slice(0, 60); }
   R.session_created = created ? 1 : 0;
@@ -396,12 +422,13 @@ async function req(method, path, body) {
   //     load exceeds the point where the 250-frames/sec WebSocket limit closed
   //     the connection (1006 reconnect storm). A single small GET (a/b/c above)
   //     does NOT exercise this; fetch a large endpoint and assert completeness.
+  //     /openapi.json is the large authenticated document on OpenCode 2.
   R.large_ok = 0;
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 30000);
     try {
-      const r = await fetch(base + '/doc', { signal: ctrl.signal });
+      const r = await fetch(base + '/openapi.json', { signal: ctrl.signal, headers: { ...AUTH } });
       const cl = parseInt(r.headers.get('content-length') || '0', 10);
       const body = await r.arrayBuffer();
       R.large_status = r.status;
@@ -422,6 +449,7 @@ chmod +x "${DRIVER}"
 echo "-- launching tunnel/attach.js with a scripted driver (bounded to 120s)"
 SCH_VERIFY_DRIVER_OUT="${DRIVER_OUT}" \
 SCH_VERIFY_REMOTE_WORKTREE="${REMOTE_WORKTREE}" \
+SCH_OPENCODE_SERVER_PASSWORD="${REMOTE_PASSWORD}" \
 run_bounded 120 node "${TUNNEL_DIR}/attach.js" \
     --region "${SCH_REGION}" \
     --runtime-arn "${ARN}" \
@@ -450,6 +478,21 @@ if [ "${TRANSPORT_OK}" = "1" ]; then
 else
     bad "byte bridge did not reach the remote OpenCode backend (attach.js rc=${ATTACH_RC}); driver out:"
     [ -f "${DRIVER_OUT}" ] && sed 's/^/    /' "${DRIVER_OUT}"
+fi
+
+# OpenCode 2 client contract: attach.js must spawn `opencode --server <url>`
+# (not the 1.x `attach <url>`) and hand the backend password to the client as
+# OPENCODE_PASSWORD; the backend must reject anonymous /api/* (401) and accept
+# the pinned credentials (200).
+if [ "$(d_get server_flag)" = "1" ] && [ "$(d_get password_in_env)" = "1" ]; then
+    ok "attach.js launched the client with --server <url> and OPENCODE_PASSWORD (OpenCode 2 client contract)"
+else
+    bad "attach.js client argv/env is not the OpenCode 2 shape (server_flag=$(d_get server_flag), password_in_env=$(d_get password_in_env))"
+fi
+if [ "$(d_get auth_ok)" = "1" ]; then
+    ok "remote backend enforces basic auth (anonymous /api/info -> 401, with password -> 200)"
+else
+    bad "remote backend auth check failed (anonymous=$(d_get unauth_status), authenticated=$(d_get auth_status))"
 fi
 
 if [ "${SESSION_CREATED}" = "1" ] && [ "${SESSION_DIR_IS_REMOTE}" = "1" ]; then
@@ -542,12 +585,17 @@ cat > "${WEB_PROBE}" <<'NODE'
 const fs = require('fs');
 const base = process.argv[2].replace(/\/+$/, '');
 const out = process.env.SCH_VERIFY_WEB_OUT;
+// OpenCode 2: every route (UI and /api/*) is behind basic auth opencode:<pw>.
+const password = process.env.SCH_OPENCODE_SERVER_PASSWORD || '';
+const auth = password ? { authorization: 'Basic ' + Buffer.from('opencode:' + password).toString('base64') } : {};
 const result = {};
 const save = () => fs.writeFileSync(out, Object.entries(result).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
 const request = async (path, options = {}, timeout = 20000) => {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
-  try { return await fetch(new URL(path, base), { ...options, signal: ctrl.signal }); }
+  try {
+    return await fetch(new URL(path, base), { ...options, headers: { ...auth, ...(options.headers || {}) }, signal: ctrl.signal });
+  }
   finally { clearTimeout(timer); }
 };
 (async () => {
@@ -572,14 +620,14 @@ const request = async (path, options = {}, timeout = 20000) => {
   }
   result.asset_ok = assetOk ? 1 : 0;
 
-  const sessions = await request('/session');
+  const sessions = await request('/api/session');
   const sessionsText = await sessions.text();
   let sessionsJson = false;
   try { const value = JSON.parse(sessionsText); sessionsJson = value !== null && typeof value === 'object'; } catch (_) {}
   result.sessions_status = sessions.status;
   result.sessions_ok = sessions.ok && sessionsJson ? 1 : 0;
 
-  const events = await request('/event', { headers: { accept: 'text/event-stream' } }, 15000);
+  const events = await request('/api/event', { headers: { accept: 'text/event-stream' } }, 15000);
   result.sse_status = events.status;
   result.sse_type = events.headers.get('content-type') || '';
   result.sse_ok = events.ok && result.sse_type.toLowerCase().includes('text/event-stream') ? 1 : 0;
@@ -589,7 +637,7 @@ const request = async (path, options = {}, timeout = 20000) => {
 NODE
 
 if [ -n "${WEB_URL}" ]; then
-    SCH_VERIFY_WEB_OUT="${WEB_PROBE_OUT}" run_bounded 60 node "${WEB_PROBE}" "${WEB_URL}"
+    SCH_VERIFY_WEB_OUT="${WEB_PROBE_OUT}" SCH_OPENCODE_SERVER_PASSWORD="${REMOTE_PASSWORD}" run_bounded 60 node "${WEB_PROBE}" "${WEB_URL}"
     WEB_PROBE_RC=$?
 else
     WEB_PROBE_RC=1
@@ -606,14 +654,14 @@ else
     bad "web root exposed no fetchable UI asset"
 fi
 if [ "$(web_get sessions_ok)" = "1" ]; then
-    ok "web bridge served the sessions API as JSON (GET /session, HTTP $(web_get sessions_status))"
+    ok "web bridge served the sessions API as JSON (GET /api/session, HTTP $(web_get sessions_status))"
 else
-    bad "GET /session did not return a successful JSON response (HTTP $(web_get sessions_status))"
+    bad "GET /api/session did not return a successful JSON response (HTTP $(web_get sessions_status))"
 fi
 if [ "$(web_get sse_ok)" = "1" ]; then
-    ok "web bridge opened the application SSE endpoint (GET /event, $(web_get sse_type))"
+    ok "web bridge opened the application SSE endpoint (GET /api/event, $(web_get sse_type))"
 else
-    bad "GET /event did not expose the expected SSE stream (HTTP $(web_get sse_status), type=$(web_get sse_type)); no application WebSocket is currently known"
+    bad "GET /api/event did not expose the expected SSE stream (HTTP $(web_get sse_status), type=$(web_get sse_type)); no application WebSocket is currently known"
 fi
 
 cat > "${CONCURRENT_DRIVER}" <<'NODE'
@@ -622,8 +670,11 @@ cat > "${CONCURRENT_DRIVER}" <<'NODE'
 const fs = require('fs');
 const out = process.env.SCH_VERIFY_CONCURRENT_OUT;
 const base = process.argv.slice(2).find((arg) => /^https?:\/\//.test(arg));
+// attach.js hands the backend password to the client as OPENCODE_PASSWORD.
+const password = process.env.OPENCODE_PASSWORD || '';
+const headers = password ? { authorization: 'Basic ' + Buffer.from('opencode:' + password).toString('base64') } : {};
 (async () => {
-  const response = await fetch(`${base.replace(/\/+$/, '')}/session`);
+  const response = await fetch(`${base.replace(/\/+$/, '')}/api/session`, { headers });
   JSON.parse(await response.text());
   fs.writeFileSync(out, `status=${response.status}\nok=${response.ok ? 1 : 0}\n`);
   process.exitCode = response.ok ? 0 : 1;
@@ -631,7 +682,7 @@ const base = process.argv.slice(2).find((arg) => /^https?:\/\//.test(arg));
 NODE
 chmod +x "${CONCURRENT_DRIVER}"
 if [ -n "${WEB_URL}" ] && kill -0 "${WEB_PID}" 2>/dev/null; then
-    SCH_VERIFY_CONCURRENT_OUT="${CONCURRENT_OUT}" run_bounded 60 node "${TUNNEL_DIR}/attach.js" \
+    SCH_VERIFY_CONCURRENT_OUT="${CONCURRENT_OUT}" SCH_OPENCODE_SERVER_PASSWORD="${REMOTE_PASSWORD}" run_bounded 60 node "${TUNNEL_DIR}/attach.js" \
         --region "${SCH_REGION}" \
         --runtime-arn "${ARN}" \
         --session-id "${SID}" \

@@ -28,7 +28,10 @@ Out of scope:
 ### The `sch handoff` command
 
 **R1.** `sch` SHALL expose `sch handoff <workspace> [--harness <opencode|claude|pi>] [--session <id>] [--sanitize] [--storage <s3|session>]` that
-exports an OpenCode session from the laptop (via `opencode export`), transfers it into
+exports an OpenCode session from the laptop (via `opencode session export --standalone`;
+the `session list --standalone --format json` and `session export` subcommands of
+OpenCode 2 — `--standalone` keeps the laptop-side calls out of OpenCode's per-user
+background service), transfers it into
 the remote workspace's staging area through the existing bundle channel, and requests its
 import from the shim via the `session-import` action. On success the command SHALL print
 the imported sessionID and exit with code 0. The `--harness` flag is accepted only for
@@ -54,8 +57,8 @@ error suggesting `--session`.
 ### Redaction
 
 **R5.** The export SHALL be faithful by default (no redaction). With `--sanitize` the
-command SHALL delegate redaction to `opencode export --sanitize`, so that the redacted
-content is what gets transferred.
+command SHALL delegate redaction to `opencode session export --sanitize`, so that the
+redacted content is what gets transferred.
 
 ### Harness binding
 

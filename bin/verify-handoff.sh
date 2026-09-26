@@ -42,7 +42,7 @@ git add README.md
 git commit -qm init
 
 echo "==> creating local OpenCode session with continuity token $TOKEN"
-opencode run "Remember the exact token $TOKEN for a later message. Reply with exactly READY." >/dev/null
+opencode run --standalone "Remember the exact token $TOKEN for a later message. Reply with exactly READY." >/dev/null
 SESSION_ID="$(opencode session list --format json | python3 -c '
 import json, os, sys
 cwd = os.path.realpath(os.getcwd())

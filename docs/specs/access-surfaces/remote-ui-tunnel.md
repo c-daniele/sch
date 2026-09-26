@@ -137,13 +137,29 @@ an explicit error, without silently degrading behavior.
 
 **R13.** The shim SHALL supervise, per microVM, a single OpenCode backend process on
 a fixed internal port (`SCH_OPENCODE_SERVE_PORT`, default `4096`), started listening
-exclusively on `127.0.0.1` inside the microVM. The backend runs in web mode
-(`opencode web --hostname 127.0.0.1 --port <fixed>`), exposing both the HTTP API and
-the web UI on the same port; it SHALL be started lazily at the first `serve-ensure`
-request and restarted on crash. `sch attach` and `sch web` SHALL share this same
-process: enabling the web UI MUST NOT require a second process nor the restart of an
-already active backend. On the `claude` harness the request SHALL be rejected by the
-shim with an explicit error, unchanged from existing behavior.
+exclusively on `127.0.0.1` inside the microVM. The backend is OpenCode 2's `serve`
+subcommand (`opencode serve --hostname 127.0.0.1 --port <fixed>`), exposing both the
+HTTP API (under `/api/*`) and the web UI (on `/`) on the same port; it SHALL be started
+lazily at the first `serve-ensure` request and restarted on crash. `sch attach` and
+`sch web` SHALL share this same process: enabling the web UI MUST NOT require a second
+process nor the restart of an already active backend. On the `claude` harness the
+request SHALL be rejected by the shim with an explicit error, unchanged from existing
+behavior.
+
+**R13a.** OpenCode 2's `serve` requires HTTP basic auth (user `opencode`) on every
+route. The shim SHALL pin the password through `OPENCODE_SERVER_PASSWORD` when it
+starts the backend, minting it once per microVM (`secrets.token_urlsafe(32)`) and
+persisting it `0600` on local disk next to `opencode.db` (never on the checkpointed
+mount, never in a log), so the password survives a backend restart and is regenerated
+by deleting the file. The `serve-ensure` response SHALL carry it as
+`auth: {scheme: "basic", user, password}` — inside the SigV4-authenticated invoke
+response only. Clients SHALL forward it out of band of the argv: `sch attach` passes
+it to the bridge in the environment and the bridge hands it to the local TUI as
+`OPENCODE_PASSWORD` (the variable `opencode --server <url>` reads); `sch web` embeds it
+as userinfo in the printed `http://opencode:<password>@127.0.0.1:<port>` URL; the
+shim's own Telegram injection uses it for its `/api/*` calls. The backend process is
+NOT OpenCode's per-user "background service": TUI and headless runs in the microVM
+stay separate `--standalone` processes sharing `opencode.db`.
 
 ### Lifecycle and advisory signaling
 
@@ -173,17 +189,20 @@ connectivity but no orphan process remains on the laptop.
 
 ## Behavior
 
-- `sch attach myws` — on an `opencode` workspace: starts (or reuses) `opencode web`
-  in the microVM and opens the local TUI connected to it; only API traffic crosses
-  the network. On a `claude`/`pi` workspace: immediate error with alternatives, no
-  runtime call. Version mismatch: warning and stop unless `--force` is repeated.
+- `sch attach myws` — on an `opencode` workspace: starts (or reuses) `opencode serve`
+  in the microVM and opens the local TUI (`opencode --server <local-bridge-url>`,
+  authenticated with the backend password via `OPENCODE_PASSWORD`) connected to it;
+  only API traffic crosses the network. On a `claude`/`pi` workspace: immediate error
+  with alternatives, no runtime call. Version mismatch (bare `X.Y.Z` compared on both
+  sides): warning and stop unless `--force` is repeated.
 - `sch acp myws` — starts `opencode acp` (via the dispatcher) or
   `claude-agent-acp` in `/mnt/workspace/repo`; the editor drives
   `initialize` → `session/new` → `session/prompt` through the bridge; stdout carries
   only JSON-RPC. On `pi`: refused with alternatives (`sch shell`, `sch run`,
   `sch task`), no runtime call.
-- `sch web myws` — opens the bridge, prints `http://127.0.0.1:<port>`, opens the
-  default browser. With `--no-browser` or on browser-open failure: prints the URL and
+- `sch web myws` — opens the bridge, prints
+  `http://opencode:<password>@127.0.0.1:<port>`, opens the default browser. With
+  `--no-browser` or on browser-open failure: prints the URL and
   keeps the bridge in the foreground until the operator terminates it (Ctrl+C).
   On a `claude`/`pi` workspace: immediate error with alternatives, no runtime call.
   Against an old image: explicit "predates web access" upgrade error.
