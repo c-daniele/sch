@@ -129,6 +129,20 @@
 #     Escape hatch: attaches ONE extra policy with anything the catalog does
 #     not cover. Operator-owned trust decision; only its JSON syntax is
 #     validated.
+#   ISOLATED_PRINCIPALS=<comma list>           (default: empty = isolation off)
+#     Per-principal workspace isolation (docs/specs/security/per-principal-isolation.md).
+#     Entries: user:<iam-user>, sso:<permission-set>/<identity-center-username>,
+#     role:<role-name>. Requires ENABLE_WORKSPACE_REGISTRY=true and refuses the
+#     Telegram switches. Each entry is resolved with IAM reads (unknown or
+#     ambiguous entries fail before any stack changes; sso usernames cannot be
+#     verified and print a warning) and gets its own plane stack
+#     <project>-<env>-plane-<owner key> (infra/user_plane.yaml): a runtime
+#     locked to that principal, an execution role confined to its storage and
+#     a read-only access role. Planes are updated on every deploy and deleted
+#     when their entry leaves the list. With isolation on the shared runtime
+#     is locked: every SCH user, the operator included, must be listed. The
+#     deploy checks the AgentCore runtime quota first (one runtime per entry).
+#     Needs python3.
 #   NOTE (add-user-provider-keys, BREAKING): the provider API keys are NO
 #     LONGER deploy variables. ANTHROPIC_API_KEY / OPENCODE_API_KEY /
 #     OPENROUTER_API_KEY / KILO_API_KEY left over in the operator's environment
@@ -221,6 +235,7 @@ RUNTIME_BEDROCK_MODEL_ALLOWLIST="${RUNTIME_BEDROCK_MODEL_ALLOWLIST:-}"
 RUNTIME_AWS_API_READ="${RUNTIME_AWS_API_READ:-true}"
 RUNTIME_DATA_BUCKET_ARN="${RUNTIME_DATA_BUCKET_ARN:-}"
 RUNTIME_EXTRA_POLICY_JSON="${RUNTIME_EXTRA_POLICY_JSON:-}"
+ISOLATED_PRINCIPALS="${ISOLATED_PRINCIPALS:-}"
 
 # Runtime capability tuning helpers (below; sourced verbatim by
 # infra/test_runtime_tuning.py): validate RUNTIME_CAPABILITIES and derive the
@@ -334,6 +349,106 @@ EOF
   }
 # (end image digest helpers)
 
+# Isolation plane helpers (below; sourced verbatim by
+# infra/test_isolation_deploy.py): deploy one plane stack per listed principal
+# and delete the orphans, from the plan written by infra/isolation_plan.py.
+# A failed plane never stops the others (R10): failures are counted in
+# PLANE_FAILURES and reported in PLANE_SUMMARY; the caller exits non-zero at
+# the end. Plane configuration comes from the runtime stack as deployed
+# (its parameters and outputs), so shared and user runtimes cannot drift (R11).
+  runtime_stack_value() { # <Outputs|Parameters> <key>
+    local kind="$1" key="$2" field value
+    [ "${kind}" = "Outputs" ] && field="OutputKey" || field="ParameterKey"
+    local vfield="${field%Key}Value"
+    value="$(aws cloudformation describe-stacks --stack-name "${PROJECT_NAME}-${ENVIRONMENT}-runtime" \
+        --region "${REGION}" --query "Stacks[0].${kind}[?${field}=='${key}'].${vfield}" --output text 2>/dev/null || true)"
+    [ "${value}" = "None" ] && value=""
+    printf '%s' "${value}"
+  }
+  delete_plane_stack() { # <stack>
+    aws cloudformation delete-stack --stack-name "$1" --region "${REGION}" \
+      && aws cloudformation wait stack-delete-complete --stack-name "$1" --region "${REGION}"
+  }
+  delete_orphan_planes() { # <plan file>
+    local kind stack key status
+    while IFS=$'\t' read -r -u 3 kind stack key status _; do
+      [ "${kind}" = "ORPHAN" ] || continue
+      log "deleting orphan plane ${stack} (owner key ${key}, entry removed); its storage is retained"
+      if delete_plane_stack "${stack}"; then
+        PLANE_SUMMARY+=("(removed)	${key}	-	DELETED")
+      else
+        PLANE_SUMMARY+=("(removed)	${key}	-	DELETE FAILED")
+        PLANE_FAILURES=$((PLANE_FAILURES + 1))
+      fi
+    done 3< "$1"
+  }
+  deploy_planes() { # <plan file>
+    local kind entry owner_kind key pattern stack status arn
+    local policies registry_role bucket rebuild_project
+    local p_version p_digest p_idle p_lifetime p_pi p_heap p_jobs p_read
+    policies="$(runtime_stack_value Outputs SharedRuntimePolicyArns)"
+    registry_role="$(runtime_stack_value Outputs WorkspaceRegistryRoleArn)"
+    bucket="$(runtime_stack_value Outputs CheckpointBucketName)"
+    rebuild_project="$(runtime_stack_value Outputs ImageRebuildProjectName)"
+    p_version="$(runtime_stack_value Parameters ApplicationVersion)"
+    p_digest="$(runtime_stack_value Parameters ImageDigest)"
+    p_idle="$(runtime_stack_value Parameters IdleRuntimeSessionTimeoutSeconds)"
+    p_lifetime="$(runtime_stack_value Parameters MaxLifetimeSeconds)"
+    p_pi="$(runtime_stack_value Parameters PiDefaultModel)"
+    p_heap="$(runtime_stack_value Parameters NodeHeapMb)"
+    p_jobs="$(runtime_stack_value Parameters BuildJobs)"
+    p_read="$(runtime_stack_value Parameters RuntimeAwsApiRead)"
+    if [ -z "${policies}" ] || [ -z "${registry_role}" ] || [ -z "${bucket}" ]; then
+      echo "deploy: runtime stack outputs SharedRuntimePolicyArns/WorkspaceRegistryRoleArn/CheckpointBucketName missing; no plane deployed" >&2
+      PLANE_FAILURES=$((PLANE_FAILURES + 1))
+      return 0
+    fi
+    while IFS=$'\t' read -r -u 3 kind entry owner_kind key pattern stack status; do
+      [ "${kind}" = "PLANE" ] || continue
+      if [ "${status}" = "ROLLBACK_COMPLETE" ]; then
+        # A failed creation cannot be updated; it holds no runtime.
+        log "plane ${stack} is ROLLBACK_COMPLETE from an earlier failed creation: deleting it first"
+        delete_plane_stack "${stack}" || true
+      fi
+      log "deploying plane ${stack} (${entry})"
+      if aws cloudformation deploy \
+          --template-file "${SCRIPT_DIR}/user_plane.yaml" \
+          --stack-name "${stack}" \
+          --parameter-overrides \
+              "ProjectName=${PROJECT_NAME}" \
+              "Environment=${ENVIRONMENT}" \
+              "OwnerKey=${key}" \
+              "OwnerKind=${owner_kind}" \
+              "OwnerUserIdPattern=${pattern}" \
+              "PrincipalEntry=${entry}" \
+              "ApplicationVersion=${p_version:-${VERSION}}" \
+              "ImageDigest=${p_digest}" \
+              "IdleRuntimeSessionTimeoutSeconds=${p_idle:-900}" \
+              "MaxLifetimeSeconds=${p_lifetime:-28800}" \
+              "PiDefaultModel=${p_pi}" \
+              "NodeHeapMb=${p_heap:-${SCH_NODE_HEAP_MB}}" \
+              "BuildJobs=${p_jobs:-${SCH_BUILD_JOBS}}" \
+              "CheckpointBucket=${bucket}" \
+              "SharedPolicyArns=${policies}" \
+              "AwsApiRead=${p_read:-${RUNTIME_AWS_API_READ}}" \
+              "ImageRebuildProject=${rebuild_project}" \
+              "RegistryRoleArn=${registry_role}" \
+          --tags "sch:deployment=${PROJECT_NAME}-${ENVIRONMENT}" "sch:owner-key=${key}" \
+          --capabilities CAPABILITY_NAMED_IAM \
+          --region "${REGION}" \
+          --no-fail-on-empty-changeset; then
+        arn="$(aws cloudformation describe-stacks --stack-name "${stack}" --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='RuntimeArn'].OutputValue" --output text 2>/dev/null || true)"
+        PLANE_SUMMARY+=("${entry}	${key}	${arn:-?}	OK")
+      else
+        echo "deploy: plane ${stack} (${entry}) FAILED; the other planes continue" >&2
+        PLANE_SUMMARY+=("${entry}	${key}	-	FAILED")
+        PLANE_FAILURES=$((PLANE_FAILURES + 1))
+      fi
+    done 3< "$1"
+  }
+# (end isolation plane helpers)
+
 # Validate + derive before anything else: a typo must fail the deploy fast,
 # not after the image build (the tests exercise this through the -h path).
 # The return code is checked BEFORE evaluating the output, because eval on
@@ -413,6 +528,43 @@ ECR_REPO="${PROJECT_NAME}-${ENVIRONMENT}"
 IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${VERSION}"
 
 log() { echo "==> $*"; }
+
+# --- 0. Per-principal isolation preflight (per-principal-isolation R1-R7, X9) ------
+# Everything that can refuse the deploy runs here, before any stack changes:
+# the switch combination (registry required, Telegram refused), resolution
+# of every ISOLATED_PRINCIPALS entry to its bound identity with IAM reads,
+# the AgentCore runtime quota, and the managed-policy size limit. The helper
+# also finds the plane stacks of this deployment, so a deploy with the list
+# emptied (or an entry removed) deletes the orphans. Read-only.
+ISOLATION_ENABLED=false
+if [ -n "$(printf '%s' "${ISOLATED_PRINCIPALS}" | tr -d '[:space:],')" ]; then
+    ISOLATION_ENABLED=true
+fi
+PLANE_PLAN="$(mktemp -t sch-planes.XXXXXX)"
+run_isolation_helper() {
+    REGION="${REGION}" PROJECT_NAME="${PROJECT_NAME}" ENVIRONMENT="${ENVIRONMENT}" \
+    ISOLATED_PRINCIPALS="${ISOLATED_PRINCIPALS}" \
+    ENABLE_WORKSPACE_REGISTRY="${ENABLE_WORKSPACE_REGISTRY}" \
+    TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}" TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID}" \
+    ENABLE_TELEGRAM_INTERACTION="${ENABLE_TELEGRAM_INTERACTION}" \
+    RUNTIME_BEDROCK_MODEL_ALLOWLIST="${TUNING_ALLOWLIST}" \
+    RUNTIME_EXTRA_POLICY_JSON="${RUNTIME_EXTRA_POLICY_JSON}" \
+        python3 "${SCRIPT_DIR}/isolation_plan.py" "$@"
+}
+if command -v python3 >/dev/null 2>&1; then
+    run_isolation_helper policy-size || exit 2
+    if ! run_isolation_helper plan --out "${PLANE_PLAN}"; then
+        [ "${ISOLATION_ENABLED}" = "true" ] && exit 2
+        echo "deploy: WARNING — could not look for plane stacks of an earlier isolation deploy; continuing" >&2
+        : > "${PLANE_PLAN}"
+    fi
+elif [ "${ISOLATION_ENABLED}" = "true" ]; then
+    echo "deploy: python3 is required with ISOLATED_PRINCIPALS (entry resolution, owner keys)" >&2
+    exit 2
+fi
+if [ "${ISOLATION_ENABLED}" = "true" ]; then
+    log "isolation: $(grep -c '^PLANE' "${PLANE_PLAN}" || true) plane(s) listed, $(grep -c '^ORPHAN' "${PLANE_PLAN}" || true) to delete"
+fi
 
 CORPORATE_CA_BUILD_ARG=()
 if compgen -G "${REPO_ROOT}/image/certs/*.pem" >/dev/null; then
@@ -668,6 +820,13 @@ if [ "${ENABLE_TASK_WATCHDOG}" = "true" ]; then
     WATCHDOG_PACKAGE_VERSION="$(aws s3api head-object --bucket "${CHECKPOINT_BUCKET}" --key "${WATCHDOG_KEY}" --region "${REGION}" --query VersionId --output text)"
 fi
 
+# Orphan planes go BEFORE the runtime stack changes: when isolation is being
+# turned off, the bucket policy that confines plane roles disappears with this
+# update, so a removed principal's runtime must be gone first (R12).
+PLANE_FAILURES=0
+PLANE_SUMMARY=()
+delete_orphan_planes "${PLANE_PLAN}"
+
 log "deploying AgentCore Runtime stack (${PROJECT_NAME}-${ENVIRONMENT}-runtime)"
 ensure_template_bucket
 aws cloudformation deploy \
@@ -683,6 +842,7 @@ aws cloudformation deploy \
         "WorkspaceRegistryPackageKey=${REGISTRY_KEY:-registry/workspace-registry-handler.zip}" \
         "WorkspaceRegistryPackageVersion=${REGISTRY_VERSION:-}" \
         "EnableWorkspaceRegistry=${ENABLE_WORKSPACE_REGISTRY}" \
+        "IsolationEnabled=${ISOLATION_ENABLED}" \
         "EnableSessionImageRebuild=${ENABLE_SESSION_IMAGE_REBUILD}" \
         "TelegramBotToken=${TELEGRAM_BOT_TOKEN}" \
         "TelegramChatId=${TELEGRAM_CHAT_ID}" \
@@ -745,6 +905,14 @@ if [ -n "${TELEGRAM_BOT_TOKEN}" ]; then
     fi
 fi
 
+# --- 5. Isolation planes (per-principal-isolation R10-R15) ------------------------
+# One stack per listed principal, after the runtime stack whose outputs they
+# consume. Each deploy updates every plane (image digest, configuration).
+if grep -q '^PLANE' "${PLANE_PLAN}"; then
+    deploy_planes "${PLANE_PLAN}"
+fi
+rm -f "${PLANE_PLAN}"
+
 RUNTIME_ARN=$(aws cloudformation describe-stacks \
     --stack-name "${PROJECT_NAME}-${ENVIRONMENT}-runtime" \
     --region "${REGION}" \
@@ -768,8 +936,26 @@ if [ -n "${RUNTIME_VERSION}" ]; then
     echo "Runtime version: ${RUNTIME_VERSION}"
     echo "Runtime image:   ${RUNTIME_IMAGE} (tag ${VERSION})"
 fi
+SMOKE_ARN="${RUNTIME_ARN}"
+if [ "${#PLANE_SUMMARY[@]}" -gt 0 ]; then
+    echo
+    echo "Isolation planes (entry, owner key, runtime ARN, status):"
+    for line in "${PLANE_SUMMARY[@]}"; do
+        printf '  %s\n' "${line}"
+    done
+fi
+if [ "${ISOLATION_ENABLED}" = "true" ]; then
+    # The shared runtime is locked (R17): a smoke test goes to a plane, run by
+    # that plane's owner.
+    echo "The shared runtime is locked (isolation on); smoke-test a plane as its owner."
+    SMOKE_ARN="<plane runtime ARN above>"
+fi
 echo "Smoke test:"
 echo "  aws bedrock-agentcore invoke-agent-runtime \\"
-echo "    --agent-runtime-arn '${RUNTIME_ARN}' \\"
+echo "    --agent-runtime-arn '${SMOKE_ARN}' \\"
 echo "    --runtime-session-id \"smoke-test-\$(uuidgen | tr 'A-Z' 'a-z')\" \\"
 echo "    --payload '{\"action\": \"info\"}' --region ${REGION} /dev/stdout"
+if [ "${PLANE_FAILURES}" -gt 0 ]; then
+    echo "deploy: ${PLANE_FAILURES} plane operation(s) failed; fix the cause and re-run the deploy" >&2
+    exit 1
+fi

@@ -1,10 +1,10 @@
 ---
 id: TASK-20.3
 title: 'Isolation: per-principal plane stacks and deploy'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-27 14:50'
-updated_date: '2026-09-27 15:20'
+updated_date: '2026-09-27 16:13'
 labels:
   - security
 dependencies:

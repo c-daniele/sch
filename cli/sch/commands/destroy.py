@@ -66,12 +66,18 @@ def _plan(project, env, region, account, keep_checkpoints):
     legacy_ecr_stack = "{}-{}-ecr".format(project, env)
     repository = "{}-{}".format(project, env)
 
+    # Isolation planes (per-principal-isolation R48) before the runtime stack:
+    # they attach its managed policies and point at its bucket.
     targets = [
-        # The runtime stack first: its checkpoint bucket is DeletionPolicy:
-        # Retain, so CloudFormation never tries to delete it and nothing has to
-        # be cleared beforehand.
-        Target("stack", runtime_stack, teardown.stack_exists(runtime_stack, region)),
+        Target("stack (plane)", name, True)
+        for name in teardown.plane_stacks(project, env, region)
     ]
+    # Then the runtime stack: its checkpoint bucket is DeletionPolicy: Retain,
+    # so CloudFormation never tries to delete it and nothing has to be cleared
+    # beforehand.
+    targets.append(
+        Target("stack", runtime_stack, teardown.stack_exists(runtime_stack, region))
+    )
     # ORDER RULE: anything the bootstrap stack OWNS and that CloudFormation
     # cannot delete while non-empty must be cleared before the stack itself.
     # Deleting the stack first leaves it in DELETE_FAILED on BuildSourcesBucket
@@ -144,7 +150,11 @@ def cmd_destroy(cfg, args):
     print("sch:   region      {}".format(region))
     print("sch:   project/env {}/{}".format(project, env))
 
-    targets = _plan(project, env, region, account, opts.keep_checkpoints)
+    try:
+        targets = _plan(project, env, region, account, opts.keep_checkpoints)
+    except teardown.TeardownError as exc:
+        print("sch: {}".format(exc), file=sys.stderr)
+        return 1
     print("sch: resources")
     for target in targets:
         print("sch:   {:<18} {:<48} {}".format(
@@ -202,7 +212,10 @@ def cmd_destroy(cfg, args):
                 removed = teardown.purge_repository_images(target.name, region)
                 target.outcome = "{} image(s) deleted".format(removed)
             else:
-                target.outcome = teardown.delete_bucket(target.name, region)
+                target.outcome = teardown.delete_bucket(
+                    target.name, region,
+                    drop_policy=target.kind == "bucket (L2 data)",
+                )
         except teardown.TeardownError as exc:
             target.outcome = "FAILED: {}".format(exc)
             failures.append(target)
