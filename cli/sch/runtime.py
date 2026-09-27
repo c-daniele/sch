@@ -304,13 +304,31 @@ def _inject_provider_keys(cfg, payload):
         return payload
 
 
+def _inject_owner_prefix(cfg, payload):
+    """Return ``payload`` carrying the plane's ``owner_prefix`` (R40).
+
+    With isolation off (no plane on ``cfg``) the payload is returned as it
+    came in, byte for byte. With isolation on the shim compares the value
+    with its own ``SCH_OWNER_PREFIX`` and rejects a mismatch (R30), so a
+    payload aimed at the wrong plane has no effect.
+    """
+    plane = getattr(cfg, "plane", None)
+    if plane is None:
+        return payload
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        raise ValueError("invoke payload is not a JSON object")
+    data["owner_prefix"] = plane.owner_prefix
+    return json.dumps(data)
+
+
 def invoke_best_effort(cfg, session_id, payload, timeout=None):
     """Fire-and-forget `invoke-agent-runtime` call: used for warmup
     (``noop``) and the ``mark-interactive`` advisory. Never raises and
     never fails the parent, mirroring the bash reference's ``|| true``.
     """
     arn = runtime_arn(cfg)
-    payload = _inject_provider_keys(cfg, payload)
+    payload = _inject_owner_prefix(cfg, _inject_provider_keys(cfg, payload))
     out_path = procs.null_output_path()
     run_options = {
         "stdout": subprocess.DEVNULL,
@@ -420,7 +438,7 @@ def invoke_verified(cfg, session_id, payload, op, read_timeout_s=None):
     allows up to 15 minutes per synchronous request.
     """
     arn = runtime_arn(cfg)
-    payload = _inject_provider_keys(cfg, payload)
+    payload = _inject_owner_prefix(cfg, _inject_provider_keys(cfg, payload))
     with procs.temp_json_file(op) as out_path:
         argv = [
             "aws",

@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import plane as plane_mod
 from . import userenv
 
 DEFAULT_REGION = "eu-west-1"
@@ -84,6 +85,10 @@ class Config:
         self.runtime_arn_cache = self.config_dir / "runtime-arn"
         self.checkpoint_bucket_cache = self.config_dir / "checkpoint-bucket"
         self._provider_keys = None
+        # per-principal-isolation R40: learned from the first registry
+        # response of the command (None = not known yet).
+        self.isolation = None
+        self.plane = None
 
     @property
     def provider_keys(self):
@@ -156,7 +161,14 @@ def _describe_stack_output(cfg, output_key, cache_path, override, missing_env_hi
 def runtime_arn(cfg):
     """Resolve the AgentCore runtime ARN (env override, then cache, then
     CloudFormation stack output), caching the result on disk.
+
+    With isolation on (per-principal-isolation R40) it is the owner's plane
+    runtime from the registry, and neither ``SCH_RUNTIME_ARN``, the cache nor
+    the stack output is ever consulted.
     """
+    plane = plane_mod.active_plane(cfg)
+    if plane is not None:
+        return plane.runtime_arn
     return _describe_stack_output(
         cfg,
         "RuntimeArn",

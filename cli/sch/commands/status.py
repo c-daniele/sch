@@ -15,6 +15,7 @@ import json
 import subprocess
 
 from .. import harness as harness_mod
+from .. import plane as plane_mod
 from .. import procs, runtime, sync as sync_mod, workspace, workspace_registry
 from ..config import checkpoint_bucket, die
 
@@ -34,7 +35,15 @@ _HEARTBEAT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 def read_offline_status(cfg, runtime_workspace, require_success=False):
     """Read task status from S3 without contacting the AgentCore runtime."""
     bucket = checkpoint_bucket(cfg)
-    key = "checkpoints/{}/task-status.json".format(runtime_workspace)
+    # per-principal-isolation R26/R40: with isolation on the key carries the
+    # owner segment and the read goes through the plane's access role.
+    key = plane_mod.checkpoint_key(cfg, runtime_workspace, "task-status.json")
+    try:
+        options = plane_mod.s3_run_options(cfg)
+    except plane_mod.PlaneError as exc:
+        if require_success:
+            raise
+        die(str(exc))
     raw = '{"state":"none"}'
     with procs.temp_json_file("status") as tmp_path:
         result = subprocess.run(
@@ -44,6 +53,7 @@ def read_offline_status(cfg, runtime_workspace, require_success=False):
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **options
         )
         if result.returncode != 0:
             if require_success:
