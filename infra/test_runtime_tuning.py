@@ -4,9 +4,11 @@ Renders the AgentRuntimeRole of infra/agent_runtime.yaml under different
 tuning parameter sets and asserts the requirements of
 docs/specs/security/runtime-capability-tuning.md:
 
-- with every parameter at its default, the rendered role is byte-identical
-  to the pre-feature role (fixture agent_runtime_role_pre_tuning.json,
-  extracted from the template before the feature existed) — spec R1/I1;
+- with every parameter at its default, the rendered role and its base
+  managed policy carry exactly the pre-feature role's permissions (fixture
+  agent_runtime_role_pre_tuning.json, extracted from the template before the
+  feature existed; the inline policy moved into a customer managed policy with
+  TASK-20.3) — spec R1/I1;
 - RuntimeBedrockAccess='false' strips every Bedrock grant on both planes,
   whatever the allow-list says — spec R7/I5;
 - allow-list entries are expanded verbatim into BOTH ARN forms, wildcards
@@ -227,8 +229,22 @@ def evaluate_value(value, parameters):
     return value
 
 
-def statements_of(role):
-    return role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+def render_policy(template, overrides=None):
+    """The base execution policy (a customer managed policy since TASK-20.3,
+    per-principal-isolation R18), in the same (resource, params, conditions)
+    shape as render_role."""
+    parameters = default_parameters(template)
+    parameters.update(overrides or {})
+    conditions = template["Conditions"]
+    policy = resolve(template["Resources"]["AgentRuntimeBasePolicy"], conditions, parameters)
+    return policy, parameters, conditions
+
+
+def statements_of(policy):
+    props = policy["Properties"]
+    if "PolicyDocument" in props:
+        return props["PolicyDocument"]["Statement"]
+    return props["Policies"][0]["PolicyDocument"]["Statement"]
 
 
 def find_statement(role, sid):
@@ -239,12 +255,23 @@ def find_statement(role, sid):
 
 
 class DefaultRenderingTest(unittest.TestCase):
-    """R1/I1: defaults are inert — the role is byte-identical to pre-feature."""
+    """R1/I1: defaults are inert — the role's effective permissions are
+    identical to pre-feature. Since TASK-20.3 the former inline policy is the
+    customer managed policy AgentRuntimeBasePolicy attached to the role
+    (per-principal-isolation R18): same name, same document."""
 
-    def test_default_role_is_byte_identical_to_prefeature(self):
+    def test_default_role_matches_prefeature_apart_from_the_policy_move(self):
         fixture = json.loads(FIXTURE_PATH.read_text())
-        rendered, _, _ = render_role(load_template())
+        template = load_template()
+        rendered, _, _ = render_role(template)
+        inline = fixture["Properties"].pop("Policies")
         self.assertEqual(rendered, fixture)
+        self.assertEqual(len(inline), 1)
+        policy, _, _ = render_policy(template)
+        self.assertEqual(policy["Type"], "AWS::IAM::ManagedPolicy")
+        self.assertEqual(policy["Properties"]["ManagedPolicyName"], inline[0]["PolicyName"])
+        self.assertEqual(policy["Properties"]["Roles"], [{"Ref": "AgentRuntimeRole"}])
+        self.assertEqual(policy["Properties"]["PolicyDocument"], inline[0]["PolicyDocument"])
 
 
 class BedrockAccessTest(unittest.TestCase):
@@ -266,13 +293,13 @@ class BedrockAccessTest(unittest.TestCase):
             with self.subTest(overrides=overrides):
                 params = dict(overrides)
                 params["RuntimeBedrockAccess"] = "false"
-                role, _, _ = render_role(template, params)
+                role, _, _ = render_policy(template, params)
                 blob = json.dumps(statements_of(role))
                 self.assertNotIn("bedrock:Invoke", blob)
                 self.assertNotIn("bedrock-mantle", blob)
 
     def test_access_true_keeps_bedrock(self):
-        role, _, _ = render_role(load_template())
+        role, _, _ = render_policy(load_template())
         self.assertIsNotNone(find_statement(role, "BedrockInferenceProfiles"))
         self.assertIsNotNone(find_statement(role, "BedrockMantleInference"))
 
@@ -282,7 +309,7 @@ class AllowlistTest(unittest.TestCase):
 
     def test_expansion_is_verbatim_in_both_forms(self):
         entries = ["*anthropic.claude-sonnet*", "eu.anthropic.claude-haiku-4-5-20251001-v1:0"]
-        role, _, _ = render_role(
+        role, _, _ = render_policy(
             load_template(),
             {
                 "RuntimeBedrockModelAllowlist": ",".join(entries),
@@ -300,7 +327,7 @@ class AllowlistTest(unittest.TestCase):
         self.assertEqual(arns, expected)
 
     def test_empty_allowlist_is_the_broad_grant(self):
-        role, _, _ = render_role(load_template())
+        role, _, _ = render_policy(load_template())
         statement = find_statement(role, "BedrockInferenceProfiles")
         self.assertEqual(
             statement["Resource"],
@@ -332,7 +359,7 @@ class MantleTest(unittest.TestCase):
         ]
         for overrides, expected in cases:
             with self.subTest(overrides=overrides):
-                role, _, _ = render_role(template, overrides)
+                role, _, _ = render_policy(template, overrides)
                 self.assertEqual(find_statement(role, "BedrockMantleInference") is not None, expected)
 
 
@@ -340,11 +367,11 @@ class CapabilityPolicyTest(unittest.TestCase):
     """R3/R4: dedicated conditional policies matching the spec table."""
 
     RESOURCE_BY_CAPABILITY = {
-        "transcribe": "RuntimeTranscribeCapabilityPolicy",
-        "textract": "RuntimeTextractCapabilityPolicy",
-        "rekognition": "RuntimeRekognitionCapabilityPolicy",
-        "polly": "RuntimePollyCapabilityPolicy",
-        "comprehend": "RuntimeComprehendCapabilityPolicy",
+        "transcribe": "RuntimeTranscribeCapabilityManagedPolicy",
+        "textract": "RuntimeTextractCapabilityManagedPolicy",
+        "rekognition": "RuntimeRekognitionCapabilityManagedPolicy",
+        "polly": "RuntimePollyCapabilityManagedPolicy",
+        "comprehend": "RuntimeComprehendCapabilityManagedPolicy",
     }
 
     @staticmethod
@@ -369,7 +396,7 @@ class CapabilityPolicyTest(unittest.TestCase):
 
     def test_disabled_capability_has_no_policy_resource(self):
         template = load_template()
-        rendered, _ = render_resource(template, "RuntimeTranscribeCapabilityPolicy")
+        rendered, _ = render_resource(template, "RuntimeTranscribeCapabilityManagedPolicy")
         self.assertIsNone(rendered)
 
     def test_enabled_capability_matches_spec_actions(self):
@@ -390,7 +417,7 @@ class DataBucketTest(unittest.TestCase):
 
     def test_no_s3_legs_without_data_bucket(self):
         rendered, _ = render_resource(
-            load_template(), "RuntimeTranscribeCapabilityPolicy",
+            load_template(), "RuntimeTranscribeCapabilityManagedPolicy",
             {"RuntimeCapTranscribeEnabled": "true"},
         )
         blob = json.dumps(rendered["Properties"]["PolicyDocument"])
@@ -399,7 +426,7 @@ class DataBucketTest(unittest.TestCase):
     def test_s3_legs_with_data_bucket(self):
         bucket_arn = "arn:aws:s3:::my-media-bucket"
         rendered, _ = render_resource(
-            load_template(), "RuntimeTranscribeCapabilityPolicy",
+            load_template(), "RuntimeTranscribeCapabilityManagedPolicy",
             {"RuntimeCapTranscribeEnabled": "true", "RuntimeDataBucketArn": bucket_arn},
         )
         statements = rendered["Properties"]["PolicyDocument"]["Statement"]
@@ -421,14 +448,14 @@ class ExtraPolicyTest(unittest.TestCase):
     """R10: one extra operator-owned policy, only when the JSON is set."""
 
     def test_absent_by_default(self):
-        rendered, _ = render_resource(load_template(), "RuntimeExtraPolicy")
+        rendered, _ = render_resource(load_template(), "RuntimeExtraManagedPolicy")
         self.assertIsNone(rendered)
 
     def test_present_with_raw_document(self):
         document = ('{"Version":"2012-10-17","Statement":[{"Effect":"Allow",'
                     '"Action":"translate:TranslateText","Resource":"*"}]}')
         rendered, _ = render_resource(
-            load_template(), "RuntimeExtraPolicy", {"RuntimeExtraPolicyJson": document},
+            load_template(), "RuntimeExtraManagedPolicy", {"RuntimeExtraPolicyJson": document},
         )
         self.assertIsNotNone(rendered)
         # The document passes through as a Ref to the parameter; CloudFormation
