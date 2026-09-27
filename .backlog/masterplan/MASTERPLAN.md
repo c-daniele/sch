@@ -20,7 +20,7 @@ This repository was published as a fresh history: the specifications under `docs
 
 ## Active work
 
-No active tasks. TASK-7 (harness pins: OpenCode 2.0.18, Pi 0.87.1, Claude
+TASK-20 (per-user workspace isolation, runtimes provisioned at deploy time) is next: split into TASK-20.1 to TASK-20.5 (design, storage and shim, plane stacks and deploy, registry and CLI, verify scripts and docs), run headless one subtask at a time on `feat/task-20`, one CloudFormation stack per principal. Its live two-principal check is operator-side. TASK-7 (harness pins: OpenCode 2.0.18, Pi 0.87.1, Claude
 Code 2.1.282) is done and recorded below; its live-AWS follow-ups — first
 deploy of the OpenCode 2 image, Bedrock through the execution role on 2.x,
 the Telegram plugin end to end, `bin/verify-remote-ui-tunnel.sh` /
