@@ -176,8 +176,14 @@ Three levers, in order of effect:
 2. **Shrink the checkpoint amplifier.** The repo tarball and fingerprint
    exclude regenerable dirs (`node_modules`, `.venv`, build outputs —
    spec [workspace-checkpointing](specs/workspace-lifecycle/workspace-checkpointing.md)
-   R21); the env is rebuilt best-effort after an L2 restore
-   (`SCH_REBUILD_ENV_ON_RESTORE=0` disables). Steady-state floor reference
+   R21); the env is rebuilt best-effort after an L2 restore, from lockfiles
+   only (`npm ci`, `uv sync --frozen`, or a project-local `.venv` for
+   `requirements.txt`) and without changing the repository;
+   `SCH_REBUILD_ENV_ON_RESTORE=0` disables it. A project without a lockfile
+   is skipped (`no-lockfile`), and optional extras or custom install commands
+   (`pip install -e ".[dev]"`) are not reproduced: re-run them after a
+   restore. `sch status <ws> --live` shows the outcome on its `env_rebuild`
+   line. Steady-state floor reference
    (opencode harness, September 2026): `opencode` ~750 MB RSS, shim
    ~150 MB, `mcp-proxy` ~100 MB, aws-docs MCP ~65 MB — ~1.4 GB before any
    workload. Keep `context7` disabled unless needed; audit `serve` + MCP

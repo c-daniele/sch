@@ -175,12 +175,35 @@ single source of truth: `REPO_CHECKPOINT_EXCLUDE_NAMES` in `image/app/main.py`),
 matched as whole path segments at any depth, so nested copies are skipped too.
 `.git` (R1: Git metadata rides the checkpoint) and source files MUST NOT be
 excluded. After an L2 restore the shim SHALL rebuild the missing project envs
-best-effort (`npm ci` for a lockfile'd Node project, `uv sync` for a
-`uv.lock`/`pyproject.toml` Python project, `pip install -r requirements.txt`
-otherwise), under the memory caps of
-[runtime-image](../platform/runtime-image.md) R47 and never fail-closed
+best-effort, from lockfiles only and into project-local directories:
+`npm ci` for a Node project with `package-lock.json` or `npm-shrinkwrap.json`;
+`uv sync --frozen` for a Python project with `pyproject.toml` and `uv.lock`;
+otherwise, for a `requirements.txt` project, `uv venv .venv` followed by
+`uv pip install --python .venv/bin/python -r requirements.txt`. A project
+without a lockfile (`package.json` without an npm lockfile, `pyproject.toml`
+without `uv.lock`) SHALL be skipped with the logged reason `no-lockfile`: an
+unlocked install would write a new lockfile into the repository and pick
+versions nobody pinned. No rebuild step SHALL install into the shim's
+interpreter or its user site, and the child env drops variables that redirect
+installs (`VIRTUAL_ENV`, `UV_PROJECT_ENVIRONMENT`, `PIP_USER`, ...). The
+rebuild SHALL NOT change the repository: after it, `git status` equals the
+checkpointed state apart from the excluded env dirs, and no tracked file is
+rewritten. As defense in depth, the shim snapshots the root manifests and
+lockfiles before the rebuild and afterwards restores them, deletes untracked
+files the rebuild created, and checks out tracked files that were clean
+before and changed. The rebuild runs under the memory caps of
+[runtime-image](../platform/runtime-image.md) R47 and is never fail-closed
 (`SCH_REBUILD_ENV_ON_RESTORE=0` disables the rebuild; every failure only
-logs). The first checkpoint after enabling the excludes re-uploads the repo
+logs). The outcome (`checkpoint.env_rebuild` in the shim `info` response, the
+`env_rebuild` line of `sch status --live`) carries an overall status
+(`rebuilt`, `rebuilt-partial`, `rebuild-failed`, `skipped-no-lockfile`,
+`skipped-unavailable`, `skipped-noop`, `skipped-disabled`, `skipped`), one
+entry per env with its result and reason, and the worktree verdict
+(`unchanged`, `restored`, `changed`, `not-a-git-repo`). Only the default
+dependency set is reproduced: optional extras (`pip install -e ".[dev]"`,
+`uv sync --extra dev`), other package managers (yarn, pnpm) and custom
+install commands are not, and the operator re-runs them after a restore.
+The first checkpoint after enabling the excludes re-uploads the repo
 once, smaller; unchanged workspaces keep performing zero uploads (I2).
 
 ## Behavior
@@ -202,8 +225,10 @@ once, smaller; unchanged workspaces keep performing zero uploads (I2).
   config, and claude/pi JSONL state restored; sessions reappear with history at the next
   TUI startup; the manifest's `harness` drives seed, restore, and dispatcher.
 - Restore of a Node/Python workspace → `node_modules`/`.venv` absent from the
-  archive and rebuilt best-effort after promotion; `sch status`/shim `info`
-  reports the rebuild outcome without failing the restore.
+  archive and rebuilt best-effort from the lockfiles after promotion;
+  `git status` is unchanged; `sch status --live`/shim `info` reports what was
+  rebuilt and what was skipped and why (for example `no-lockfile`), without
+  failing the restore.
 - `sch status myws` with the microVM stopped → the operator sees
   `state`/`exit_code`/`finished_utc`/`harness` of the last task without waking the
   microVM; after a restart of a microVM that died mid-run, the state shows
@@ -246,8 +271,9 @@ later epoch.
 mid-run), never via the normal task execution path.
 
 **I11.** Nothing excluded from the repo archive by R21 is load-bearing for
-durability: every excluded name is regenerable by the post-restore rebuild,
-and no source file or Git metadata is ever excluded.
+durability: every excluded name is regenerable (by the post-restore rebuild
+when the project has a lockfile, by the operator otherwise), and no source
+file or Git metadata is ever excluded.
 
 ## Cross-references
 
