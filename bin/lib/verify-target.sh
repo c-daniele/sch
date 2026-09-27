@@ -40,7 +40,8 @@
 # subshell would probe the registry again.
 
 SCH_TARGET_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCH_TARGET_SUPPORT="${SCH_TARGET_LIB_DIR}/../../cli/sch/verify_support.py"
+# SCH_TARGET_SUPPORT may point elsewhere in tests (cli/tests/test_verify_scripts.py).
+SCH_TARGET_SUPPORT="${SCH_TARGET_SUPPORT:-${SCH_TARGET_LIB_DIR}/../../cli/sch/verify_support.py}"
 SCH_TARGET_PROBED="${SCH_TARGET_PROBED:-}"
 SCH_TARGET_REGISTRY_ON="${SCH_TARGET_REGISTRY_ON:-false}"
 SCH_TARGET_ISOLATION_ON="${SCH_TARGET_ISOLATION_ON:-false}"
