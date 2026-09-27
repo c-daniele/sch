@@ -12,6 +12,8 @@ SCH is an operational serverless coding harness running AI coding agents (OpenCo
 
 The image runs **OpenCode 2** (2.0.18, npm package `@opencode/cli`), Pi 0.87.1 and Claude Code 2.1.282 (TASK-7). OpenCode 2 is a client/server release; SCH keeps its 1.x process topology (decision-10): TUI and headless tasks run `--standalone`, and the shim supervises one authenticated `opencode serve` on :4096 for `sch attach`, `sch web` and Telegram injection, with a per-microVM password minted by the shim and handed to clients out of band of the argv. The headless argv is `opencode run --standalone [--session] [--model provider/model#variant] [--agent] --auto -- <prompt>`; `sch run --model` reaches the TUI through `OPENCODE_CONFIG_CONTENT`; the Telegram plugin uses the 2.x plugin API. Sessions live in `session_v2`, credentials in the `credential` table; 1.x sessions are not migrated (fresh installation). Operators need OpenCode 2 locally for `sch attach`/`sch handoff`. OpenCode 2 sends Bedrock no output cap unless configured (Bedrock then caps Claude at 4096 tokens), so the seeded `opencode.json` declares `providers.amazon-bedrock` in the native V2 shape (never mixed with the V1 `provider` block, which OpenCode would then drop) with a per-model `inferenceConfig.maxTokens` for the default model and the main global/EU Claude profiles (TASK-9, decision-12; fresh workspaces only).
 
+The first-boot clone keeps `SCH_REPO_TOKEN` out of the workspace (TASK-10, runtime-image R22): the token reaches git through an environment-reading credential helper, `origin` is token-free, and each boot scrubs embedded passwords from the `origin` of worktrees cloned by earlier images. Checkpoints taken before the fix still hold the token, so the guides tell affected users to rotate it.
+
 This repository was published as a fresh history: the specifications under `docs/specs/` are the normative description of current behavior, the guides under `docs/` explain how to use and operate it, and this plan starts empty. New work begins with a Backlog task; completed work is recorded in the journal below and linked here.
 
 ## Active work
@@ -24,7 +26,10 @@ the Telegram plugin end to end, `bin/verify-remote-ui-tunnel.sh` /
 `opencode serve` under AgentCore billing — are operator-side and named in the
 task summary. TASK-9 (seeded Bedrock output caps) is done; its image build with
 `image/test-local.sh` and a live Bedrock call on a listed model join those
-operator-side follow-ups. Earlier follow-ups from TASK-1 (billed-peak re-run, caps-on
+operator-side follow-ups. TASK-10 (clone token kept out of the workspace)
+is done; its in-image run (`image/test-local.sh`) and a live clone of a real
+private repository are operator-side too. TASK-22 tracks seven image-side
+tests that fail when the suite runs outside the container. Earlier follow-ups from TASK-1 (billed-peak re-run, caps-on
 comparison, fresh bootstrap, full `verify-l2.sh` cycle, alarm threshold)
 remain operator-side too. `backlog task list --plain` shows the completed tasks.
 
@@ -75,3 +80,4 @@ Architecture decisions are recorded in [`.backlog/decisions/`](../decisions/) (`
 - [2026-09-26 Upgrade harness pins: OpenCode 2.0.16, Pi 0.87.1, Claude Code 2.1.282](../docs/journal/doc-10%20-%202026-09-26-Upgrade-harness-pins-OpenCode-2.0.16-Pi-0.87.1-Claude-Code-2.1.282.md) — the OpenCode 2 port: new npm package, authenticated `serve`, `--server` client, `session_v2`/`credential` schema, V2 plugin API, V1 topology kept (TASK-7, decision-10).
 - [2026-09-26 Bump the OpenCode pin to 2.0.18](../docs/journal/doc-11%20-%202026-09-26-Bump-the-OpenCode-pin-to-2.0.18.md) — the maintainer pointed at the newest 2.x release; the pin lands on 2.0.18 (surface-identical to 2.0.16, verified) and the `@opencode/ai` vs `@opencode/cli` package confusion is resolved (TASK-7).
 - [2026-09-26 Bedrock Claude requests capped at 4096 output tokens on OpenCode 2](../docs/journal/doc-13%20-%202026-09-26-Bedrock-Claude-requests-capped-at-4096-output-tokens-on-OpenCode-2.md) — OpenCode 2 sends no Bedrock output cap by default; the seed now sets one per Claude model in the native V2 provider shape (TASK-9, decision-12).
+- [2026-09-27 Keep the clone token out of the workspace](../docs/journal/doc-14%20-%202026-09-27-Keep-the-clone-token-out-of-the-workspace.md) — `SCH_REPO_TOKEN` no longer lands in the clone's `origin` URL or on a command line; earlier workspaces are scrubbed at boot, old checkpoints need token rotation (TASK-10).
