@@ -1,10 +1,10 @@
 ---
 id: TASK-20
 title: Per-user workspace isolation with runtimes provisioned at deploy time
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-27 10:12'
-updated_date: '2026-09-27 14:50'
+updated_date: '2026-09-27 15:25'
 labels:
   - security
 dependencies: []
