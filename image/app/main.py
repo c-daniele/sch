@@ -3200,72 +3200,301 @@ def _download_manifest(workspace: str) -> dict | None:
         raise ManifestReadError(f"manifest download failed: {exc}") from exc
 
 
-def _project_env_plan(repo_dir: Path) -> list:
-    """Which regenerable project envs need rebuilding (TASK-1.3).
+NODE_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json")
+# Files a rebuild tool could create or rewrite at the repo root. Their bytes
+# are snapshotted before the rebuild and put back afterwards (TASK-21), so a
+# tool that misbehaves never changes a lockfile or a manifest.
+ENV_REBUILD_PROTECTED_FILES = (
+    "package.json", *NODE_LOCKFILES, "yarn.lock", "pnpm-lock.yaml",
+    "pyproject.toml", "uv.lock", "requirements.txt",
+)
+# Variables that could point a rebuild step at an interpreter or environment
+# other than the project-local one (the shim's own python3.11, its user site,
+# or a foreign venv).
+ENV_REBUILD_SCRUBBED_VARS = (
+    "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_SYSTEM_PYTHON",
+    "PIP_USER", "PIP_TARGET", "PIP_PREFIX", "PYTHONUSERBASE", "PYTHONHOME",
+    "CONDA_PREFIX",
+)
+ENV_REBUILD_STEP_TIMEOUT = 600
+# Last post-restore rebuild outcome, surfaced by the info action
+# (checkpoint.env_rebuild) and `sch status --live`.
+ENV_REBUILD_STATE: dict = {"status": "not-run"}
 
-    Returns [(label, argv)] for envs whose manifest exists but whose
-    directory is absent — the exact state an L2 restore produces now that
-    node_modules/.venv no longer ride the repo tarball. Labels are stable
-    strings consumed by _maybe_rebuild_project_env and tests.
+
+def _project_env_plan(repo_dir: Path) -> list:
+    """Which regenerable project envs need rebuilding (TASK-1.3, TASK-21).
+
+    Returns one step dict per env whose manifest exists but whose directory
+    is absent (the exact state an L2 restore produces, since node_modules and
+    .venv never ride the repo tarball):
+
+        {"env": "node"|"python", "label": str, "commands": [argv, ...],
+         "skip": None | reason}
+
+    Only lockfile-driven, non-mutating commands are planned. A project
+    without a lockfile is skipped with a reason instead of resolved afresh:
+    `npm install` and `uv sync` would write a new lockfile into the repo and
+    pick versions nobody pinned. Python never installs into the shim's own
+    interpreter: every Python step targets the project-local `.venv`.
     """
     plan: list = []
     if (repo_dir / "package.json").is_file() and not (repo_dir / "node_modules").is_dir():
-        if (repo_dir / "package-lock.json").is_file():
-            plan.append(("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"]))
+        if any((repo_dir / name).is_file() for name in NODE_LOCKFILES):
+            plan.append({
+                "env": "node", "label": "npm-ci", "skip": None,
+                "commands": [["npm", "ci", "--no-audit", "--no-fund"]],
+            })
         else:
-            plan.append(("npm-install", ["npm", "install", "--no-audit", "--no-fund"]))
+            plan.append({
+                "env": "node", "label": "npm-ci", "commands": [],
+                "skip": "no-lockfile: package.json without package-lock.json "
+                        "(npm install would write one)",
+            })
     if not (repo_dir / ".venv").is_dir():
-        if (repo_dir / "uv.lock").is_file() or (repo_dir / "pyproject.toml").is_file():
-            plan.append(("uv-sync", ["uv", "sync"]))
+        venv_python = str(repo_dir / ".venv" / "bin" / "python")
+        if (repo_dir / "uv.lock").is_file() and (repo_dir / "pyproject.toml").is_file():
+            plan.append({
+                "env": "python", "label": "uv-sync-frozen", "skip": None,
+                "commands": [["uv", "sync", "--frozen"]],
+            })
         elif (repo_dir / "requirements.txt").is_file():
-            plan.append((
-                "pip-install",
-                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-            ))
+            plan.append({
+                "env": "python", "label": "uv-pip-requirements", "skip": None,
+                "commands": [
+                    ["uv", "venv", "--quiet", ".venv"],
+                    ["uv", "pip", "install", "--python", venv_python,
+                     "-r", "requirements.txt"],
+                ],
+            })
+        elif (repo_dir / "pyproject.toml").is_file():
+            plan.append({
+                "env": "python", "label": "uv-sync-frozen", "commands": [],
+                "skip": "no-lockfile: pyproject.toml without uv.lock "
+                        "(uv sync would write one)",
+            })
     return plan
 
 
+def _env_rebuild_child_env() -> dict:
+    env = _apply_memory_caps(_child_env_with_provider_keys())
+    for name in ENV_REBUILD_SCRUBBED_VARS:
+        env.pop(name, None)
+    return env
+
+
+def _git_worktree_status(repo_dir: Path) -> dict | None:
+    """{path: porcelain XY code} for the worktree, or None when the repo is
+    not a git worktree or git is unavailable. Ignored files (the excluded env
+    dirs) never appear, so the rebuilt envs do not count as changes."""
+    if shutil.which("git") is None or not (repo_dir / ".git").exists():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-c", f"safe.directory={repo_dir}", "status",
+             "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"],
+            cwd=str(repo_dir), capture_output=True, timeout=60,
+        )
+    except Exception:  # noqa: BLE001 — observation only
+        return None
+    if proc.returncode != 0:
+        return None
+    status: dict = {}
+    for entry in proc.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        if len(entry) > 3:
+            rel = entry[3:]
+            # Paths under an excluded env dir (e.g. a node_modules that is not
+            # gitignored) are the rebuild's output, never checkpointed state.
+            if REPO_CHECKPOINT_EXCLUDE_NAMES.intersection(rel.rstrip("/").split("/")):
+                continue
+            status[rel] = entry[:2]
+    return status
+
+
+def _snapshot_protected_files(repo_dir: Path) -> dict:
+    snap: dict = {}
+    for name in ENV_REBUILD_PROTECTED_FILES:
+        path = repo_dir / name
+        try:
+            snap[name] = path.read_bytes() if path.is_file() else None
+        except OSError:
+            snap[name] = None
+    return snap
+
+
+def _restore_worktree_after_rebuild(
+    repo_dir: Path, protected: dict, git_before: dict | None,
+) -> str:
+    """Undo any repo change a rebuild step made (TASK-21, defense in depth:
+    the planned commands are already non-mutating). Returns the worktree
+    verdict: unchanged | restored | changed | not-a-git-repo."""
+    restored = False
+    for name, content in protected.items():
+        path = repo_dir / name
+        try:
+            if content is None:
+                if path.is_file():
+                    path.unlink()
+                    restored = True
+                    logger.warning("env rebuild: removed stray %s", name)
+            elif not path.is_file() or path.read_bytes() != content:
+                path.write_bytes(content)
+                restored = True
+                logger.warning("env rebuild: restored rewritten %s", name)
+        except OSError as exc:
+            logger.warning("env rebuild: cannot restore %s: %s", name, exc)
+    if git_before is None:
+        return "restored" if restored else "not-a-git-repo"
+    git_after = _git_worktree_status(repo_dir)
+    if git_after is None:
+        return "changed"
+    for rel, code in git_after.items():
+        if git_before.get(rel) == code:
+            continue
+        path = repo_dir / rel
+        try:
+            if code == "??" and rel not in git_before:
+                path.unlink()
+                parent = path.parent
+                while parent != repo_dir and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+                restored = True
+                logger.warning("env rebuild: removed stray untracked %s", rel)
+            elif rel not in git_before:
+                # Clean before the rebuild: the index holds the checkpointed
+                # content, so checking it out is an exact revert.
+                subprocess.run(
+                    ["git", "-c", f"safe.directory={repo_dir}", "checkout",
+                     "--", rel],
+                    cwd=str(repo_dir), capture_output=True, timeout=60, check=True,
+                )
+                restored = True
+                logger.warning("env rebuild: reverted tracked %s", rel)
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            logger.warning("env rebuild: cannot revert %s: %s", rel, exc)
+    final = _git_worktree_status(repo_dir)
+    if final != git_before:
+        logger.warning(
+            "env rebuild: worktree differs from checkpoint state: %s",
+            sorted(set((final or {}).items()) ^ set(git_before.items())),
+        )
+        return "changed"
+    return "restored" if restored else "unchanged"
+
+
+def _env_rebuild_status(steps: list) -> str:
+    results = [step["result"] for step in steps]
+    if all(r == "ok" for r in results):
+        return "rebuilt"
+    if any(r == "ok" for r in results):
+        return "rebuilt-partial"
+    if any(r == "failed" for r in results):
+        return "rebuild-failed"
+    if all(r == "unavailable" for r in results):
+        return "skipped-unavailable"
+    if all(r == "skipped" and (s.get("reason") or "").startswith("no-lockfile")
+           for r, s in zip(results, steps)):
+        return "skipped-no-lockfile"
+    return "skipped"
+
+
+def _env_rebuild_summary(steps: list) -> str:
+    parts = []
+    for step in steps:
+        text = f"{step['env']} {step['label']} {step['result']}"
+        if step.get("reason"):
+            text += f" ({step['reason']})"
+        parts.append(text)
+    return "; ".join(parts)
+
+
+def _record_env_rebuild(status: str, steps: list | None = None,
+                        worktree: str | None = None) -> str:
+    steps = steps or []
+    ENV_REBUILD_STATE.clear()
+    ENV_REBUILD_STATE.update({
+        "status": status,
+        "steps": steps,
+        "summary": _env_rebuild_summary(steps),
+        "worktree": worktree,
+        "finished_utc": _utcnow(),
+    })
+    return status
+
+
+def _run_env_rebuild_step(step: dict, env: dict) -> None:
+    """Run one planned step in place, recording result and reason."""
+    if step.get("skip"):
+        step["result"], step["reason"] = "skipped", step["skip"]
+        logger.info("env rebuild %s skipped: %s", step["label"], step["skip"])
+        return
+    for argv in step["commands"]:
+        if shutil.which(argv[0]) is None:
+            step["result"], step["reason"] = "unavailable", f"{argv[0]} not on PATH"
+            logger.warning("env rebuild: %s unavailable, skipping (%s)", argv[0], step["label"])
+            return
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(REPO_DIR), env=env,
+                capture_output=True, text=True, timeout=ENV_REBUILD_STEP_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            step["result"], step["reason"] = "failed", str(exc)[:300]
+            logger.warning("env rebuild %s failed: %s", step["label"], exc)
+            return
+        if proc.returncode != 0:
+            tail = ((proc.stderr or "")[-2000:] or f"exit {proc.returncode}").strip()
+            step["result"] = "failed"
+            step["reason"] = f"{argv[0]} exit {proc.returncode}"
+            logger.warning("env rebuild %s failed: %s", step["label"], tail)
+            return
+    step["result"], step["reason"] = "ok", None
+    logger.info("env rebuild %s succeeded", step["label"])
+
+
 def _maybe_rebuild_project_env() -> str:
-    """Best-effort rebuild of the excluded project env after an L2 restore
-    (TASK-1.3). Never fail-closed: every failure mode returns a
+    """Best-effort rebuild of the excluded project envs after an L2 restore
+    (TASK-1.3, TASK-21). Never fail-closed: every failure mode returns a
     skipped-*/rebuild-failed status and logs loudly, so boot always proceeds.
+
+    Lockfile-only and repo-neutral: the planned commands never write into
+    the repository, and a guard restores anything a step changed anyway, so
+    `git status` after the rebuild equals the checkpointed state. Optional
+    extras and custom install commands are not reproduced.
 
     Runs under the TASK-1.2 caps (a restore-time `npm ci` is itself a
     transient spike candidate) with a bounded timeout per step.
     """
     if os.environ.get("SCH_REBUILD_ENV_ON_RESTORE", REBUILD_ENV_ON_RESTORE_DEFAULT) == "0":
-        return "skipped-disabled"
-    plan = _project_env_plan(REPO_DIR)
-    if not plan:
-        return "skipped-noop"
-    env = _apply_memory_caps(_child_env_with_provider_keys())
-    outcomes: list = []
-    for label, argv in plan:
-        if shutil.which(argv[0]) is None:
-            logger.warning("env rebuild: %s unavailable, skipping (%s)", argv[0], label)
-            outcomes.append(f"{label}:unavailable")
-            continue
-        try:
-            proc = subprocess.run(
-                argv, cwd=str(REPO_DIR), env=env,
-                capture_output=True, text=True, timeout=600,
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort by contract
-            logger.warning("env rebuild %s failed: %s", label, exc)
-            outcomes.append(f"{label}:failed")
-            continue
-        if proc.returncode != 0:
-            tail = ((proc.stderr or "")[-2000:] or f"exit {proc.returncode}").strip()
-            logger.warning("env rebuild %s failed: %s", label, tail)
-            outcomes.append(f"{label}:failed")
-        else:
-            logger.info("env rebuild %s succeeded", label)
-            outcomes.append(f"{label}:ok")
-    if any(o.endswith(":ok") for o in outcomes):
-        return "rebuilt"
-    if all(o.endswith(":unavailable") for o in outcomes):
-        return "skipped-unavailable"
-    return "rebuild-failed"
+        return _record_env_rebuild("skipped-disabled")
+    try:
+        plan = _project_env_plan(REPO_DIR)
+        if not plan:
+            return _record_env_rebuild("skipped-noop")
+        protected = _snapshot_protected_files(REPO_DIR)
+        git_before = _git_worktree_status(REPO_DIR)
+        env = _env_rebuild_child_env()
+        steps = []
+        for planned in plan:
+            step = {"env": planned["env"], "label": planned["label"]}
+            run = dict(planned)
+            _run_env_rebuild_step(run, env)
+            step["result"], step["reason"] = run["result"], run.get("reason")
+            steps.append(step)
+        worktree = _restore_worktree_after_rebuild(REPO_DIR, protected, git_before)
+        status = _env_rebuild_status(steps)
+        logger.info(
+            "env rebuild: %s (%s; worktree=%s)",
+            status, _env_rebuild_summary(steps), worktree,
+        )
+        return _record_env_rebuild(status, steps, worktree)
+    except Exception as exc:  # noqa: BLE001 — never fail the restore
+        logger.warning("env rebuild aborted: %s", exc)
+        return _record_env_rebuild("rebuild-failed", [{
+            "env": "-", "label": "rebuild", "result": "failed",
+            "reason": str(exc)[:300],
+        }])
 
 
 def _restore_l2(workspace: str) -> dict:
@@ -6288,6 +6517,10 @@ def invoke(payload, context=None):
                     "SCH_REBUILD_ENV_ON_RESTORE", REBUILD_ENV_ON_RESTORE_DEFAULT,
                 ) != "0",
             },
+            # TASK-21: last post-restore env rebuild — overall status, one
+            # entry per env with its result and reason, and the worktree
+            # verdict (unchanged/restored/changed/not-a-git-repo).
+            "env_rebuild": dict(ENV_REBUILD_STATE),
         }
         response["task"] = _task_info_field()
         # add-user-provider-keys: NAMES only, never values (spec:

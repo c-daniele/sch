@@ -186,6 +186,13 @@ def cmd_status(cfg, args):
                 root_info = workspace_info.get("workspace_root")
                 if isinstance(root_info, dict) and root_info.get("path"):
                     live["workspace_root"] = root_info["path"]
+            # TASK-21: post-restore env rebuild outcome, live-only (the
+            # offline S3 status never carries it).
+            checkpoint_info = live_result.get("checkpoint", {})
+            if isinstance(checkpoint_info, dict):
+                env_rebuild = format_env_rebuild(checkpoint_info.get("env_rebuild"))
+                if env_rebuild:
+                    live["env_rebuild"] = env_rebuild
             raw = merge_live_status(raw, live)
 
     # One clock reading shared by the rendering and the exit code, so the
@@ -207,6 +214,27 @@ def cmd_status(cfg, args):
     stale_note = running_stale_note(data, now)
     render_status(data, stale_note=stale_note, sync_root=sync_root)
     return EXIT_RUNNING_STALE if stale_note else 0
+
+
+def format_env_rebuild(info):
+    """One-line rendering of the shim's ``checkpoint.env_rebuild`` block
+    (TASK-21), e.g. ``rebuilt-partial (node npm-ci ok; python
+    uv-sync-frozen skipped (no-lockfile: ...)); worktree unchanged``.
+
+    Returns ``""`` when the block is absent (older image) or the rebuild
+    never ran this boot, so the status rendering stays unchanged.
+    """
+    if not isinstance(info, dict):
+        return ""
+    status = info.get("status")
+    if not status or status == "not-run":
+        return ""
+    text = str(status)
+    if info.get("summary"):
+        text += " ({})".format(info["summary"])
+    if info.get("worktree"):
+        text += "; worktree {}".format(info["worktree"])
+    return text
 
 
 def merge_live_status(raw, live_task):
@@ -270,6 +298,8 @@ def format_status(d, stale_note=None, sync_root=None):
         lines.append("sync_root    : {}".format(sync_root))
     if d.get("workspace_root"):
         lines.append("workspace_root: {}".format(d["workspace_root"]))
+    if d.get("env_rebuild"):
+        lines.append("env_rebuild  : {}".format(d["env_rebuild"]))
     if d.get("task_id"):
         lines.append("task_id      : {}".format(d["task_id"]))
     if d.get("prompt"):
