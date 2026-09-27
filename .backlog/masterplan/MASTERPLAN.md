@@ -14,6 +14,8 @@ The image runs **OpenCode 2** (2.0.18, npm package `@opencode/cli`), Pi 0.87.1 a
 
 The first-boot clone keeps `SCH_REPO_TOKEN` out of the workspace (TASK-10, runtime-image R22): the token reaches git through an environment-reading credential helper, `origin` is token-free, and each boot scrubs embedded passwords from the `origin` of worktrees cloned by earlier images. Checkpoints taken before the fix still hold the token, so the guides tell affected users to rotate it.
 
+The post-restore environment rebuild is lockfile-only and never changes the repository (TASK-21, decision-13, workspace-checkpointing R21): `npm ci`, `uv sync --frozen`, or a project-local `.venv` for `requirements.txt`; projects without a lockfile are skipped with `no-lockfile`, and a guard reverts any stray repo change. Optional extras and custom install commands are not reproduced. The outcome is in shim `info` (`checkpoint.env_rebuild`) and `sch status --live`.
+
 This repository was published as a fresh history: the specifications under `docs/specs/` are the normative description of current behavior, the guides under `docs/` explain how to use and operate it, and this plan starts empty. New work begins with a Backlog task; completed work is recorded in the journal below and linked here.
 
 ## Active work
@@ -28,7 +30,7 @@ task summary. TASK-9 (seeded Bedrock output caps) is done; its image build with
 `image/test-local.sh` and a live Bedrock call on a listed model join those
 operator-side follow-ups. TASK-10 (clone token kept out of the workspace)
 is done; its in-image run (`image/test-local.sh`) and a live clone of a real
-private repository are operator-side too. TASK-22 tracks seven image-side
+private repository are operator-side too. TASK-21 (repo-neutral post-restore env rebuild) is done; a cold restore of a real Node/Python workspace in a live microVM is its operator-side check. TASK-22 tracks seven image-side
 tests that fail when the suite runs outside the container. Earlier follow-ups from TASK-1 (billed-peak re-run, caps-on
 comparison, fresh bootstrap, full `verify-l2.sh` cycle, alarm threshold)
 remain operator-side too. `backlog task list --plain` shows the completed tasks.
@@ -48,6 +50,7 @@ Architecture decisions are recorded in [`.backlog/decisions/`](../decisions/) (`
 - [`decision-9`](../decisions/decision-9%20-%20Reference-the-runtime-image-by-digest-every-image-building-deploy-is-a-new-runtime-version.md): Reference the runtime image by digest: every image-building deploy is a new runtime version
 - [`decision-10`](../decisions/decision-10%20-%20Keep-the-V1-process-topology-on-OpenCode-2-standalone-TUI-and-tasks-one-supervised-authenticated-serve-for-attach-web-and-injection.md): Keep the V1 process topology on OpenCode 2: standalone TUI and tasks, one supervised authenticated serve for attach, web and injection
 - [`decision-12`](../decisions/decision-12%20-%20Seed-an-explicit-Bedrock-output-cap-per-Claude-model-in-the-native-OpenCode-2-provider-shape.md): Seed an explicit Bedrock output cap per Claude model in the native OpenCode 2 provider shape
+- [`decision-13`](../decisions/decision-13%20-%20Post-restore-env-rebuild-is-lockfile-only-and-never-changes-the-repository.md): Post-restore env rebuild is lockfile-only and never changes the repository
 
 ## Open questions
 
@@ -81,3 +84,4 @@ Architecture decisions are recorded in [`.backlog/decisions/`](../decisions/) (`
 - [2026-09-26 Bump the OpenCode pin to 2.0.18](../docs/journal/doc-11%20-%202026-09-26-Bump-the-OpenCode-pin-to-2.0.18.md) — the maintainer pointed at the newest 2.x release; the pin lands on 2.0.18 (surface-identical to 2.0.16, verified) and the `@opencode/ai` vs `@opencode/cli` package confusion is resolved (TASK-7).
 - [2026-09-26 Bedrock Claude requests capped at 4096 output tokens on OpenCode 2](../docs/journal/doc-13%20-%202026-09-26-Bedrock-Claude-requests-capped-at-4096-output-tokens-on-OpenCode-2.md) — OpenCode 2 sends no Bedrock output cap by default; the seed now sets one per Claude model in the native V2 provider shape (TASK-9, decision-12).
 - [2026-09-27 Keep the clone token out of the workspace](../docs/journal/doc-14%20-%202026-09-27-Keep-the-clone-token-out-of-the-workspace.md) — `SCH_REPO_TOKEN` no longer lands in the clone's `origin` URL or on a command line; earlier workspaces are scrubbed at boot, old checkpoints need token rotation (TASK-10).
+- [2026-09-27 Post-restore env rebuild no longer changes the repository](../docs/journal/doc-15%20-%202026-09-27-Post-restore-env-rebuild-no-longer-changes-the-repository.md) — lockfile-only rebuild into project-local envs, `no-lockfile` skips, a worktree guard, and a reported per-env outcome (TASK-21, decision-13).
