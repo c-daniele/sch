@@ -1,6 +1,6 @@
 # Per-Principal Workspace Isolation
 
-> Domain: [Security](../README.md) · Status: Proposed (TASK-20; design TASK-20.1; runtime side R26–R35 implemented by TASK-20.2; templates, deploy and teardown R1–R6, R10–R25, R27, R39, R44–R48 implemented by TASK-20.3; registry and CLI R7–R9, R36–R38, R40–R43 implemented by TASK-20.4; TASK-20.5 pending) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
+> Domain: [Security](../README.md) · Status: Partially verified (TASK-20; design TASK-20.1; runtime side R26–R35 by TASK-20.2; templates, deploy and teardown R1–R6, R10–R25, R27, R39, R44–R48 by TASK-20.3; registry and CLI R7–R9, R36–R38, R40–R43 by TASK-20.4; verify scripts and guides by TASK-20.5. Every requirement is implemented and covered by unit tests, Access Analyzer and simulator evidence; not yet checked live: a deploy with planes (CloudFormation acceptance of the locks), the joint runtime and endpoint lock evaluation (R16, R17, X4), the principal-ID field of R36 and the 403 text of R37, the bucket policy against real callers (R24), all covered by `bin/verify-isolation.sh`) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
 
 ## Purpose
 
@@ -585,5 +585,9 @@ The same call by an unlisted user `carol` answers
   `cli/sch/config.py` (`runtime_arn`), `cli/sch/runtime.py` (`_inject_owner_prefix`),
   `cli/sch/commands/` (`status.py`, `list.py`, `info.py`), `cli/sch/dashboard.py`; tests
   `infra/test_workspace_registry_isolation.py`, `cli/tests/test_isolation_cli.py`
-- Code to be written by TASK-20.5: `bin/verify-isolation.sh`
+- Verification tooling (TASK-20.5): `bin/verify-isolation.sh` (the live two-principal check),
+  `bin/lib/verify-target.sh` and `cli/sch/verify_support.py` (plane runtime, registry session,
+  owner-segment keys and access-role reads for every `bin/verify-*.sh`); tests
+  `cli/tests/test_verify_support.py`, `cli/tests/test_verify_scripts.py` (the scripts against
+  a fake world that enforces these rules)
 - Backlog: TASK-20 and subtasks TASK-20.1 to TASK-20.5

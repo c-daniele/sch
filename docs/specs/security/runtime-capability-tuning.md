@@ -160,7 +160,12 @@ attached managed-policy version already grants read-classed catalog actions —
 the live policy v188, 2026-08-29) — so those are allowed even with their capability
 disabled. That overlap is expected behavior, not a tuning bug; the verify script
 preflights its chosen denial probe against the attached `ReadOnlyAccess` version so an
-AWS policy update cannot silently invalidate the assertion.
+AWS policy update cannot silently invalidate the assertion. On a stack with
+[per-principal isolation](per-principal-isolation.md) on, the check SHALL refuse to start
+unless `ISOLATED_PRINCIPALS` is exported (a deploy without it deletes every plane), SHALL
+run the same assertions against every plane execution role, and SHALL fail if a plane
+runtime version changes. Its rollback comparison reads the customer managed policies by
+default-version document, since each stack update that touches one creates a new version.
 
 ## Behavior
 
