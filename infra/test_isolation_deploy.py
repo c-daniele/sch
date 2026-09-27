@@ -14,6 +14,7 @@ Spec: docs/specs/security/per-principal-isolation.md R2, R6, R10-R12, R17, R48.
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -209,8 +210,14 @@ class DeployScriptTest(unittest.TestCase):
         base = {"PATH": f"{root / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}",
                 "STUB_LOG": str(log), "HOME": str(root)}
         base.update(env)
-        proc = subprocess.run(["bash", str(DEPLOY), "-s"], env=base, capture_output=True, text=True,
-                              cwd=str(root))
+        # A copy next to the helper only: an operator's infra/setenv.sh
+        # (sourced by deploy.sh from its own directory) must not leak in.
+        infra = root / "infra"
+        infra.mkdir()
+        shutil.copy(DEPLOY, infra / "deploy.sh")
+        shutil.copy(INFRA_DIR / "isolation_plan.py", infra / "isolation_plan.py")
+        proc = subprocess.run(["bash", str(infra / "deploy.sh"), "-s"], env=base, capture_output=True,
+                              text=True, cwd=str(root))
         return proc, log.read_text().splitlines()
 
     def test_refused_combinations_stop_before_any_stack(self):

@@ -4,7 +4,7 @@ title: Per-user workspace isolation with runtimes provisioned at deploy time
 status: In Progress
 assignee: []
 created_date: '2026-09-27 10:12'
-updated_date: '2026-09-27 15:25'
+updated_date: '2026-09-27 16:40'
 labels:
   - security
 dependencies: []
@@ -169,3 +169,9 @@ Only after the maintainer's GO, on a workspace whose `feat/task-20` branch conta
 - [ ] #2 Journal entry and masterplan updated as AGENTS.md requires; implementation notes list every assumption and the verification results
 - [ ] #3 Work committed on feat/task-20, never pushed
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-20.3 done (2026-09-27): plane template, managed shared policies, bucket policy and shared-runtime lock, deploy.sh preflight and per-principal stacks, plane teardown, Access Analyzer and simulator evidence under docs/history/. Do not enable ISOLATED_PRINCIPALS on a live stack before TASK-20.4: it locks the shared runtime and no sch command uses the planes yet.
+<!-- SECTION:NOTES:END -->
