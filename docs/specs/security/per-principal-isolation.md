@@ -1,6 +1,6 @@
 # Per-Principal Workspace Isolation
 
-> Domain: [Security](../README.md) · Status: Proposed (TASK-20; design TASK-20.1; runtime side R26–R35 implemented by TASK-20.2; TASK-20.3 to TASK-20.5 pending) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
+> Domain: [Security](../README.md) · Status: Proposed (TASK-20; design TASK-20.1; runtime side R26–R35 implemented by TASK-20.2; templates, deploy and teardown R1–R6, R10–R25, R27, R39, R44–R48 implemented by TASK-20.3; TASK-20.4 and TASK-20.5 pending) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
 
 ## Purpose
 
@@ -73,8 +73,10 @@ Out of scope:
   written, and print a warning naming the entry. This is residual risk X3.
 - **R6.** Before changing any stack, `infra/deploy.sh` SHALL check the AgentCore runtime quota:
   existing runtimes in the region, plus planes to create, minus planes to delete, plus the
-  shared runtime when it does not exist yet, MUST NOT exceed the account quota (Service
-  Quotas value when readable, else the documented default of 100). It SHALL also refuse
+  shared runtime when it does not exist yet, MUST NOT exceed the account quota: the
+  Service Quotas value of `Total Agents per Account` (service `bedrock-agentcore`, code
+  `L-F4575653`) when readable, first as applied then as the AWS default, else the
+  documented default of 100. It SHALL also refuse
   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` and `ENABLE_TELEGRAM_INTERACTION=true` together
   with isolation (R44).
 
@@ -163,14 +165,19 @@ Out of scope:
 - **R20.** Each plane execution role SHALL have a CloudFormation-managed permissions boundary
   that allows `*` and denies only SCH-owned shared resources of the deployment:
   - `dynamodb:*` on `table/<project>-<env>-*` and its sub-resources (registry and Telegram tables);
-  - log reads (`logs:GetLogEvents`, `logs:FilterLogEvents`, `logs:StartQuery`,
-    `logs:StartLiveTail`, `logs:GetLogGroupFields`, `logs:Unmask`, and every other logs read
-    action that accepts a log-group resource) on `/aws/bedrock-agentcore/runtimes/<project>_<env>_*`,
+  - log reads, i.e. every read-level CloudWatch Logs action that accepts a log-group or
+    log-stream resource (service reference checked 2026-09-27): `logs:FilterLogEvents`,
+    `GetDataProtectionPolicy`, `GetLogEvents`, `GetLogGroupFields`, `GetLogRecord`,
+    `GetQueryResults`, `GetTransformer`, `StartLiveTail`, `StartQuery`, `Unmask`, on
+    `/aws/bedrock-agentcore/runtimes/<project>_<env>_*`,
     `/aws/bedrock/agentcore/<project>-<env>-*` and `/aws/lambda/<project>-<env>-*`, the
-    owner's own runtime log group included;
+    owner's own runtime log group included. List-level actions (`DescribeLogStreams`,
+    `DescribeMetricFilters`, `DescribeSubscriptionFilters`, `ListTagsLogGroup`) return no
+    log content and stay allowed;
   - configuration reads `bedrock-agentcore:GetAgentRuntime`, `GetAgentRuntimeEndpoint`,
-    `ListAgentRuntimeVersions`, `ListAgentRuntimeEndpoints`, `GetResourcePolicy` on
-    `runtime/<project>_<env>_*` and its endpoints; `lambda:Get*` on
+    `GetResourcePolicy` on `runtime/<project>_<env>_*` and its endpoints
+    (`ListAgentRuntimeVersions` and `ListAgentRuntimeEndpoints` accept no resource and
+    return no configuration, so they are not listed); `lambda:Get*` on
     `function:<project>-<env>-*`; `lambda:ListFunctions` (not resource-scoped, it returns
     environment variables); `ssm:GetParameter*` on `parameter/<project>/<env>/*`;
   - IAM and STS changes to SCH identities: `iam:Tag*`, `iam:Untag*`, `iam:Put*`,
@@ -329,24 +336,37 @@ Out of scope:
 - **R47.** There SHALL be no migration: with isolation on, owners start with empty namespaces
   and existing registry records and checkpoints are left untouched.
 - **R48.** `sch destroy` SHALL delete every plane stack of the deployment (R12 discovery)
-  before the runtime stack, and purge both layouts when it empties the bucket.
+  before the runtime stack, and purge both layouts when it empties the bucket. The bucket
+  policy disappears with the runtime stack; `sch destroy` also drops any remaining policy
+  of the checkpoint bucket before purging it. A failure to list the plane stacks stops the
+  teardown before anything is deleted.
 
 ## Behavior
 
 ### Deploy flow with isolation on
 
-1. Validate switches (R2, R6 Telegram), resolve every entry (R3–R5), compute owner keys
-   (R7), compute planes to create, update and delete, check the runtime quota (R6). Any
-   failure stops here; no stack has changed.
+1. Validate switches (R2, R6 Telegram) and the managed-policy sizes (X9), resolve every
+   entry (R3–R5), compute owner keys (R7), compute planes to create, update and delete,
+   check the runtime quota (R6) (`infra/isolation_plan.py`, IAM, CloudFormation, AgentCore
+   and Service Quotas reads only). Any failure stops here; no stack has changed.
 2. Bootstrap stack and image build, as today.
-3. Runtime stack with `IsolationEnabled=true`: shared managed policies, bucket policy (R24),
+3. Delete orphan plane stacks (R12) and wait. They go before the runtime stack update
+   because turning isolation off removes the bucket policy that confines plane roles; a
+   removed principal's runtime must be gone first. Storage is retained (R45).
+4. Runtime stack with `IsolationEnabled=true`: shared managed policies, bucket policy (R24),
    shared-runtime lock (R17), registry with `ISOLATION_ENABLED=true` and its plane-parameter
    read (R39).
-4. One `aws cloudformation deploy` per listed principal on `<project>-<env>-plane-<ownerKey>`
-   with the image reference, configuration, `SharedRuntimePolicyArns` and the owner pattern.
-5. Delete orphan plane stacks (R12). Storage is retained (R45).
+5. One `aws cloudformation deploy` per listed principal on `<project>-<env>-plane-<ownerKey>`
+   with the owner pattern and the configuration read back from the runtime stack as deployed
+   (its image tag and digest, lifecycle, Pi model, heap and build-job caps, `ReadOnlyAccess`
+   toggle, `SharedRuntimePolicyArns`, image-rebuild project, registry role), so the shared
+   and user runtimes cannot drift. A plane left in `ROLLBACK_COMPLETE` by an earlier failed
+   creation is deleted and created again.
 6. Print one line per entry: entry, owner key, runtime ARN, stack status. Exit non-zero if any
-   plane failed.
+   plane operation failed.
+
+With `ISOLATED_PRINCIPALS` empty, step 1 only looks for plane stacks of the deployment; if
+that lookup fails, the deploy warns and continues (nothing of this spec is created).
 
 Example: `ISOLATED_PRINCIPALS="user:alice, sso:Developers/bob@example.com"` on project `sch`,
 environment `dev`, account `111122223333` gives two stacks, for example
@@ -472,8 +492,10 @@ The same call by an unlisted user `carol` answers
 - **X8. Mapping cache.** After a principal is removed, the registry may return the deleted
   plane for up to 60 seconds (R39); calls then fail on the missing runtime.
 - **X9. Managed-policy size.** A customer managed policy holds at most 6,144 characters where
-  the inline role policy held 10,240, which caps the Bedrock allow-list length; the deploy
-  fails on an oversized policy rather than truncating it.
+  the inline role policy held 10,240, which caps the Bedrock allow-list length (about 20
+  exact model IDs; wildcard entries cover many models each); the deploy fails on an oversized base
+  policy (conservative estimate) or escape-hatch policy before changing any stack, rather
+  than truncating it.
 
 ### Evidence each slice produces
 
@@ -534,8 +556,18 @@ The same call by an unlisted user `carol` answers
   `_s3_key`/`_generation_key`/`_writer_claim_key`, `_redact_argv`), `image/scripts/sch-build-image.sh`,
   `infra/task_watchdog_handler.py` (`list_workspaces`); tests `image/app/test_owner_prefix.py`,
   `image/app/test_sch_build_image.py`, `infra/test_task_watchdog_handler.py`
-- Code (to be written or changed by TASK-20.3 to TASK-20.5): `infra/user_plane.yaml`,
-  `infra/agent_runtime.yaml`, `infra/deploy.sh`, `infra/workspace_registry_handler.py`,
-  `cli/sch/workspace_registry.py`, `cli/sch/commands/` (`status.py`, `list.py`, `destroy.py`),
-  `cli/sch/dashboard.py`, `cli/sch/awsteardown.py`, `bin/verify-isolation.sh`
+- Code implementing R1–R6, R10–R25, R39, R44–R48 (TASK-20.3): `infra/user_plane.yaml`,
+  `infra/agent_runtime.yaml` (`IsolationEnabled`, `AgentRuntimeBasePolicy` and the other
+  managed policies, `CheckpointBucketPolicy`, `SharedRuntimeLock`, `SharedRuntimeEndpointLock`,
+  `SharedRuntimePolicyArns`), `infra/isolation_plan.py`, `infra/deploy.sh` (preflight, isolation
+  plane helpers), `cli/sch/awsteardown.py` (`plane_stacks`), `cli/sch/commands/destroy.py`;
+  tests `infra/test_isolation_templates.py`, `infra/test_isolation_plan.py`,
+  `infra/test_isolation_deploy.py`, `cli/tests/test_destroy.py`; evidence scripts
+  `infra/validate_isolation_policies.py`, `infra/simulate_isolation.py` (renderer
+  `infra/cfn_render.py`) and their reports under `docs/history/`
+  ([Access Analyzer](../../history/isolation-evidence-access-analyzer.md),
+  [simulator](../../history/isolation-evidence-simulator.md))
+- Code (to be written or changed by TASK-20.4 and TASK-20.5): `infra/workspace_registry_handler.py`,
+  `cli/sch/workspace_registry.py`, `cli/sch/commands/` (`status.py`, `list.py`),
+  `cli/sch/dashboard.py`, `bin/verify-isolation.sh`
 - Backlog: TASK-20 and subtasks TASK-20.1 to TASK-20.5
