@@ -96,17 +96,34 @@ user already has an interactive shell open during the restore, the wrapper dispa
 SHALL wait for the readiness marker of the selected harness (within the configured wait
 window) and start only after the restore is verified.
 
+**R10a.** On a per-principal plane runtime, no invocation SHALL write into the operational
+root before the bootstrap restore has completed (the L2 restore promotes only into an
+empty root): a `checkpoint` action waits for readiness within the fs-readiness bound and
+otherwise answers `skipped-not-ready` without writing, and the GitHub-access
+reconciliation runs once at the end of the bootstrap instead of on early invocations
+([per-principal-isolation](../security/per-principal-isolation.md) R31). Runtimes without
+the owner prefix keep the historical behavior; the same early-checkpoint write there is
+tracked as a follow-up (TASK-23).
+
 ### Checkpoint identity
 
 **R11.** The S3 key of the checkpoints SHALL be derived from the workspace name
 (`checkpoints/<workspace>/`), stable across `runtimeSessionId` rotation. The manifest
 SHALL include the `harness` and `storage` fields, valued from the workspace marker, so
 that restarts with an empty operational root restore the persisted harness and backend.
+On a per-principal plane runtime (`SCH_OWNER_PREFIX=o.<ownerKey>` in its environment)
+every checkpoint, generation, writer-claim and task-status key carries the owner segment
+after its top-level folder (`checkpoints/o.<ownerKey>/<workspace>/`,
+`checkpoint-generations/o.<ownerKey>/<workspace>/`, `workspace-writers/o.<ownerKey>/<workspace>.json`),
+and a manifest that references artifacts outside the owner's trees is rejected as
+malformed (R8); without the variable the keys are unchanged
+([per-principal-isolation](../security/per-principal-isolation.md) R26, R28, R34).
 
 **R12.** `sch` SHALL propagate workspace name, harness, storage, and `sessionEpoch` in
 the invocation payloads (warm-up `noop`, `task`, `mark-interactive`, `checkpoint`); the
 shim SHALL persist them in the operational root's marker and MAY derive the workspace
-name from the sessionId prefix (`sch-<workspace>-<uuid>`) as a fallback. In the absence
+name from the sessionId prefix (`sch-<workspace>-<uuid>`) as a fallback (never on a
+per-principal plane runtime, which accepts only registry workspace identities). In the absence
 of a workspace name, the L2 restore MUST NOT be attempted and the absence SHALL be
 recorded in the boot state; the Phase 0 flow (fresh seed of the image's default harness)
 SHALL proceed.
@@ -126,7 +143,7 @@ with an earlier epoch MUST NOT be able to overwrite data published by a later ep
 
 **R15.** The state/outcome of a headless task SHALL be persisted in a distinct S3 object
 next to the workspace's checkpoint under the same key prefix
-(`checkpoints/<workspace>/`), independent of the checkpoint manifest for both writes and
+(`checkpoints/<workspace>/`, with the owner segment of R11 on a plane runtime), independent of the checkpoint manifest for both writes and
 reads. It SHALL be written by the shim at submission (`state=running`), roughly every 30s
 (heartbeat, cheap JSON PUT), and at every terminal state. The write SHALL be
 overwrite-only (no read-modify-write) and MUST NOT touch the checkpoint manifest, which

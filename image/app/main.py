@@ -310,7 +310,69 @@ WORKSPACE_FROM_SESSION_ID_RE = re.compile(
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 WORKSPACE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+# --- Per-principal isolation: owner prefix (spec per-principal-isolation R26-R34)
+# A user runtime of an isolation plane carries SCH_OWNER_PREFIX=o.<16 hex> in
+# its deploy-time environment. It is the ONLY source of the owner segment that
+# every SCH object key of this runtime lives under (R29): never an invoke
+# payload, never a marker file (a checkpoint restored from S3 could carry one).
+# Unset (or empty) means isolation is off and every key keeps its historical
+# shape byte for byte (R34). A set-but-invalid value is a deployment defect:
+# every invocation then fails before any S3 access or workspace write.
+OWNER_PREFIX_RE = re.compile(r"^o\.[0-9a-f]{16}$")
+# With isolation on, workspace identities come only from the registry
+# (`ws-` + 40 lowercase base32 characters, owner-scoped-workspace-storage R2);
+# a plane has no use for logical names or session-id derived names.
+REGISTRY_WORKSPACE_IDENTITY_RE = re.compile(r"^ws-[a-z2-7]{40}$")
+
+
+def _load_owner_prefix(raw) -> tuple:
+    """``(prefix, error)`` for the raw ``SCH_OWNER_PREFIX`` value.
+
+    ``(None, None)`` when unset or empty (isolation off), ``(prefix, None)``
+    when valid, ``(None, message)`` when set but malformed."""
+    if raw is None or not raw.strip():
+        return None, None
+    value = raw.strip()
+    if not OWNER_PREFIX_RE.fullmatch(value):
+        return None, "invalid SCH_OWNER_PREFIX in the runtime environment (expected o.<16 hex>)"
+    return value, None
+
+
+OWNER_PREFIX, OWNER_PREFIX_ERROR = _load_owner_prefix(os.environ.get("SCH_OWNER_PREFIX"))
+
+
+def _owner_segment() -> str:
+    """``"o.<k>/"`` with isolation on, ``""`` otherwise (read at call time so
+    tests can switch layouts)."""
+    return f"{OWNER_PREFIX}/" if OWNER_PREFIX else ""
+
+
+def _owner_rejection(payload: dict, action: str) -> dict | None:
+    """R29/R30 gate, evaluated before any other effect of an invocation.
+
+    Returns the error response, or None when the invocation may proceed."""
+    if OWNER_PREFIX_ERROR:
+        return {"status": "error", "action": action, "error": OWNER_PREFIX_ERROR}
+    claimed = payload.get("owner_prefix")
+    if claimed is None:
+        return None
+    if claimed != OWNER_PREFIX:
+        return {
+            "status": "rejected", "action": action,
+            "error": "owner_prefix in the payload does not match this runtime's owner",
+        }
+    return None
+
+
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
+# Action names the invoke entrypoint understands (used to keep unrecognized
+# values, which may be prompt text, out of the logs: R32).
+INVOKE_ACTIONS = frozenset({
+    "noop", "info", "ping", "warmup", "checkpoint", "task", "mark-interactive",
+    "command-shell-presence", "prepare-run", "serve-ensure", "git-seed",
+    "git-snapshot", "session-import",
+})
 
 # --- CommandShell client presence --------------------------------------------
 # Presence is intentionally ephemeral and separate from _INTERACTIVE_ACTIVE:
@@ -1043,8 +1105,16 @@ def _derive_workspace_from_session_id(session_id) -> str | None:
     return m.group("ws") if m else None
 
 
+def _workspace_identity_allowed(name: str) -> bool:
+    if not WORKSPACE_IDENTITY_RE.fullmatch(name):
+        return False
+    if OWNER_PREFIX and not REGISTRY_WORKSPACE_IDENTITY_RE.fullmatch(name):
+        return False
+    return True
+
+
 def _set_workspace_name(name: str | None) -> None:
-    if name and not WORKSPACE_IDENTITY_RE.fullmatch(name):
+    if name and not _workspace_identity_allowed(name):
         logger.warning("ignoring unsafe workspace identity")
         return
     if name and _WORKSPACE_NAME["value"] is None:
@@ -1060,7 +1130,10 @@ def _resolve_workspace_name() -> str | None:
     if _WORKSPACE_NAME["value"]:
         return _WORKSPACE_NAME["value"]
     marker_ws = _read_marker().get("workspace")
-    if marker_ws:
+    if marker_ws and (
+        not OWNER_PREFIX
+        or (isinstance(marker_ws, str) and _workspace_identity_allowed(marker_ws))
+    ):
         _WORKSPACE_NAME["value"] = marker_ws
         return marker_ws
     return None
@@ -1626,7 +1699,7 @@ def _backup_db_durable() -> dict:
             manifest = {key: value for key, value in previous.items() if key != "_etag"}
             artifacts = dict(manifest.get("artifacts") or {})
             generation = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
-            artifact_key = f"checkpoint-generations/{workspace}/{generation}/opencode.db.backup"
+            artifact_key = _generation_key(workspace, generation, "opencode.db.backup")
             if not _upload_file_key(DB_BACKUP_PATH, artifact_key):
                 return {"status": "error", "db_backup": "db-upload"}
             artifacts["opencode.db.backup"] = artifact_key
@@ -1985,8 +2058,19 @@ def _s3():
     return _s3_client
 
 
+# Every SCH object key of the shim is built by one of these three helpers so the
+# owner segment (per-principal-isolation R26) cannot be forgotten at a call
+# site. With isolation off the keys are byte-identical to the historical ones.
 def _s3_key(workspace: str, name: str) -> str:
-    return f"checkpoints/{workspace}/{name}"
+    return f"checkpoints/{_owner_segment()}{workspace}/{name}"
+
+
+def _generation_key(workspace: str, generation: str, name: str) -> str:
+    return f"checkpoint-generations/{_owner_segment()}{workspace}/{generation}/{name}"
+
+
+def _writer_claim_key(workspace: str) -> str:
+    return f"workspace-writers/{_owner_segment()}{workspace}.json"
 
 
 def _error_code(exc: Exception) -> str:
@@ -2037,7 +2121,7 @@ def _fence_json_object(key: str, defaults: dict) -> None:
 def _claim_writer(workspace: str) -> None:
     if not CHECKPOINT_BUCKET or _WRITER_CLAIMED["workspace"] == workspace:
         return
-    key = f"workspace-writers/{workspace}.json"
+    key = _writer_claim_key(workspace)
     with _WRITER_CLAIM_LOCK:
         if _WRITER_CLAIMED["workspace"] == workspace:
             return
@@ -2097,7 +2181,7 @@ def _claim_writer(workspace: str) -> None:
 def _assert_writer_claim(workspace: str, claim_if_needed: bool = True) -> None:
     if claim_if_needed:
         _claim_writer(workspace)
-    key = f"workspace-writers/{workspace}.json"
+    key = _writer_claim_key(workspace)
     try:
         obj = _s3().get_object(Bucket=CHECKPOINT_BUCKET, Key=key)
         claim = json.loads(obj["Body"].read().decode())
@@ -2907,6 +2991,16 @@ def _do_checkpoint(force: bool) -> dict:
     action / `sch stop`, which also forces a manifest write even with no
     detected changes so the final timestamp is certain). Serialized against
     the periodic loop and other concurrent forced calls via _CHECKPOINT_LOCK."""
+    if OWNER_PREFIX and not _WORKSPACE_READY.is_set():
+        # R31: before the bootstrap restore completes a checkpoint would write
+        # the DB backup and harness replicas into the workspace root (and
+        # publish a manifest of a not-yet-restored workspace). Nothing can
+        # have changed yet, so there is nothing to save.
+        CHECKPOINT_STATE["last_result"] = "skipped-not-ready"
+        return {
+            "status": "skipped-not-ready", "db_backup": "skipped-not-ready",
+            "manifest_written": False,
+        }
     with _CHECKPOINT_LOCK:
         result: dict = {"db_backup": _backup_db_once()}
         workspace = _resolve_workspace_name()
@@ -2974,7 +3068,7 @@ def _do_checkpoint(force: bool) -> dict:
         def upload_artifact(path: Path, name: str) -> bool:
             if not s3_backend:
                 return _upload_file(path, workspace, name)
-            key = f"checkpoint-generations/{workspace}/{generation}/{name}"
+            key = _generation_key(workspace, generation, name)
             if not _upload_file_key(path, key):
                 return False
             artifacts[name] = key
@@ -3177,6 +3271,15 @@ def _validate_manifest(manifest: dict, storage_backend: str) -> dict:
             for name in required
         ):
             raise ManifestReadError("manifest is missing required artifact references")
+        if OWNER_PREFIX:
+            # Defense in depth for R28: with isolation on, a manifest may only
+            # point into this owner's trees (the bucket policy denies the rest).
+            owned = (f"checkpoints/{OWNER_PREFIX}/", f"checkpoint-generations/{OWNER_PREFIX}/")
+            if any(
+                not isinstance(key, str) or not key.startswith(owned)
+                for key in artifacts.values()
+            ):
+                raise ManifestReadError("manifest references artifacts outside the owner prefix")
     return manifest
 
 
@@ -3669,6 +3772,12 @@ def _bootstrap() -> None:
     """Full boot sequence, run in a background thread so /ping is served
     immediately while the (asynchronous) session-storage restore settles."""
     _remove_telegram_enabled_marker()
+    if OWNER_PREFIX_ERROR:
+        # R29: a malformed owner prefix never reaches S3 or the workspace.
+        BOOT_STATE["phase"] = "error"
+        BOOT_STATE["error"] = OWNER_PREFIX_ERROR
+        logger.error("bootstrap refused: %s", OWNER_PREFIX_ERROR)
+        return
     try:
         BOOT_STATE["phase"] = "waiting-storage-backend"
         backend_deadline = time.monotonic() + MOUNT_SETTLE_TIMEOUT
@@ -3834,6 +3943,9 @@ def _bootstrap() -> None:
         # than silently proceeding — matches D8's mutual-exclusivity intent
         # at the TUI level. Reached only after the seed (fresh init OR L2
         # restore, both covered by the verify loop above) is confirmed.
+        if OWNER_PREFIX:
+            # Deferred from invoke() while the restore was pending (R31).
+            _reconcile_github_access()
         ready_marker = _harness_ready_marker(_resolve_harness())
         if _resolve_storage_backend() == "session" and SESSION_RESTORE_MARKER.exists():
             raise RuntimeError("session restore promotion appeared before readiness")
@@ -5189,6 +5301,15 @@ def _build_headless_argv(
     return argv
 
 
+def _redact_argv(argv: list, prompt: str) -> list:
+    """The argv with every prompt element replaced by a length marker, for
+    logging only (per-principal-isolation R32: prompts stay out of the logs)."""
+    return [
+        f"<prompt: {len(prompt)} chars>" if prompt and arg == prompt else arg
+        for arg in argv
+    ]
+
+
 def _opencode_model_ref(model: str | None, variant: str | None) -> str | None:
     """Compose OpenCode 2's `provider/model#variant` reference. A malformed
     variant is dropped rather than failing the task."""
@@ -5421,7 +5542,11 @@ def _run_task(
     stdout_data = ""
     stderr_data = ""
     try:
-        logger.info("task %s running (harness=%s): %s", task_id, harness, " ".join(argv))
+        # R32: never log the prompt itself, in any mode.
+        logger.info(
+            "task %s running (harness=%s): %s", task_id, harness,
+            " ".join(_redact_argv(argv, prompt)),
+        )
         # Run the harness in a new session/process-group so we can reliably
         # kill it and any child processes (npm/node/MCP servers) on timeout.
         # subprocess.run(timeout=...) only sends SIGTERM to the direct child
@@ -6005,6 +6130,21 @@ async def tunnel_websocket_handler(websocket, context):  # noqa: ARG001 — cont
             await websocket.close(code=1002)
         return
 
+    # Per-principal isolation (R29/R30): same gate as invoke(), first.
+    owner_rejection = _owner_rejection(first, "tunnel")
+    first_workspace = first.get("workspace")
+    if not owner_rejection and OWNER_PREFIX and first_workspace and not (
+        isinstance(first_workspace, str) and _workspace_identity_allowed(first_workspace)
+    ):
+        owner_rejection = {
+            "error": "workspace must be a registry workspace identity on an isolated runtime",
+        }
+    if owner_rejection:
+        with _suppress_close_errors():
+            await websocket.send_json({"type": "error", "message": owner_rejection["error"]})
+            await websocket.close(code=1008)
+        return
+
     if not _set_storage_backend(first.get("storage")):
         with _suppress_close_errors():
             await websocket.send_json({"type": "error", "message": "storage backend mismatch"})
@@ -6171,7 +6311,25 @@ def invoke(payload, context=None):
         payload = {}
 
     action = (payload.get("action") or payload.get("prompt") or "info").strip().lower()
-    logger.info("invocation action=%s", action)
+    # R32: a payload without `action` falls back to its `prompt`, so the raw
+    # value may be prompt text; only recognized action names reach the log.
+    if action in INVOKE_ACTIONS:
+        logger.info("invocation action=%s", action)
+    else:
+        logger.info("invocation action=<unrecognized: %d chars>", len(action))
+
+    # Per-principal isolation (R29/R30): before any other effect — no epoch,
+    # no staging, no S3 call, no workspace write.
+    owner_rejection = _owner_rejection(payload, action)
+    if owner_rejection:
+        return owner_rejection
+    workspace_hint = (payload.get("workspace") or "").strip()
+    if workspace_hint and OWNER_PREFIX and not _workspace_identity_allowed(workspace_hint):
+        # Isolation on: only registry identities name a workspace.
+        return {
+            "status": "rejected", "action": action,
+            "error": "workspace must be a registry workspace identity on an isolated runtime",
+        }
 
     storage_backend = (payload.get("storage_backend") or "").strip().lower()
     session_epoch = payload.get("session_epoch", 0)
@@ -6189,10 +6347,11 @@ def invoke(payload, context=None):
     # Workspace identity (design D2): explicit payload hint takes priority;
     # else derive from the runtimeSessionId prefix (sch-<ws>-<uuid>) when the
     # invocation context exposes it.
-    workspace_hint = (payload.get("workspace") or "").strip()
     if workspace_hint:
         _set_workspace_name(workspace_hint)
-    elif _WORKSPACE_NAME["value"] is None and context is not None:
+    elif _WORKSPACE_NAME["value"] is None and context is not None and not OWNER_PREFIX:
+        # The session-id fallback is off with isolation on: registry session
+        # IDs carry no workspace name.
         derived = _derive_workspace_from_session_id(getattr(context, "session_id", None))
         if derived:
             _set_workspace_name(derived)
@@ -6226,7 +6385,11 @@ def invoke(payload, context=None):
     # credential helper with the staged set on every invocation. No-op unless
     # the workspace is git-native; never fatal and never logs values — drift
     # degrades to the credential-less default.
-    _reconcile_github_access()
+    # With isolation on the reconciliation waits for the bootstrap (R31): it
+    # writes the repo's git config, and the L2 restore promotes only into an
+    # empty root. The bootstrap runs it once itself before readiness.
+    if not OWNER_PREFIX or _WORKSPACE_READY.is_set():
+        _reconcile_github_access()
 
     # Publish the backend last: the bootstrap thread uses this as the barrier
     # that workspace, harness, session id and epoch are all initialized.
@@ -6255,6 +6418,10 @@ def invoke(payload, context=None):
         # Synchronous, forced checkpoint (db -> mount, artefacts -> S3,
         # manifest always updated) — used by `sch stop` right before
         # StopRuntimeSession so no data from the last interval is lost.
+        if OWNER_PREFIX:
+            # R31: wait (bounded) for the bootstrap restore instead of
+            # writing into a root that is still being restored.
+            _WORKSPACE_READY.wait(FS_WORKSPACE_READY_TIMEOUT_S)
         result = _do_checkpoint(force=True)
         db_ok = result.get("db_backup") in ("ok", "no-local-db")
         l2_ok = result.get("status") == "ok" and result.get("manifest_written") is True

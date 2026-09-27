@@ -1,10 +1,10 @@
 ---
 id: TASK-20.2
 title: 'Isolation: owner-scoped storage and shim'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-27 14:50'
-updated_date: '2026-09-27 15:20'
+updated_date: '2026-09-27 15:50'
 labels:
   - security
 dependencies:

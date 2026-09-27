@@ -8,7 +8,8 @@ update) leaves ``state: running`` behind forever, with an ever-aging
 ``heartbeat_utc`` nobody looks at.
 
 On an EventBridge schedule the handler scans ``checkpoints/*/task-status.json``
-and, for every object whose state is ``running`` with a heartbeat older than
+(and ``checkpoints/o.<k>/*/task-status.json`` for the owner trees of
+per-principal isolation) and, for every object whose state is ``running`` with a heartbeat older than
 ``SCH_WATCHDOG_STALE_S`` (default 600s = 20 missed beats — deliberately far
 more tolerant than the 150s used by ``sch status``, because rewriting remote
 state must never false-positive on an S3 hiccup or clock skew), it:
@@ -63,6 +64,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import urllib.request
 
 logger = logging.getLogger()
@@ -82,6 +84,8 @@ BOT_TOKEN = os.environ.get("SCH_TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("SCH_TELEGRAM_CHAT_ID", "")
 
 CHECKPOINT_PREFIX = "checkpoints/"
+# Owner tree of an isolation plane: checkpoints/o.<16 hex>/<ws>/ (R26, R35).
+OWNER_SEGMENT_RE = re.compile(r"^o\.[0-9a-f]{16}$")
 TASK_STATUS_OBJECT = "task-status.json"
 TELEGRAM_TOPIC_OBJECT = "telegram-topic.json"
 
@@ -198,26 +202,48 @@ def is_pending_terminal(data, now=None, grace=None, max_age=None):
     return lower < age <= upper
 
 
-def list_workspaces():
-    """Workspace identities owning a checkpoint prefix (``ListObjectsV2`` on
-    the delimiter — one call per page, no per-object listing)."""
-    workspaces = []
+def _list_common_prefixes(prefix):
+    """Child names directly under ``prefix`` (``ListObjectsV2`` on the
+    delimiter — one call per page, no per-object listing)."""
+    names = []
     token = None
     while True:
-        kwargs = {"Bucket": CHECKPOINT_BUCKET, "Prefix": CHECKPOINT_PREFIX, "Delimiter": "/"}
+        kwargs = {"Bucket": CHECKPOINT_BUCKET, "Prefix": prefix, "Delimiter": "/"}
         if token:
             kwargs["ContinuationToken"] = token
         page = _s3().list_objects_v2(**kwargs)
         for entry in page.get("CommonPrefixes") or []:
-            prefix = entry.get("Prefix") or ""
-            name = prefix[len(CHECKPOINT_PREFIX):].rstrip("/")
+            child = entry.get("Prefix") or ""
+            name = child[len(prefix):].rstrip("/")
             if name:
-                workspaces.append(name)
+                names.append(name)
         if not page.get("IsTruncated"):
             break
         token = page.get("NextContinuationToken")
         if not token:
             break
+    return names
+
+
+def list_workspaces():
+    """Workspace paths under ``checkpoints/``, relative to it, in both layouts
+    (spec per-principal-isolation R35).
+
+    A child matching ``o.<16 hex>`` is an owner tree of an isolation plane:
+    its own children are the workspaces, returned as ``o.<k>/<ws>`` so every
+    key built from the path (task status, topic mapping) is the nested one.
+    Any other child is a workspace of the isolation-off layout. Workspace
+    names never contain ``.``, so the two cannot be confused."""
+    workspaces = []
+    for name in _list_common_prefixes(CHECKPOINT_PREFIX):
+        if OWNER_SEGMENT_RE.fullmatch(name):
+            owner_prefix = "{}{}/".format(CHECKPOINT_PREFIX, name)
+            workspaces.extend(
+                "{}/{}".format(name, workspace)
+                for workspace in _list_common_prefixes(owner_prefix)
+            )
+        else:
+            workspaces.append(name)
     return workspaces
 
 

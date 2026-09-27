@@ -1,6 +1,6 @@
 # Per-Principal Workspace Isolation
 
-> Domain: [Security](../README.md) · Status: Proposed (TASK-20; design TASK-20.1, implementation TASK-20.2 to TASK-20.5) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
+> Domain: [Security](../README.md) · Status: Proposed (TASK-20; design TASK-20.1; runtime side R26–R35 implemented by TASK-20.2; TASK-20.3 to TASK-20.5 pending) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
 
 ## Purpose
 
@@ -252,7 +252,8 @@ Out of scope:
 - **R31.** With the prefix set, nothing SHALL be written into the workspace root
   (`SCH_WORKSPACE_ROOT`) before the bootstrap restore has completed, because the L2 restore
   promotes only into an empty root. Concurrent invocations arriving during the bootstrap
-  wait for it or answer without writing.
+  wait for it or answer without writing (how each action does so:
+  [workspace-checkpointing](../workspace-lifecycle/workspace-checkpointing.md) R10a).
 - **R32.** The shim SHALL NOT write task prompts to the runtime logs, in every mode: the
   headless argv is logged with the prompt replaced by a length marker (`<prompt: N chars>`).
 - **R33.** `sch-build-image` SHALL upload build sources to `builds/<ownerPrefix>/<scope>/source.zip`
@@ -529,9 +530,12 @@ The same call by an unlisted user `carol` answers
   [AgentCore actions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_bedrock-agentcore.html),
   [`AWS::BedrockAgentCore::ResourcePolicy`](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-bedrockagentcore-resourcepolicy.html),
   [IAM policy variables](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_variables.html)
-- Code (to be written or changed by TASK-20.2 to TASK-20.5): `infra/user_plane.yaml`,
+- Code implementing R26–R35 (TASK-20.2): `image/app/main.py` (`OWNER_PREFIX`, `_owner_rejection`,
+  `_s3_key`/`_generation_key`/`_writer_claim_key`, `_redact_argv`), `image/scripts/sch-build-image.sh`,
+  `infra/task_watchdog_handler.py` (`list_workspaces`); tests `image/app/test_owner_prefix.py`,
+  `image/app/test_sch_build_image.py`, `infra/test_task_watchdog_handler.py`
+- Code (to be written or changed by TASK-20.3 to TASK-20.5): `infra/user_plane.yaml`,
   `infra/agent_runtime.yaml`, `infra/deploy.sh`, `infra/workspace_registry_handler.py`,
-  `infra/task_watchdog_handler.py`, `image/app/main.py`, `image/scripts/sch-build-image.sh`,
   `cli/sch/workspace_registry.py`, `cli/sch/commands/` (`status.py`, `list.py`, `destroy.py`),
   `cli/sch/dashboard.py`, `cli/sch/awsteardown.py`, `bin/verify-isolation.sh`
 - Backlog: TASK-20 and subtasks TASK-20.1 to TASK-20.5
