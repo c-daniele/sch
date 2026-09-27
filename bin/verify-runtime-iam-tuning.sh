@@ -16,7 +16,10 @@
 #     (deploy.sh -s without -v) and re-passes the deployed feature flags, so
 #     NO new AgentCore Runtime version is created at any point and session
 #     storage is never reset;
-#   - the checkpoint bucket's top-level workspace prefix count never changes.
+#   - the checkpoint bucket's top-level workspace prefix count never changes;
+#   - with per-principal isolation on, every plane runtime keeps its version
+#     too, and the tuned posture is asserted on every plane execution role
+#     (they attach the same customer managed policies, spec R18).
 #
 # If any phase fails, the script rolls the stack back to inert defaults before
 # exiting non-zero (never leave the live stack tuned because a check failed).
@@ -29,7 +32,16 @@
 #     TELEGRAM_CHAT_ID must be exported exactly as for infra/deploy.sh:
 #     re-deploying without them would change the runtime environment and bump
 #     the runtime version (session reset). The script refuses to start without
-#     them.
+#     them;
+#   - when the deployed stack has per-principal isolation on, ISOLATED_PRINCIPALS
+#     must be exported exactly as for infra/deploy.sh: re-deploying without it
+#     would delete every plane stack (per-principal-isolation R12). The script
+#     refuses to start without it.
+#
+# The capability and base policies are customer managed policies attached to
+# the role (TASK-20.3): the snapshot compares their default-version documents
+# (a CloudFormation update creates a new version with the same document), and
+# AWS managed policies by version ID.
 #
 # Usage: bin/verify-runtime-iam-tuning.sh [-r region] [-p project] [-e env]
 set -euo pipefail
@@ -99,7 +111,7 @@ stack_output() {
 # --- simulation helpers (defined before use) --------------------------------------
 simulate() { # <action> <resource-arn>
     aws iam simulate-principal-policy \
-        --policy-source-arn "${ROLE_ARN}" \
+        --policy-source-arn "${SIM_ROLE_ARN:-${ROLE_ARN}}" \
         --action-names "$1" --resource-arns "$2" \
         --region "${REGION}" \
         --query 'EvaluationResults[0].EvalDecision' --output text
@@ -116,8 +128,10 @@ assert_denied() {
     echo "    denied?   $1 on $2 -> ${decision}"
     [ "${decision}" != "allowed" ] || die "EXPECTED denied: $1 on $2 (got ${decision})"
 }
-role_has_inline_policy() { # <policy-name>; returns 0 when present
-    aws iam list-role-policies --role-name "${ROLE_NAME}" --region "${REGION}" \
+role_has_policy() { # <policy-name>; returns 0 when attached (managed) or inline
+    aws iam list-attached-role-policies --role-name "${ROLE_NAME}" --region "${REGION}" \
+        --query "contains(AttachedPolicies[].PolicyName, '$1')" --output text | grep -q True \
+    || aws iam list-role-policies --role-name "${ROLE_NAME}" --region "${REGION}" \
         --query "contains(PolicyNames, '$1')" --output text | grep -q True
 }
 
@@ -179,7 +193,15 @@ attached = {}
 for p in aws("iam", "list-attached-role-policies", "--role-name", role)["AttachedPolicies"]:
     arn = p["PolicyArn"]
     default = aws("iam", "get-policy", "--policy-arn", arn)["Policy"]["DefaultVersionId"]
-    attached[arn] = {"PolicyName": p["PolicyName"], "VersionId": default}
+    if arn.split(":")[4] == "aws":
+        # AWS managed (ReadOnlyAccess): pinned by version.
+        attached[arn] = {"PolicyName": p["PolicyName"], "VersionId": default}
+    else:
+        # SCH customer managed: every stack update that touches it creates a
+        # new version, so compare the document.
+        doc = aws("iam", "get-policy-version", "--policy-arn", arn,
+                  "--version-id", default)["PolicyVersion"]["Document"]
+        attached[arn] = {"PolicyName": p["PolicyName"], "Document": doc}
 with open(out_path, "w") as fh:
     json.dump({"inline": inline, "attached": attached}, fh,
               sort_keys=True, separators=(",", ":"))
@@ -194,11 +216,58 @@ checkpoint_count() {
     aws s3 ls "s3://$(checkpoint_bucket)/checkpoints/" --region "${REGION}" | wc -l | tr -d ' '
 }
 assert_no_reset() {
-    local count
+    local count planes
     count="$(checkpoint_count)"
     [ "${count}" = "${CHECKPOINT_COUNT_0}" ] \
         || die "workspace checkpoint prefix count changed: ${CHECKPOINT_COUNT_0} -> ${count}"
     echo "    intact:   runtime version ${RUNTIME_VERSION_0}, ${count} workspace checkpoint prefixes"
+    if [ "${ISOLATION_ON}" = "true" ]; then
+        planes="$(plane_snapshot)"
+        [ "${planes}" = "${PLANES_0}" ] \
+            || die "plane stacks or plane runtime versions changed (session storage would be reset): $(printf '%s\n' "${PLANES_0}" | awk '{ printf "%s=%s ", $1, $2 }')-> $(printf '%s\n' "${planes}" | awk '{ printf "%s=%s ", $1, $2 }')"
+        echo "    intact:   ${PLANE_COUNT_0} plane runtime(s), versions unchanged"
+    fi
+}
+
+# --- per-principal isolation: plane roles and runtime versions ----------------------
+# Plane stacks of this deployment (name prefix AND sch:deployment tag, spec R12),
+# one line per plane: "<stack> <RuntimeVersion> <ExecutionRoleArn>".
+plane_snapshot() {
+    PROJECT="${PROJECT_NAME}" ENVIRONMENT="${ENVIRONMENT}" REGION="${REGION}" python3 <<'PY'
+import json, os, subprocess
+
+prefix = "{}-{}-plane-".format(os.environ["PROJECT"], os.environ["ENVIRONMENT"])
+deployment = "{}-{}".format(os.environ["PROJECT"], os.environ["ENVIRONMENT"])
+
+def aws(*args):
+    return json.loads(subprocess.run(
+        ["aws", *args, "--region", os.environ["REGION"], "--output", "json"],
+        capture_output=True, text=True, check=True).stdout or "null")
+
+names = aws("cloudformation", "list-stacks", "--query",
+            "StackSummaries[?StackStatus!='DELETE_COMPLETE' && starts_with(StackName, '{}')].StackName".format(prefix)) or []
+for name in sorted(set(names)):
+    stack = aws("cloudformation", "describe-stacks", "--stack-name", name)["Stacks"][0]
+    tags = {t["Key"]: t["Value"] for t in stack.get("Tags", [])}
+    if tags.get("sch:deployment") != deployment:
+        continue
+    outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
+    print(name, outputs.get("RuntimeVersion", ""), outputs.get("ExecutionRoleArn", ""))
+PY
+}
+
+# Runs <assertion-function> against the shared role, then every plane
+# execution role (the simulator applies each plane's permissions boundary).
+for_each_role() { # <assertion-function>
+    local arn
+    echo "  simulations (shared role):"
+    SIM_ROLE_ARN="${ROLE_ARN}" "$1"
+    if [ "${ISOLATION_ON}" = "true" ]; then
+        for arn in $(printf '%s\n' "${PLANES_0}" | awk 'NF == 3 { print $3 }'); do
+            echo "  simulations (plane role ${arn##*/}):"
+            SIM_ROLE_ARN="${arn}" "$1"
+        done
+    fi
 }
 
 # --- preflight ----------------------------------------------------------------------
@@ -232,6 +301,19 @@ DEPLOYED_CHAT_ID="$(trim "$(stack_param TelegramChatId)")"
 if [ -n "${DEPLOYED_CHAT_ID}" ]; then
     [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || die "the deployed stack has Telegram configured; export TELEGRAM_BOT_TOKEN (as for infra/deploy.sh) — re-deploying without it would bump the runtime version and reset sessions"
     [ -n "${TELEGRAM_CHAT_ID:-}" ] || die "the deployed stack has Telegram configured; export TELEGRAM_CHAT_ID (as for infra/deploy.sh) — re-deploying without it would bump the runtime version and reset sessions"
+fi
+
+# Per-principal isolation: every deploy reconciles the plane stacks with
+# ISOLATED_PRINCIPALS, so a deploy without it would delete every plane (R12).
+ISOLATION_ON="$(trim "$(stack_output IsolationStatus)")"
+PLANES_0=""
+PLANE_COUNT_0=0
+if [ "${ISOLATION_ON}" = "true" ]; then
+    [ -n "$(printf '%s' "${ISOLATED_PRINCIPALS:-}" | tr -d '[:space:],')" ] \
+        || die "the deployed stack has per-principal isolation on; export ISOLATED_PRINCIPALS (as for infra/deploy.sh) — re-deploying without it would delete every plane stack"
+    PLANES_0="$(plane_snapshot)" || die "cannot list the plane stacks of ${PROJECT_NAME}-${ENVIRONMENT}"
+    PLANE_COUNT_0="$(printf '%s\n' "${PLANES_0}" | awk 'NF == 3' | wc -l | tr -d ' ')"
+    log "preflight: isolation on, ${PLANE_COUNT_0} plane stack(s); plane roles are simulated too"
 fi
 
 # Fail fast on missing simulation rights BEFORE any deploy changes the stack.
@@ -297,17 +379,19 @@ log "phase 0: snapshot role + ${CHECKPOINT_COUNT_0} workspace checkpoint prefixe
 snapshot_role "${TMP_DIR}/role-pre.json"
 
 # --- shared assertion: the tuned posture --------------------------------------------
-assert_tuned_posture() {
-    echo "  effective role policies:"
-    role_has_inline_policy "${CAP_POLICY_NAME}" \
-        || die "expected inline policy ${CAP_POLICY_NAME} on the role"
-    echo "    present:  inline policy ${CAP_POLICY_NAME}"
-    echo "  simulations:"
+assert_tuned_simulations() {
     assert_allowed "transcribe:StartTranscriptionJob" "*"
     assert_allowed "bedrock:InvokeModel" "${PROFILE_ARN}"
     assert_denied "bedrock:InvokeModel" "${UNLISTED_MODEL_TARGET}"
     assert_denied "bedrock-mantle:CreateInference" "${MANTLE_ARN}"
     assert_denied "${DISABLED_CAPABILITY_ACTION}" "*"
+}
+assert_tuned_posture() {
+    echo "  effective role policies:"
+    role_has_policy "${CAP_POLICY_NAME}" \
+        || die "expected policy ${CAP_POLICY_NAME} on the role"
+    echo "    present:  policy ${CAP_POLICY_NAME}"
+    for_each_role assert_tuned_simulations
     assert_no_reset
 }
 
@@ -323,12 +407,20 @@ ROLE="${ROLE_NAME}" REGION="${REGION}" CORE_POLICY="${CORE_POLICY_NAME}" \
 ALLOWLIST_MODEL="${ALLOWLIST_MODEL}" python3 <<'PY' || die "effective allow-list resources are wrong (expected the entry in both ARN forms)"
 import json, os, subprocess
 
-doc = json.loads(subprocess.run(
-    ["aws", "iam", "get-role-policy",
-     "--role-name", os.environ["ROLE"],
-     "--policy-name", os.environ["CORE_POLICY"],
-     "--region", os.environ["REGION"], "--output", "json"],
-    capture_output=True, text=True, check=True).stdout)["PolicyDocument"]
+def aws(*args):
+    return json.loads(subprocess.run(
+        ["aws", *args, "--region", os.environ["REGION"], "--output", "json"],
+        capture_output=True, text=True, check=True).stdout)
+
+# The base policy is a customer managed policy (TASK-20.3): read the default
+# version of the attached policy with that name.
+attached = aws("iam", "list-attached-role-policies", "--role-name", os.environ["ROLE"])["AttachedPolicies"]
+arns = [p["PolicyArn"] for p in attached if p["PolicyName"] == os.environ["CORE_POLICY"]]
+if len(arns) != 1:
+    raise SystemExit(f"expected one attached {os.environ['CORE_POLICY']}, found {len(arns)}")
+version = aws("iam", "get-policy", "--policy-arn", arns[0])["Policy"]["DefaultVersionId"]
+doc = aws("iam", "get-policy-version", "--policy-arn", arns[0],
+          "--version-id", version)["PolicyVersion"]["Document"]
 model = os.environ["ALLOWLIST_MODEL"]
 expected = {
     f"arn:aws:bedrock:*:*:inference-profile/{model}",
@@ -354,12 +446,14 @@ log "phase 2: KILL SWITCH (RUNTIME_BEDROCK_ACCESS=false, tuning otherwise unchan
 run_deploy "RUNTIME_CAPABILITIES=${ENABLED_CAPABILITY}" \
     "RUNTIME_BEDROCK_MODEL_ALLOWLIST=${ALLOWLIST_MODEL}" \
     "RUNTIME_BEDROCK_ACCESS=false"
-echo "  simulations:"
 # I5: no Bedrock invocation through the role on EITHER plane, whatever the
 # allow-list says — even the allow-listed model is unreachable now.
-assert_denied "bedrock:InvokeModel" "${PROFILE_ARN}"
-assert_denied "bedrock-mantle:CreateInference" "${MANTLE_ARN}"
-assert_allowed "transcribe:StartTranscriptionJob" "*"
+assert_kill_switch_simulations() {
+    assert_denied "bedrock:InvokeModel" "${PROFILE_ARN}"
+    assert_denied "bedrock-mantle:CreateInference" "${MANTLE_ARN}"
+    assert_allowed "transcribe:StartTranscriptionJob" "*"
+}
+for_each_role assert_kill_switch_simulations
 assert_no_reset
 
 # --- phase 3: re-enable ---------------------------------------------------------------
@@ -371,7 +465,7 @@ assert_tuned_posture
 # --- phase 4: rollback to inert defaults ----------------------------------------------
 log "phase 4: ROLLBACK (all RUNTIME_* switches unset)"
 run_deploy
-if role_has_inline_policy "${CAP_POLICY_NAME}"; then
+if role_has_policy "${CAP_POLICY_NAME}"; then
     die "rollback left ${CAP_POLICY_NAME} on the role"
 fi
 snapshot_role "${TMP_DIR}/role-post.json"
@@ -380,10 +474,12 @@ if ! cmp -s "${TMP_DIR}/role-pre.json" "${TMP_DIR}/role-post.json"; then
     diff "${TMP_DIR}/role-pre.json" "${TMP_DIR}/role-post.json" >&2 || true
     die "role after rollback is NOT byte-identical to the pre-feature snapshot"
 fi
-echo "  simulations:"
-assert_allowed "bedrock:InvokeModel" "${PROFILE_ARN}"
-assert_allowed "bedrock-mantle:CreateInference" "${MANTLE_ARN}"
-assert_denied "transcribe:StartTranscriptionJob" "*"
+assert_rollback_simulations() {
+    assert_allowed "bedrock:InvokeModel" "${PROFILE_ARN}"
+    assert_allowed "bedrock-mantle:CreateInference" "${MANTLE_ARN}"
+    assert_denied "transcribe:StartTranscriptionJob" "*"
+}
+for_each_role assert_rollback_simulations
 assert_no_reset
 
 echo

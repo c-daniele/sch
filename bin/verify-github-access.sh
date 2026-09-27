@@ -90,7 +90,15 @@ WS="${PREFIX}-gha-${STAMP}"
 BRANCH="verify/gh-${STAMP}"
 FAKE_ORIGIN="https://github.com/sch-verify/throwaway.git"
 
+# Registry and isolation stacks (TASK-20.5): plane runtime instead of the
+# shared one; `sch` mirrors registry sessions into the local index read below.
+# shellcheck source=lib/verify-target.sh
+. "${SCRIPT_DIR}/lib/verify-target.sh"
+sch_target_init
+
 runtime_arn() {
+    # Isolation on: the caller's plane runtime, never the shared one (R40).
+    if sch_target_isolated; then sch_target_runtime_arn; return; fi
     aws cloudformation describe-stacks \
         --stack-name "${SCH_PROJECT:-sch}-${SCH_ENV:-dev}-runtime" \
         --region "${SCH_REGION}" \

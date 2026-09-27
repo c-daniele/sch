@@ -76,6 +76,12 @@ echo
 
 # --- Task 8.5: upgrade-reconcile of a legacy workspace index ---------------
 echo "== 8.5 upgrade-reconcile: legacy workspace index without harness field =="
+# The legacy index upgrade is a local-index feature: these checks always run
+# in local index mode (SCH_WORKSPACE_REGISTRY_URL cleared), so on a registry
+# or isolation stack they neither create registry records nor read them. On an
+# isolation stack the invocation itself is refused by the locked shared
+# runtime, which the checks below already tolerate (TASK-20.5).
+LOCAL_INDEX=(env SCH_WORKSPACE_REGISTRY_URL=)
 LEGACY_WS="legacy-$OC_WS-$$"
 LEGACY_WS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/sch/workspaces/${LEGACY_WS}"
 mkdir -p "$(dirname "${LEGACY_WS_FILE}")"
@@ -92,7 +98,7 @@ echo "${LEGACY_SID}" > "${LEGACY_WS_FILE}"
 # will fail at the AWS call, but resolve_harness runs BEFORE the AWS call and
 # persists the harness. So: expect the task to fail at invocation, but the
 # index file should now carry harness=opencode.
-"${SCH}" task "${LEGACY_WS}" "noop prompt to trigger reconcile" >/dev/null 2>&1 || true
+"${LOCAL_INDEX[@]}" "${SCH}" task "${LEGACY_WS}" "noop prompt to trigger reconcile" >/dev/null 2>&1 || true
 LEGACY_HARNESS=$(python3 -c 'import json,sys
 try:
     d=json.load(open(sys.argv[1]))
@@ -116,7 +122,7 @@ LEGACY_WS2="legacy-cl-$OC_WS-$$"
 LEGACY_WS2_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/sch/workspaces/${LEGACY_WS2}"
 LEGACY_SID2="sch-${LEGACY_WS2}-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 echo "${LEGACY_SID2}" > "${LEGACY_WS2_FILE}"
-"${SCH}" task "${LEGACY_WS2}" --harness claude "noop prompt to trigger handoff" >/dev/null 2>&1 || true
+"${LOCAL_INDEX[@]}" "${SCH}" task "${LEGACY_WS2}" --harness claude "noop prompt to trigger handoff" >/dev/null 2>&1 || true
 LEGACY_HARNESS2=$(python3 -c 'import json,sys
 try:
     d=json.load(open(sys.argv[1]))
@@ -135,7 +141,7 @@ LEGACY_WS3="legacy-pi-$OC_WS-$$"
 LEGACY_WS3_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/sch/workspaces/${LEGACY_WS3}"
 LEGACY_SID3="sch-${LEGACY_WS3}-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 echo "${LEGACY_SID3}" > "${LEGACY_WS3_FILE}"
-"${SCH}" task "${LEGACY_WS3}" --harness pi "noop prompt to trigger handoff" >/dev/null 2>&1 || true
+"${LOCAL_INDEX[@]}" "${SCH}" task "${LEGACY_WS3}" --harness pi "noop prompt to trigger handoff" >/dev/null 2>&1 || true
 LEGACY_PI_STATE=$(python3 -c 'import json,sys
 try:
     d=json.load(open(sys.argv[1]))
@@ -186,7 +192,8 @@ check_mutex() { # <workspace> <bound-harness> <attempted-harness>
     local ws="$1" bound="$2" attempted="$3" out rc
     out=$("${SCH}" task "${ws}" --harness "${attempted}" "should be rejected" 2>&1)
     rc=$?
-    if [ "${rc}" -ne 0 ] && echo "${out}" | grep -q "cannot switch to"; then
+    # Local index: "cannot switch to"; registry: HTTP 409 "harness is immutable".
+    if [ "${rc}" -ne 0 ] && echo "${out}" | grep -Eq "cannot switch to|harness is immutable"; then
         ok "${bound} workspace rejected divergent --harness ${attempted}: ${out}"
     else
         bad "${bound} workspace did NOT reject --harness ${attempted} (rc=${rc}): ${out}"

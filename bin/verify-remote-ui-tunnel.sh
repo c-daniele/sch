@@ -111,7 +111,10 @@ print(json.dumps({"runtimeSessionId": f"sch-{ws}-{uuid.uuid4()}", "harness": "cl
 ' "${CLAUDE_WS}" > "${CLAUDE_WS_FILE}"
 
     start=$(date +%s)
-    REJECT_OUT="$("${SCH}" attach "${CLAUDE_WS}" 2>&1 || true)"
+    # Local index mode on every stack: the guard under test is client-side,
+    # and with a registry the seeded index would be replaced by the registry
+    # record (no runtime call either way).
+    REJECT_OUT="$(SCH_WORKSPACE_REGISTRY_URL= "${SCH}" attach "${CLAUDE_WS}" 2>&1 || true)"
     elapsed=$(( $(date +%s) - start ))
     rm -f "${CLAUDE_WS_FILE}"
 
@@ -145,8 +148,16 @@ command -v aws >/dev/null 2>&1 || { bad "'aws' CLI not found — aborting live p
 [ -f "${TUNNEL_DIR}/attach.js" ] || { bad "cannot find ${TUNNEL_DIR}/attach.js"; exit 1; }
 [ -f "${TUNNEL_DIR}/web.js" ] || { bad "cannot find ${TUNNEL_DIR}/web.js"; exit 1; }
 
+# Registry and isolation stacks (TASK-20.5): plane runtime, registry session
+# and workspace identity. No-op on registry-off stacks.
+# shellcheck source=lib/verify-target.sh
+. "${SCRIPT_DIR}/lib/verify-target.sh"
+sch_target_init
+
 # --- live helpers (agentcore data plane, mirrors verify-headless-tasks.sh) ---
 runtime_arn() {
+    # Isolation on: the caller's plane runtime, never the shared one (R40).
+    if sch_target_isolated; then sch_target_runtime_arn; return; fi
     if [ -n "${SCH_RUNTIME_ARN:-}" ]; then echo "${SCH_RUNTIME_ARN}"; return; fi
     aws cloudformation describe-stacks \
         --stack-name "${SCH_PROJECT:-sch}-${SCH_ENV:-dev}-runtime" \
@@ -204,6 +215,12 @@ ARN="$(runtime_arn)"
 
 # Ensure the opencode workspace index exists with harness=opencode (seed it
 # directly, like verify-headless-tasks.sh, so we don't need to open a TUI).
+# Registry on: resolve through the registry first; `sch` mirrors the record
+# into the local index read below, and payloads name the workspace identity.
+RUNTIME_WS="${WS}"
+if sch_target_workspace "${WS}" "opencode" ""; then
+    RUNTIME_WS="${SCH_TARGET_WS}"
+fi
 WS_FILE="${WS_DIR}/${WS}"
 if [ ! -f "${WS_FILE}" ]; then
     mkdir -p "${WS_DIR}"
@@ -232,7 +249,7 @@ aws bedrock-agentcore invoke-agent-runtime \
     --cli-binary-format raw-in-base64-out \
     --agent-runtime-arn "${ARN}" \
     --runtime-session-id "${SID}" \
-    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${WS}\", \"harness\": \"opencode\"}" \
+    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"opencode\"}" \
     --region "${SCH_REGION}" \
     /dev/null >/dev/null 2>&1 || true
 wait_boot_ready 240 || warn "boot not confirmed ready; continuing (serve-ensure retries internally)"
@@ -248,7 +265,7 @@ while [ "${attempt}" -lt 5 ]; do
         --cli-binary-format raw-in-base64-out \
         --agent-runtime-arn "${ARN}" \
         --runtime-session-id "${SID}" \
-        --payload "{\"action\": \"serve-ensure\", \"workspace\": \"${WS}\", \"harness\": \"opencode\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
+        --payload "{\"action\": \"serve-ensure\", \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"opencode\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
         --region "${SCH_REGION}" \
         "${SERVE_OUT}" >/dev/null 2>&1; then
         SERVE_STATUS=$(python3 -c "import json; print(json.load(open('${SERVE_OUT}')).get('status','unknown'))" 2>/dev/null || echo "unknown")
@@ -293,7 +310,7 @@ if aws bedrock-agentcore invoke-agent-runtime \
     --cli-binary-format raw-in-base64-out \
     --agent-runtime-arn "${ARN}" \
     --runtime-session-id "${SID}" \
-    --payload "{\"action\": \"serve-ensure\", \"workspace\": \"${WS}\", \"harness\": \"opencode\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
+    --payload "{\"action\": \"serve-ensure\", \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"opencode\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
     --region "${SCH_REGION}" \
     "${SERVE_OUT2}" >/dev/null 2>&1; then
     REMOTE_PORT2=$(python3 -c "import json; print(json.load(open('${SERVE_OUT2}')).get('port',''))" 2>/dev/null || echo "")
@@ -454,7 +471,7 @@ run_bounded 120 node "${TUNNEL_DIR}/attach.js" \
     --region "${SCH_REGION}" \
     --runtime-arn "${ARN}" \
     --session-id "${SID}" \
-    --workspace "${WS}" \
+    --workspace "${RUNTIME_WS}" \
     --storage "${STORAGE}" \
     --session-epoch "${SESSION_EPOCH}" \
     --remote-port "${REMOTE_PORT}" \
@@ -544,7 +561,7 @@ node "${TUNNEL_DIR}/web.js" \
     --region "${SCH_REGION}" \
     --runtime-arn "${ARN}" \
     --session-id "${SID}" \
-    --workspace "${WS}" \
+    --workspace "${RUNTIME_WS}" \
     --storage "${STORAGE}" \
     --session-epoch "${SESSION_EPOCH}" \
     --remote-port "${REMOTE_PORT}" \
@@ -686,7 +703,7 @@ if [ -n "${WEB_URL}" ] && kill -0 "${WEB_PID}" 2>/dev/null; then
         --region "${SCH_REGION}" \
         --runtime-arn "${ARN}" \
         --session-id "${SID}" \
-        --workspace "${WS}" \
+        --workspace "${RUNTIME_WS}" \
         --storage "${STORAGE}" \
         --session-epoch "${SESSION_EPOCH}" \
         --remote-port "${REMOTE_PORT}" \
@@ -739,7 +756,7 @@ aws bedrock-agentcore invoke-agent-runtime \
     --cli-binary-format raw-in-base64-out \
     --agent-runtime-arn "${ARN}" \
     --runtime-session-id "${SID}" \
-    --payload "{\"action\": \"mark-interactive\", \"workspace\": \"${WS}\", \"harness\": \"opencode\", \"active\": false, \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
+    --payload "{\"action\": \"mark-interactive\", \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"opencode\", \"active\": false, \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
     --region "${SCH_REGION}" \
     /dev/null >/dev/null 2>&1 || true
 if [ "${KEEP}" -eq 1 ]; then

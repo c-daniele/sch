@@ -255,6 +255,8 @@ EOF
 # Live section: the microVM half
 # ============================================================================
 runtime_arn() {
+    # Isolation on: the caller's plane runtime, never the shared one (R40).
+    if sch_target_isolated; then sch_target_runtime_arn; return; fi
     aws cloudformation describe-stacks \
         --stack-name "${SCH_PROJECT:-sch}-${SCH_ENV:-dev}-runtime" \
         --region "${SCH_REGION}" \
@@ -287,13 +289,24 @@ else:
 PY
 }
 
+runtime_ws() { # registry workspace identity (mirrored by sch), else the name
+    python3 - "${XDG_CONFIG_HOME:-${HOME}/.config}/sch/workspaces/${WS}" "${WS}" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    data = {}
+print((data.get("workspaceIdentity") if isinstance(data, dict) else "") or sys.argv[2])
+PY
+}
+
 live_info() { # -> path of a JSON file with the shim's `info` response
     local out="${TMPDIR:-/tmp}/sch-verify-keys-info-$$.json"
     aws bedrock-agentcore invoke-agent-runtime \
         --cli-binary-format raw-in-base64-out \
         --agent-runtime-arn "${ARN}" \
         --runtime-session-id "${SID}" \
-        --payload "{\"action\": \"info\", \"workspace\": \"${WS}\", \"harness\": \"${HARNESS}\"}" \
+        --payload "{\"action\": \"info\", \"workspace\": \"$(runtime_ws)\", \"harness\": \"${HARNESS}\"}" \
         --region "${SCH_REGION}" \
         "${out}" >/dev/null 2>&1
     echo "${out}"
@@ -316,6 +329,11 @@ live_section() {
     echo "# workspace: ${WS} (harness: ${HARNESS})"
     echo "############################################"
     command -v agentcore >/dev/null || { bad "agentcore not on PATH"; return; }
+    # Registry and isolation stacks (TASK-20.5): plane runtime, workspace
+    # identity, owner-segment reads through the access role.
+    # shellcheck source=lib/verify-target.sh
+    . "${SCRIPT_DIR}/lib/verify-target.sh"
+    sch_target_init
     ARN="$(runtime_arn)" || { bad "cannot resolve the runtime ARN"; return; }
     local key_name="${SCH_VERIFY_PROVIDER_NAME:-OPENROUTER_API_KEY}"
     local key_value="${SCH_VERIFY_PROVIDER_KEY:-${FAKE_ROUTER}}"
@@ -416,7 +434,7 @@ live_section() {
     if [ -n "${bucket}" ] && [ "${bucket}" != "None" ]; then
         local dump
         dump="$(mktemp -d)"
-        aws s3 cp "s3://${bucket}/checkpoints/${WS}/" "${dump}/" \
+        sch_target_owner_aws s3 cp "s3://${bucket}/$(sch_target_ckpt_prefix "$(runtime_ws)")" "${dump}/" \
             --recursive --region "${SCH_REGION}" >/dev/null 2>&1
         if grep -RqF "${key_value}" "${dump}" 2>/dev/null; then
             bad "B7 a key value was found in the L2 checkpoint artifacts"
