@@ -60,12 +60,19 @@ removed and a model allow-list set.
 
 ## Isolation between users
 
-Workspace storage is owner-scoped: each IAM principal gets its own S3 prefix,
-and one user's agent cannot reach another user's state. The optional IAM
-workspace registry adds an authenticated control plane so teams share
-workspace names without sharing data —
+With the optional IAM workspace registry, each IAM principal gets its own
+workspace names and S3 prefixes, so teams can reuse names without their SCH
+commands touching each other's state —
 [`owner-scoped-workspace-storage.md`](specs/security/owner-scoped-workspace-storage.md),
 [`iam-workspace-registry.md`](specs/security/iam-workspace-registry.md).
+
+This is not an access-control boundary. Every workspace runs on one shared
+runtime whose execution role can read every checkpoint, and a principal that
+can invoke the runtime and learns a session ID can join that session. Treat a
+deployment as one trust domain. Opt-in per-principal isolation, one locked
+runtime and one scoped role per listed user, is designed but not built yet:
+[`per-principal-isolation.md`](specs/security/per-principal-isolation.md)
+(TASK-20).
 
 ## The image is part of the contract
 

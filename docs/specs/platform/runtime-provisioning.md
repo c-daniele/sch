@@ -50,7 +50,7 @@ Out of scope:
 
 ### Execution role
 
-**R8.** The IAM execution role SHALL include: `bedrock:InvokeModel*` on the required inference profiles (Claude, cross-region), CloudWatch log write permissions, read-only access to the account's AWS resources via the `ReadOnlyAccess` managed policy (supporting the `aws-mcp` MCP server), and S3 write permissions limited to the checkpoint, generation, and writer prefixes (`s3:PutObject`, `s3:GetObject`, `s3:AbortMultipartUpload`, `s3:PutObjectTagging` on `<bucket>/checkpoints/*`, `<bucket>/checkpoint-generations/*`, and `<bucket>/workspace-writers/*`; `s3:ListBucket` on the bucket constrained to those prefixes).
+**R8.** The IAM execution role SHALL include: `bedrock:InvokeModel*` on the required inference profiles (Claude, cross-region), CloudWatch log write permissions, read-only access to the account's AWS resources via the `ReadOnlyAccess` managed policy (supporting the `aws-mcp` MCP server), and S3 write permissions limited to the checkpoint, generation, and writer prefixes (`s3:PutObject`, `s3:GetObject`, `s3:AbortMultipartUpload`, `s3:PutObjectTagging` on `<bucket>/checkpoints/*`, `<bucket>/checkpoint-generations/*`, and `<bucket>/workspace-writers/*`; `s3:ListBucket` on the bucket constrained to those prefixes). *Planned change (TASK-20.3):* these statements move into a customer managed policy shared with the per-principal plane roles, and with isolation on a bucket policy confines each plane role to its owner segment ([per-principal-isolation](../security/per-principal-isolation.md) R18, R24).
 
 **R9.** When, and only when, the image rebuild capability is enabled, the execution role SHALL additionally receive exclusively: `s3:PutObject` and `s3:AbortMultipartUpload` on `<bucket>/builds/*`, `codebuild:StartBuild` and `codebuild:BatchGetBuilds` on the ARN of the dedicated project only, and `logs:GetLogEvents`/`logs:FilterLogEvents` on its log group only.
 
@@ -101,7 +101,7 @@ overrides MUST NOT require even that.
 ## Invariants
 
 - **I1.** Stack deletion never destroys the checkpoint bucket or its contents.
-- **I2.** With the execution role credentials, any S3 write outside `<bucket>/checkpoints/*`, `<bucket>/checkpoint-generations/*`, and `<bucket>/workspace-writers/*` (plus `<bucket>/builds/*` only when the rebuild capability is enabled) fails with an IAM authorization error, and `s3:DeleteObject` on the checkpoint bucket always fails.
+- **I2.** With the execution role credentials, any write to the checkpoint bucket outside `<bucket>/checkpoints/*`, `<bucket>/checkpoint-generations/*`, and `<bucket>/workspace-writers/*` (plus `<bucket>/builds/*` only when the rebuild capability is enabled) fails with an IAM authorization error, and `s3:DeleteObject` on the checkpoint bucket always fails (unless the operator-owned escape-hatch policy of [runtime-capability-tuning](../security/runtime-capability-tuning.md) R10 grants it). Writes to other buckets follow the capability policies (data bucket, same spec R5).
 - **I3.** With the capability disabled, the execution role contains no `codebuild:*` permissions and no build resources exist.
 - **I4.** The build role can never read or write `checkpoints/*`, invoke Bedrock, or access IAM.
 - **I5.** Images published by the deploy are never expired by the ECR lifecycle policy in favor of session-built images.

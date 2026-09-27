@@ -9,7 +9,7 @@ Start here, then jump to a domain:
 | Domain | What it covers |
 | --- | --- |
 | [Platform](platform/) | The compute foundation: runtime provisioning, the version-pinned container image, image rebuild, harness selection, CLI installation & distribution. |
-| [Security](security/) | IAM as the real boundary: workspace control API, workspace registry, owner-scoped and selectable storage. |
+| [Security](security/) | IAM as the real boundary: workspace control API, workspace registry, owner-scoped and selectable storage, per-principal isolation. |
 | [Workspace lifecycle](workspace-lifecycle/) | Keeping state safe: persistence, checkpointing, deletion, session handoff. |
 | [Access surfaces](access-surfaces/) | How users reach SCH: CLI, interactive shell, headless tasks, remote UI tunnel, ACP editors, dashboard, Telegram. |
 | [Sync & git](sync-and-git/) | Moving code in and out: local workspace sync and the git-native parallel-session workflow. |
@@ -38,7 +38,8 @@ the code; names the backlog task).
 | [`iam-workspace-control-api.md`](security/iam-workspace-control-api.md) | Implemented | IAM-authenticated registry API contract (resolve/list/rotate/delete, error contract). |
 | [`iam-workspace-registry.md`](security/iam-workspace-registry.md) | Implemented | CLI-side registry behavior, owner scoping, no-cache-fallback, legacy mode. |
 | [`workspace-registry.md`](security/workspace-registry.md) | Implemented | Implemented Lambda + API Gateway + DynamoDB control plane. |
-| [`owner-scoped-workspace-storage.md`](security/owner-scoped-workspace-storage.md) | Implemented | Per-principal S3 prefixes, identity determinism, no cross-user reach. |
+| [`owner-scoped-workspace-storage.md`](security/owner-scoped-workspace-storage.md) | Implemented | Per-principal S3 prefixes and identity determinism; naming separation, not an access-control boundary. |
+| [`per-principal-isolation.md`](security/per-principal-isolation.md) | Proposed (TASK-20) | Opt-in per-principal planes provisioned at deploy time: bound identities, runtime locks, owner-segment storage layout, bucket policy, threat model, residual risks. |
 | [`selectable-workspace-storage.md`](security/selectable-workspace-storage.md) | Implemented | `--storage s3\|session` semantics, epoch fencing. |
 | [`runtime-capability-tuning.md`](security/runtime-capability-tuning.md) | Implemented | Deploy-time shaping of the runtime execution role: capability catalog, Bedrock model allow-list, ReadOnlyAccess toggle, escape hatch. |
 

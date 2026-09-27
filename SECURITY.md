@@ -37,12 +37,16 @@ Out of scope:
 
 ## Design posture (what we promise to maintain)
 
-- The IAM execution role is the real permission boundary: roles are scoped per
-  workspace and per user, and reviewed like security code.
+- The IAM execution role is the real permission boundary and is reviewed like
+  security code. On a default deployment one execution role is shared by every
+  workspace of the stack.
 - Secrets must never be baked into the image or synced into workspaces; sync
   excludes secrets by design.
-- Workspaces are isolated per user (owner-scoped storage prefixes, per-user
-  registry identity) — one user's agent must not reach another user's state.
+- Workspaces are separated per user by owner-scoped storage prefixes and a
+  per-user registry identity. This separates names, not access: on a default
+  deployment one user's agent can read another user's checkpoints. Opt-in
+  per-principal isolation, which enforces that boundary, is being built
+  ([spec](docs/specs/security/per-principal-isolation.md), TASK-20).
 - Security fixes land on `main` and are released as patch versions.
 
 ## Supported versions

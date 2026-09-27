@@ -26,12 +26,12 @@ Out of scope:
 ### Infrastructure
 
 - **R1.** The registry stack SHALL consist of a DynamoDB table (partition key `ownerId`, sort key `logicalWorkspace`, pay-per-request billing, point-in-time recovery and encryption at rest enabled), a Python 3.12 Lambda function, and a regional API Gateway REST API whose methods all use `AWS_IAM` authorization. The stack SHALL be created only when the `EnableWorkspaceRegistry` CloudFormation condition is true.
-- **R2.** The Lambda execution role SHALL be least-privilege: DynamoDB item actions on the registry table only; `s3:ListBucketVersions`/`s3:DeleteObjectVersion` on the checkpoint bucket only; `bedrock-agentcore:StopRuntimeSession`; and CloudWatch Logs. Clients SHALL NOT require DynamoDB permissions — only `execute-api:Invoke` on the registry API.
+- **R2.** The Lambda execution role SHALL be least-privilege: DynamoDB item actions on the registry table only; `s3:ListBucketVersions`/`s3:DeleteObjectVersion` on the checkpoint bucket only; `bedrock-agentcore:StopRuntimeSession`; and CloudWatch Logs. Clients SHALL NOT require DynamoDB permissions — only `execute-api:Invoke` on the registry API. *Planned change (TASK-20.3):* `StopRuntimeSession` is scoped to the deployment's runtimes, and with isolation on the role also reads the plane-mapping parameters ([per-principal-isolation](per-principal-isolation.md) R39).
 - **R3.** The Lambda environment SHALL pin `DEFAULT_HARNESS` (opencode) and `DEFAULT_STORAGE` (s3), which MUST stay equal to the CLI defaults so a workspace's effective harness and backend never depend on which component materialized it first.
 
 ### Owner derivation and record schema
 
-- **R4.** The handler SHALL derive the owner from `requestContext.identity.userArn` of the API Gateway event only, SHALL fail the request if it is absent, and SHALL store only `sha256(callerArn)` as `ownerId`. Principal details MUST NOT appear in table keys, records, or runtime path components.
+- **R4.** The handler SHALL derive the owner from `requestContext.identity.userArn` of the API Gateway event only, SHALL fail the request if it is absent, and SHALL store only `sha256(callerArn)` as `ownerId`. Principal details MUST NOT appear in table keys, records, or runtime path components. *Planned change (TASK-20.4):* with isolation on, the owner comes from the bound identity and records store `ownerPrefix` and return `plane` fields ([per-principal-isolation](per-principal-isolation.md) R36–R38).
 - **R5.** A record SHALL contain `ownerId`, `logicalWorkspace`, `runtimeSessionId` (`sch-registry-<uuid4>`), `harness`, `workspaceIdentity`, `storage`, `sessionEpoch`, `createdAt`, `updatedAt`, and `schemaVersion`. The public record returned to clients SHALL exclude timestamps and SHALL expose `deletionState` only when it is `deleting`; the list operation SHALL filter deleting records out entirely.
 - **R6.** The handler SHALL validate the logical workspace name against `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`, the harness against the enum (`opencode`, `claude`, `pi` — kept in sync with the CLI's accepted values), and storage against (`s3`, `session`); violations SHALL be rejected with 400.
 
@@ -76,6 +76,7 @@ The original proposal (`openspec/changes/add-central-workspace-registry/proposal
 
 ## Cross-references
 
+- [per-principal-isolation](per-principal-isolation.md) — isolation-on owner mapping, plane lookup and role scope
 - [iam-workspace-control-api](iam-workspace-control-api.md) — API contract this implementation satisfies
 - [iam-workspace-registry](iam-workspace-registry.md) — CLI-side rules (resolution, fallback, legacy mode)
 - [owner-scoped-workspace-storage](owner-scoped-workspace-storage.md) — identity derivation and purged prefixes

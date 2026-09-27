@@ -31,7 +31,7 @@ Out of scope:
 
 **R1.** The stack SHALL expose the tuning as CloudFormation parameters with inert
 defaults: with every parameter at its default, the deployed execution role SHALL be
-byte-identical to a deployment of the template before this feature existed.
+byte-identical to a deployment of the template before this feature existed. *Planned change (TASK-20.3, [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)):* the base, capability and escape-hatch policies become customer managed policies shared with the per-principal plane roles ([per-principal-isolation](per-principal-isolation.md) R18); at defaults the role's effective permissions stay identical, but its policy documents are no longer byte-identical.
 
 **R2.** Because tuning only changes IAM policies (never the runtime image or
 `ApplicationVersion`), applying a tuning change through a stack-only deploy SHALL be
@@ -43,7 +43,7 @@ R15c.)
 **R3. — Capability catalog.** The stack SHALL support a comma-separated
 `RuntimeCapabilities` parameter whose entries are drawn from the v1 catalog:
 `transcribe`, `textract`, `rekognition`, `polly`, `comprehend`. Each enabled capability
-SHALL attach one dedicated conditional `AWS::IAM::Policy` to the execution role,
+SHALL attach one dedicated conditional `AWS::IAM::Policy` (planned: `AWS::IAM::ManagedPolicy`, see R1) to the execution role,
 following the existing conditional-policy pattern: with a capability off, its policy
 resource does not exist and the role is unchanged. Because CloudFormation condition
 functions cannot test whether a comma list contains an entry, `deploy.sh` validates the
@@ -120,7 +120,7 @@ read operations fail unless the escape hatch or a future curated read capability
 back-fills them.
 
 **R10. — Escape hatch.** The `RuntimeExtraPolicyJson` parameter (default `''`) SHALL, when
-non-empty, be attached as ONE additional `AWS::IAM::Policy` on the execution role, in
+non-empty, be attached as ONE additional `AWS::IAM::Policy` (planned: `AWS::IAM::ManagedPolicy`, see R1) on the execution role, in
 addition to all other tuning. It is an operator-owned trust decision; the template and
 this spec SHALL say so. CloudFormation validates its JSON syntax; no semantic validation
 is performed.
@@ -174,7 +174,8 @@ AWS policy update cannot silently invalidate the assertion.
 ## Invariants
 
 - **I1.** Defaults are inert: the default-deployed role is byte-identical to the
-  pre-feature role.
+  pre-feature role. Planned change: effective-permission identity instead of byte
+  identity once the policies are managed (R1).
 - **I2.** Tuning never resets session storage: no `ApplicationVersion` bump is triggered
   by, or required for, a tuning change.
 - **I3.** The template is the single source of truth for every granted permission; no
@@ -190,6 +191,7 @@ AWS policy update cannot silently invalidate the assertion.
 - [Operator guide](../../runtime-capability-tuning.md) — use cases and worked deploy examples for this feature.
 - [runtime-provisioning](../platform/runtime-provisioning.md) — the base execution role,
   conditional-policy pattern, deploy/rollback flow.
+- [per-principal-isolation](per-principal-isolation.md) — plane roles that share these policies.
 - [session-image-rebuild](../platform/session-image-rebuild.md) — precedent for
   opt-in session capability + conditional IAM policy.
 - Code: `infra/agent_runtime.yaml` (parameters, capability policies, allow-list

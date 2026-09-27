@@ -33,7 +33,7 @@ Out of scope:
 
 ### Registry-backed CLI commands
 
-- **R4.** When `SCH_WORKSPACE_REGISTRY_URL` is configured, `sch` SHALL resolve workspace metadata through the registry before every workspace-scoped command that opens, invokes, attaches to, checks, stops or resets a workspace. The CLI SHALL use the returned runtime session ID for its existing direct AgentCore operations, and SHALL mirror the returned record into its local index as a cache.
+- **R4.** When `SCH_WORKSPACE_REGISTRY_URL` is configured, `sch` SHALL resolve workspace metadata through the registry before every workspace-scoped command that opens, invokes, attaches to, checks, stops or resets a workspace. The CLI SHALL use the returned runtime session ID for its existing direct AgentCore operations, and SHALL mirror the returned record into its local index as a cache. *Planned change (TASK-20.4):* with isolation on, the CLI also uses the record's plane runtime ARN and access role, with no fallback to the shared runtime ([per-principal-isolation](per-principal-isolation.md) R40).
 - **R5.** Deletion SHALL use the registry's owner-scoped deletion operation so it cannot create an absent record and so deletion state can block concurrent resolution. This applies to single deletion and to bulk deletion: `sch delete --all` SHALL invoke the owner-scoped bulk deletion operation without deriving targets from its local cache.
 - **R6.** When a registry-enabled workspace command cannot resolve or delete its workspace due to a control-plane error, the CLI SHALL fail before invoking AgentCore and SHALL NOT silently use a cached session ID.
 
@@ -70,6 +70,7 @@ Out of scope:
 
 ## Cross-references
 
+- [per-principal-isolation](per-principal-isolation.md) — per-principal planes used by registry commands with isolation on
 - [iam-workspace-control-api](iam-workspace-control-api.md) — API contract, authentication, guards
 - [workspace-registry](workspace-registry.md) — implemented control plane and delta from the original proposal
 - [owner-scoped-workspace-storage](owner-scoped-workspace-storage.md) — identity and checkpoint prefix rules

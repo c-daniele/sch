@@ -20,7 +20,7 @@ This repository was published as a fresh history: the specifications under `docs
 
 ## Active work
 
-TASK-20 (per-user workspace isolation, runtimes provisioned at deploy time) is next: split into TASK-20.1 to TASK-20.5 (design, storage and shim, plane stacks and deploy, registry and CLI, verify scripts and docs), run headless one subtask at a time on `feat/task-20`, one CloudFormation stack per principal. Its live two-principal check is operator-side. TASK-7 (harness pins: OpenCode 2.0.18, Pi 0.87.1, Claude
+TASK-20 (per-user workspace isolation, runtimes provisioned at deploy time) is in progress on `feat/task-20`, one headless subtask at a time. TASK-20.1 (design) is done: decision-14 and the Proposed spec [`per-principal-isolation.md`](../../docs/specs/security/per-principal-isolation.md), which is the plan of record for TASK-20.2 (storage and shim), TASK-20.3 (plane stacks and deploy), TASK-20.4 (registry and CLI) and TASK-20.5 (verify scripts and docs). Until those land, registry mode separates names only and a deployment is one trust domain (the guides now say so). The live two-principal check is operator-side. TASK-7 (harness pins: OpenCode 2.0.18, Pi 0.87.1, Claude
 Code 2.1.282) is done and recorded below; its live-AWS follow-ups — first
 deploy of the OpenCode 2 image, Bedrock through the execution role on 2.x,
 the Telegram plugin end to end, `bin/verify-remote-ui-tunnel.sh` /
@@ -51,6 +51,7 @@ Architecture decisions are recorded in [`.backlog/decisions/`](../decisions/) (`
 - [`decision-10`](../decisions/decision-10%20-%20Keep-the-V1-process-topology-on-OpenCode-2-standalone-TUI-and-tasks-one-supervised-authenticated-serve-for-attach-web-and-injection.md): Keep the V1 process topology on OpenCode 2: standalone TUI and tasks, one supervised authenticated serve for attach, web and injection
 - [`decision-12`](../decisions/decision-12%20-%20Seed-an-explicit-Bedrock-output-cap-per-Claude-model-in-the-native-OpenCode-2-provider-shape.md): Seed an explicit Bedrock output cap per Claude model in the native OpenCode 2 provider shape
 - [`decision-13`](../decisions/decision-13%20-%20Post-restore-env-rebuild-is-lockfile-only-and-never-changes-the-repository.md): Post-restore env rebuild is lockfile-only and never changes the repository
+- [`decision-14`](../decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md): Per-principal isolation planes are provisioned at deploy time, one CloudFormation stack per listed principal
 
 ## Open questions
 
@@ -85,3 +86,4 @@ Architecture decisions are recorded in [`.backlog/decisions/`](../decisions/) (`
 - [2026-09-26 Bedrock Claude requests capped at 4096 output tokens on OpenCode 2](../docs/journal/doc-13%20-%202026-09-26-Bedrock-Claude-requests-capped-at-4096-output-tokens-on-OpenCode-2.md) — OpenCode 2 sends no Bedrock output cap by default; the seed now sets one per Claude model in the native V2 provider shape (TASK-9, decision-12).
 - [2026-09-27 Keep the clone token out of the workspace](../docs/journal/doc-14%20-%202026-09-27-Keep-the-clone-token-out-of-the-workspace.md) — `SCH_REPO_TOKEN` no longer lands in the clone's `origin` URL or on a command line; earlier workspaces are scrubbed at boot, old checkpoints need token rotation (TASK-10).
 - [2026-09-27 Post-restore env rebuild no longer changes the repository](../docs/journal/doc-15%20-%202026-09-27-Post-restore-env-rebuild-no-longer-changes-the-repository.md) — lockfile-only rebuild into project-local envs, `no-lockfile` skips, a worktree guard, and a reported per-env outcome (TASK-21, decision-13).
+- [2026-09-27 Isolation design: decision record and normative spec](../docs/journal/doc-16%20-%202026-09-27-Isolation-design-decision-record-and-normative-spec.md) — defaults of TASK-20 fixed, per-principal isolation spec written, early Access Analyzer and simulator checks of the lock and bucket policies (TASK-20.1, decision-14).
