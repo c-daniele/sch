@@ -4,7 +4,7 @@ title: Per-user workspace isolation with runtimes provisioned at deploy time
 status: In Progress
 assignee: []
 created_date: '2026-09-27 10:12'
-updated_date: '2026-09-27 16:40'
+updated_date: '2026-09-27 20:47'
 labels:
   - security
 dependencies: []
@@ -159,7 +159,7 @@ Only after the maintainer's GO, on a workspace whose `feat/task-20` branch conta
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Subtasks TASK-20.1 to TASK-20.5 are Done; their acceptance criteria together cover the feature
+- [x] #1 Subtasks TASK-20.1 to TASK-20.5 are Done; their acceptance criteria together cover the feature
 - [ ] #2 Operator-side live check passes: a test stack deployed with two IAM users (and one Identity Center user when available) runs bin/verify-isolation.sh successfully; the executing agent leaves this criterion unchecked
 <!-- AC:END -->
 
