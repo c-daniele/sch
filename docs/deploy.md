@@ -153,8 +153,8 @@ policy, shared-runtime lock, registry with isolation on), then one
 `<project>-<env>-plane-<owner key>` stack per entry with the image and
 configuration read back from the runtime stack. A failed plane does not stop
 or roll back the others; the deploy prints one line per entry (entry, owner
-key, runtime ARN, status) and exits non-zero if any plane failed. Re-running
-the deploy fixes a failed plane.
+key, runtime ARN, status) and exits non-zero if any plane failed: fix the
+cause and re-run the deploy.
 
 **Adding a principal** is a new entry and a deploy. **Removing one** is
 deleting its entry and deploying: its plane stack is deleted, its storage is
