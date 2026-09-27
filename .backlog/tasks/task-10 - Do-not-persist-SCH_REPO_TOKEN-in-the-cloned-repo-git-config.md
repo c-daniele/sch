@@ -1,9 +1,10 @@
 ---
 id: TASK-10
 title: Do not persist SCH_REPO_TOKEN in the cloned repo git config
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-26 20:46'
+updated_date: '2026-09-27 13:01'
 labels:
   - security
 dependencies: []
@@ -30,3 +31,13 @@ When a workspace starts with `SCH_REPO_URL` and `SCH_REPO_TOKEN` set, `image/scr
 - [ ] #4 A workspace cloned by an earlier image has the embedded credentials removed from its saved `origin` URL at the next boot
 - [ ] #5 Tests cover the above, the seed tests no longer inherit `SCH_REPO_URL`/`SCH_REPO_TOKEN` from the developer environment, and `docs/cli.md` tells users of earlier images to rotate the token
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Clone with a token-free URL; hand SCH_REPO_TOKEN (and any credentials embedded in SCH_REPO_URL) to git through an inline credential helper that reads them from the environment, with other credential helpers reset and terminal prompts disabled.
+2. Log only the sanitized URL.
+3. On every boot of an existing worktree, strip embedded user:password credentials from origin url/pushurl.
+4. Tests: local dumb-HTTP server with Basic auth, git argv recorder, grep of the workspace, failed-clone fallback, migration; drop SCH_REPO_URL/SCH_REPO_TOKEN in the seed tests.
+5. Docs: docs/cli.md rotation note, runtime-image R22, SECURITY.md check, CHANGELOG.
+<!-- SECTION:PLAN:END -->

@@ -36,6 +36,10 @@ class PiWorkspaceSeedTests(unittest.TestCase):
 
     def run_init(self, region: str = "eu-west-1", **extra):
         env = os.environ.copy()
+        # A repo URL in the ambient environment would make the script clone it
+        # into the temporary workspace, with SCH_REPO_TOKEN if set.
+        env.pop("SCH_REPO_URL", None)
+        env.pop("SCH_REPO_TOKEN", None)
         # A stray SCH_PI_DEFAULT_MODEL in the ambient environment would make the
         # region-derivation assertions meaningless.
         env.pop("SCH_PI_DEFAULT_MODEL", None)
@@ -214,6 +218,10 @@ class PiWorkspaceSeedTests(unittest.TestCase):
     def test_other_harnesses_do_not_seed_the_pi_config_dir(self):
         env_extra = {"SCH_CLAUDE_TEMPLATE_DIR": str(ROOT / "claude-templates")}
         env = os.environ.copy()
+        # A repo URL in the ambient environment would make the script clone it
+        # into the temporary workspace, with SCH_REPO_TOKEN if set.
+        env.pop("SCH_REPO_URL", None)
+        env.pop("SCH_REPO_TOKEN", None)
         env.update(
             {
                 "SCH_HARNESS": "claude",

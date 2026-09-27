@@ -39,6 +39,10 @@ removed and a model allow-list set.
   remotes. Work reaches your repository through `sch fetch` (a git bundle
   transferred over the tunnel) and is pushed with *local* credentials only —
   [Headless tasks](headless-tasks.md#git-native-sessions---branch--sch-fetch).
+  A `SCH_REPO_TOKEN` for the first-boot clone is used for that clone only
+  and is not saved in the workspace; images before this fix saved it in the
+  clone's `origin` URL, so rotate a token used with one
+  ([Using `sch`](cli.md#using-sch)).
 - **Long-lived AWS keys.** The microVM authenticates through its execution
   role via IMDS; there are no static keys to steal.
 - **Provider API keys, unless you opt in per user.** Keys live in `~/.sch/env`

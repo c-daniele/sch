@@ -34,7 +34,8 @@
 #
 # Repo bootstrap modes (design D9), selected via session env vars:
 #   SCH_REPO_URL unset  -> git init on an empty /mnt/workspace/repo
-#   SCH_REPO_URL set    -> HTTPS clone (optional token: SCH_REPO_TOKEN)
+#   SCH_REPO_URL set    -> HTTPS clone (optional token: SCH_REPO_TOKEN, passed
+#                          by credential helper, never saved in the worktree)
 #   repo already a worktree -> no-op
 set -uo pipefail
 
@@ -1101,23 +1102,107 @@ else
 fi
 
 # --- 3. Repo bootstrap ---------------------------------------------------------
+# Credentials never reach the worktree, a command line or a log line (TASK-10).
+# Git saves the clone URL as `origin` in .git/config, and .git rides every S3
+# checkpoint, so the clone URL is always credential-free: SCH_REPO_TOKEN (or a
+# user:password embedded in SCH_REPO_URL) is handed to git by an inline
+# credential helper that reads it from the environment of the clone process.
+#
+# URL_RE splits "scheme://[userinfo@]rest"; the userinfo group is greedy up to
+# the last "@" before the first "/", like git's own URL parser.
+URL_RE='^([A-Za-z][A-Za-z0-9+.-]*://)([^/]*@)?(.*)$'
+
+# Print URL without an embedded password. A username-only userinfo holds no
+# secret and is kept; non-URL forms (scp-like `host:path`) pass through.
+url_without_password() {
+    local url="$1"
+    if [[ "${url}" =~ ${URL_RE} ]] && [[ "${BASH_REMATCH[2]}" == *:* ]]; then
+        printf '%s%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
+    else
+        printf '%s' "${url}"
+    fi
+}
+
+# Percent-decode a URL userinfo part, as git does. The value travels through
+# the environment, never through argv.
+url_decode() {
+    SCH_URL_PART="$1" python3 -c 'import os, urllib.parse; print(urllib.parse.unquote(os.environ["SCH_URL_PART"]), end="")'
+}
+
+# Remove embedded passwords from the saved origin URLs of an existing worktree.
+# Workspaces cloned by an earlier image carry `x-access-token:<token>@` there.
+# Values are rewritten with --unset-all/--add so no old value ever lands on a
+# command line (a --replace-all value regex would carry it).
+scrub_origin_credentials() {
+    local key value clean changed
+    local -a values cleaned
+    for key in remote.origin.url remote.origin.pushurl; do
+        mapfile -t values < <(git -C "${REPO_DIR}" config --local --get-all "${key}" 2>/dev/null)
+        [ "${#values[@]}" -gt 0 ] || continue
+        changed=0
+        cleaned=()
+        for value in "${values[@]}"; do
+            clean="$(url_without_password "${value}")"
+            [ "${clean}" = "${value}" ] || changed=1
+            cleaned+=("${clean}")
+        done
+        [ "${changed}" -eq 1 ] || continue
+        if git -C "${REPO_DIR}" config --local --unset-all "${key}"; then
+            for clean in "${cleaned[@]}"; do
+                git -C "${REPO_DIR}" config --local --add "${key}" "${clean}"
+            done
+            log "removed embedded credentials from ${key} (rotate the token: earlier checkpoints still hold it)"
+        else
+            log "WARNING: could not remove embedded credentials from ${key}"
+        fi
+    done
+}
+
+# Inline credential helper: answers `get` from the clone process environment.
+# The empty helper before it drops every configured helper, so no
+# credential store or cache ever keeps the token.
+# shellcheck disable=SC2016  # expanded by the helper shell, not here
+CLONE_CREDENTIAL_HELPER='!f() { test "$1" = get || return 0; printf "username=%s\npassword=%s\n" "${SCH_CLONE_USERNAME}" "${SCH_CLONE_PASSWORD}"; }; f'
+
+clone_repo() {
+    local url="$1" clone_url username="" password="" userinfo
+    clone_url="$(url_without_password "${url}")"
+    if [[ "${url}" =~ ${URL_RE} ]] && [ -n "${BASH_REMATCH[2]}" ]; then
+        userinfo="${BASH_REMATCH[2]%@}"
+        username="$(url_decode "${userinfo%%:*}")"
+        if [[ "${userinfo}" == *:* ]]; then
+            password="$(url_decode "${userinfo#*:}")"
+        fi
+    fi
+    if [ -n "${SCH_REPO_TOKEN:-}" ]; then
+        password="${SCH_REPO_TOKEN}"
+        [ -n "${username}" ] || username="x-access-token"
+    fi
+    log "cloning ${clone_url} into ${REPO_DIR}"
+    if [ -n "${password}" ]; then
+        SCH_CLONE_USERNAME="${username}" SCH_CLONE_PASSWORD="${password}" \
+            GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="" SSH_ASKPASS="" \
+            git -c credential.helper= -c "credential.helper=${CLONE_CREDENTIAL_HELPER}" \
+            clone -- "${clone_url}" "${REPO_DIR}"
+    else
+        GIT_TERMINAL_PROMPT=0 git clone -- "${clone_url}" "${REPO_DIR}"
+    fi
+}
+
 if [ -e "${REPO_DIR}/.git" ]; then
     log "repo already a git worktree, no-op"
+    scrub_origin_credentials
 elif [ -n "$(ls -A "${REPO_DIR}" 2>/dev/null)" ]; then
     # Non-empty but not a worktree: don't touch user data.
     log "repo dir non-empty but not a worktree, leaving as-is"
 elif [ -n "${SCH_REPO_URL:-}" ]; then
-    clone_url="${SCH_REPO_URL}"
-    if [ -n "${SCH_REPO_TOKEN:-}" ]; then
-        # Minimal token injection for HTTPS clones (design D9:
-        # robust private-repo credentials are out of scope).
-        clone_url="$(echo "${clone_url}" | sed -E "s#^https://#https://x-access-token:${SCH_REPO_TOKEN}@#")"
-    fi
-    log "cloning ${SCH_REPO_URL} into ${REPO_DIR}"
-    if git clone "${clone_url}" "${REPO_DIR}"; then
+    if clone_repo "${SCH_REPO_URL}"; then
         log "clone completed"
     else
         log "WARNING: clone failed (exit $?), falling back to empty git repo"
+        # A failed clone may leave a partial directory behind; git init needs
+        # it empty to give the same result as a first boot without a URL.
+        find "${REPO_DIR}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null
         git init "${REPO_DIR}" >/dev/null && log "initialized empty git repo"
     fi
 else
