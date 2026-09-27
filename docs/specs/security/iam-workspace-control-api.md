@@ -27,7 +27,7 @@ Out of scope:
 ### Authentication and identity
 
 - **R1.** The system SHALL expose workspace resolution, listing, session rotation, and single/bulk deletion through an API Gateway endpoint authenticated with AWS IAM (`AuthorizationType: AWS_IAM`).
-- **R2.** The API SHALL derive the caller identity solely from the verified API Gateway request context (`requestContext.identity.userArn`). It MUST NOT accept an owner identifier from the client, and the stored owner key SHALL be a hash of the caller ARN so principal details never become DynamoDB keys or runtime path components. *Planned change (TASK-20.4):* with isolation on, the owner is derived from the caller's bound identity (principal ID), not from the caller ARN ([per-principal-isolation](per-principal-isolation.md) R7, R36).
+- **R2.** The API SHALL derive the caller identity solely from the verified API Gateway request context (`requestContext.identity.userArn`). It MUST NOT accept an owner identifier from the client, and the stored owner key SHALL be a hash of the caller ARN so principal details never become DynamoDB keys or runtime path components. With isolation on, the owner is derived instead from the caller's bound identity (principal ID, `requestContext.identity.user`), not from the caller ARN, and the caller's account (`requestContext.identity.accountId`) must be the deployment account ([per-principal-isolation](per-principal-isolation.md) R7, R36).
 - **R3.** A request without valid AWS IAM authentication SHALL be rejected without reading or writing any workspace record.
 
 ### Operations
@@ -52,7 +52,7 @@ Endpoints (all `AWS_IAM`; clients sign SigV4 for `execute-api`):
 | DELETE | `/workspaces/{name}` | Owner-scoped single deletion |
 | DELETE | `/workspaces` | Owner-scoped bulk deletion with per-workspace results |
 
-Error contract: `400` invalid name/body/enum value; `403` (planned, TASK-20.4, isolation on only) caller is not a listed principal ([per-principal-isolation](per-principal-isolation.md) R37); `404` unknown workspace or operation; `409` record being deleted, or immutable harness/storage divergence; `500` control-plane or incomplete-deletion failure. The response body always carries an `error` message the CLI surfaces verbatim.
+Error contract: `400` invalid name/body/enum value; `403` (isolation on only) caller is not a listed principal or not in the deployment account, returned before any record is read ([per-principal-isolation](per-principal-isolation.md) R37); `404` unknown workspace or operation; `409` record being deleted, or immutable harness/storage divergence; `500` control-plane or incomplete-deletion failure. The response body always carries an `error` message the CLI surfaces verbatim.
 
 ## Invariants
 

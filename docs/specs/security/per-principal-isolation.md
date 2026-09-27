@@ -1,6 +1,6 @@
 # Per-Principal Workspace Isolation
 
-> Domain: [Security](../README.md) · Status: Proposed (TASK-20; design TASK-20.1; runtime side R26–R35 implemented by TASK-20.2; templates, deploy and teardown R1–R6, R10–R25, R27, R39, R44–R48 implemented by TASK-20.3; TASK-20.4 and TASK-20.5 pending) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
+> Domain: [Security](../README.md) · Status: Proposed (TASK-20; design TASK-20.1; runtime side R26–R35 implemented by TASK-20.2; templates, deploy and teardown R1–R6, R10–R25, R27, R39, R44–R48 implemented by TASK-20.3; registry and CLI R7–R9, R36–R38, R40–R43 implemented by TASK-20.4; TASK-20.5 pending) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
 
 ## Purpose
 
@@ -280,7 +280,8 @@ Out of scope:
 - **R36.** With isolation on (`ISOLATION_ENABLED=true` in the registry Lambda environment),
   the registry SHALL map the caller from the verified request context: the principal ID
   (`requestContext.identity.user`, the caller's `aws:userid`) and the account
-  (`requestContext.identity.accountId`, which MUST equal the deployment account). A principal
+  (`requestContext.identity.accountId`, which MUST equal the deployment account, the account
+  of the registry function's own ARN; a mismatch is a `403`). A principal
   ID without `:` gives the candidate owner string `user:<id>`; `AROA…:<name>` gives
   `sso:AROA…:<name>` then `role:AROA…`. The first candidate whose plane-mapping parameter
   exists is the owner; R4 guarantees at most one exists. The exact field carrying the
@@ -292,8 +293,13 @@ Out of scope:
 - **R38.** With isolation on, records SHALL be keyed by `ownerId` (R7), SHALL store the
   immutable `ownerPrefix`, and every response carrying records SHALL include
   `"isolation": true` and, per record, `plane: {runtimeArn, accessRoleArn, ownerPrefix}`.
+  Every successful response (list, resolve, rotate, delete, bulk delete) SHALL also carry the
+  caller's `plane` at top level, so an owner without records still learns its plane.
   Deletion SHALL stop the session on the plane runtime and purge the owner-prefixed keys of
-  R26 for the stored `ownerPrefix` (resumable as in [iam-workspace-registry](iam-workspace-registry.md) R8).
+  R26 for the stored `ownerPrefix`, build sources `builds/<ownerPrefix>/<identity>/` included
+  (resumable as in [iam-workspace-registry](iam-workspace-registry.md) R8). A malformed
+  plane-mapping parameter, or an SSM error other than not-found, fails the request (`500`)
+  before any table access.
 - **R39.** The registry role SHALL keep only: its table; `ssm:GetParameter` on
   `parameter/<project>/<env>/planes/*`; checkpoint purge
   (`s3:ListBucketVersions`, `s3:DeleteObjectVersion`); `bedrock-agentcore:StopRuntimeSession`
@@ -309,7 +315,13 @@ Out of scope:
   payloads, and read owner checkpoint objects through `plane.accessRoleArn` with credentials
   refreshed before they expire (a long-running `sch dashboard` keeps working past the first
   expiry). A missing or malformed `plane` SHALL fail the command; there is no fallback to the
-  shared runtime ARN, `SCH_RUNTIME_ARN` or the cached runtime ARN.
+  shared runtime ARN, `SCH_RUNTIME_ARN` or the cached runtime ARN. A command that needs the
+  runtime before any registry response (for example `sch info`) SHALL ask the registry first
+  (`GET /workspaces`) and fail if it cannot. Access-role credentials come from
+  `sts:AssumeRole` (one-hour sessions), live only in memory, reach `aws s3api` subprocesses
+  through their environment (never argv or disk), and are renewed five minutes before they
+  expire. Owner reads use the owner-segment keys of R26: `checkpoints/<ownerPrefix>/<ws>/`
+  (task status, manifest) and `workspace-writers/<ownerPrefix>/` (writer claims).
 - **R41.** The CLI SHALL validate `plane` strictly: `runtimeArn` is a
   `bedrock-agentcore` runtime ARN whose runtime name is `<project>_<env>_o_<ownerKey>`,
   `accessRoleArn` an IAM role ARN, `ownerPrefix` matches `^o\.[0-9a-f]{16}$`, and the
@@ -567,7 +579,11 @@ The same call by an unlisted user `carol` answers
   `infra/cfn_render.py`) and their reports under `docs/history/`
   ([Access Analyzer](../../history/isolation-evidence-access-analyzer.md),
   [simulator](../../history/isolation-evidence-simulator.md))
-- Code (to be written or changed by TASK-20.4 and TASK-20.5): `infra/workspace_registry_handler.py`,
-  `cli/sch/workspace_registry.py`, `cli/sch/commands/` (`status.py`, `list.py`),
-  `cli/sch/dashboard.py`, `bin/verify-isolation.sh`
+- Code implementing R7–R9, R36–R38, R40–R43 (TASK-20.4): `infra/workspace_registry_handler.py`
+  (`_isolated_owner`, `_lookup_plane`, `_suggested_entry`, `_purge_prefixes`), `cli/sch/plane.py`
+  (`parse_plane`, `adopt`, `active_plane`, `access_env`), `cli/sch/workspace_registry.py`,
+  `cli/sch/config.py` (`runtime_arn`), `cli/sch/runtime.py` (`_inject_owner_prefix`),
+  `cli/sch/commands/` (`status.py`, `list.py`, `info.py`), `cli/sch/dashboard.py`; tests
+  `infra/test_workspace_registry_isolation.py`, `cli/tests/test_isolation_cli.py`
+- Code to be written by TASK-20.5: `bin/verify-isolation.sh`
 - Backlog: TASK-20 and subtasks TASK-20.1 to TASK-20.5

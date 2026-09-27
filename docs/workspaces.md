@@ -54,9 +54,10 @@ installing Python dependencies.
 - This is intentional logical isolation and discovery UX, not a data-plane
   security boundary. A principal that independently has AgentCore permissions
   and learns another session ID can still invoke it directly.
-  Opt-in per-principal isolation, which closes this gap, is designed in
-  [`per-principal-isolation.md`](specs/security/per-principal-isolation.md)
-  and not built yet (TASK-20).
+  Opt-in per-principal isolation, which closes this gap, is specified in
+  [`per-principal-isolation.md`](specs/security/per-principal-isolation.md);
+  it is implemented but not yet verified live or documented for operators
+  (TASK-20).
 - Existing local workspaces are not imported automatically. Enable registry
   mode to create a new owner-scoped record and checkpoint namespace; retain
   legacy mode to access legacy session mappings and checkpoint prefixes. No

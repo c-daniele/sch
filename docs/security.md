@@ -70,7 +70,8 @@ This is not an access-control boundary. Every workspace runs on one shared
 runtime whose execution role can read every checkpoint, and a principal that
 can invoke the runtime and learns a session ID can join that session. Treat a
 deployment as one trust domain. Opt-in per-principal isolation, one locked
-runtime and one scoped role per listed user, is designed but not built yet:
+runtime and one scoped role per listed user, is implemented but not yet
+verified live or documented for operators:
 [`per-principal-isolation.md`](specs/security/per-principal-isolation.md)
 (TASK-20).
 
