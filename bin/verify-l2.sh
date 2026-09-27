@@ -81,6 +81,11 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCH="${SCRIPT_DIR}/sch"
 SCH_REGION="${SCH_REGION:-eu-west-1}"
+# Registry and isolation stacks (TASK-20.5): plane runtime, registry session
+# and workspace identity. No-op on registry-off stacks.
+# shellcheck source=lib/verify-target.sh
+. "${SCRIPT_DIR}/lib/verify-target.sh"
+sch_target_init
 REQUESTED_STORAGE="${SCH_VERIFY_STORAGE:-s3}"
 STATE_FILE="${TMPDIR:-/tmp}/sch-verify-l2-${WS}.state"
 
@@ -91,6 +96,8 @@ bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 
 # --- resolution helpers ----------------------------------------------------------
 runtime_arn() {
+    # Isolation on: the caller's plane runtime, never the shared one (R40).
+    if sch_target_isolated; then sch_target_runtime_arn; return; fi
     aws cloudformation describe-stacks \
         --stack-name "${SCH_PROJECT:-sch}-${SCH_ENV:-dev}-runtime" \
         --region "${SCH_REGION}" \
@@ -123,8 +130,8 @@ remote_stdout() {
 
 wait_ready() { # [storage-hint: fresh|resumed]
     local hint="${1:-}"
-    local payload="{\"action\": \"info\", \"workspace\": \"${WS}\", \"harness\": \"${HARNESS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}"
-    [ -n "${hint}" ] && payload="{\"action\": \"info\", \"storage\": \"${hint}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${WS}\", \"harness\": \"${HARNESS}\"}"
+    local payload="{\"action\": \"info\", \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"${HARNESS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}"
+    [ -n "${hint}" ] && payload="{\"action\": \"info\", \"storage\": \"${hint}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"${HARNESS}\"}"
     echo "-- waiting for microVM boot + storage/L2 restore (hint: ${hint:-none}, max 360s)"
     local out="${TMPDIR:-/tmp}/sch-info-$$.json"
     for _ in $(seq 1 72); do
@@ -163,16 +170,17 @@ info_snapshot() {
         --cli-binary-format raw-in-base64-out \
         --agent-runtime-arn "${ARN}" \
         --runtime-session-id "${SID}" \
-        --payload "{\"action\": \"info\", \"workspace\": \"${WS}\", \"harness\": \"${HARNESS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
+        --payload "{\"action\": \"info\", \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"${HARNESS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
         --region "${SCH_REGION}" \
         "${out}" >/dev/null 2>&1
     echo "${out}"
 }
 
 manifest_last_modified() {
-    aws s3api head-object \
+    # Owner segment and access role with isolation on (R26, R40).
+    sch_target_owner_aws s3api head-object \
         --bucket "$(checkpoint_bucket)" \
-        --key "checkpoints/${WS}/manifest.json" \
+        --key "$(sch_target_ckpt_prefix "${RUNTIME_WS}")manifest.json" \
         --region "${SCH_REGION}" \
         --query 'LastModified' --output text 2>/dev/null || echo ""
 }
@@ -194,6 +202,12 @@ try:
 except Exception: print(0)' "$1"
 }
 # Same workspace -> session mapping used by sch (create it if new).
+# Registry on: resolve through the registry first; `sch` mirrors the record
+# into the local index read below, and payloads name the workspace identity.
+RUNTIME_WS="${WS}"
+if sch_target_workspace "${WS}" "${HARNESS}" "${REQUESTED_STORAGE}"; then
+    RUNTIME_WS="${SCH_TARGET_WS}"
+fi
 WS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/sch/workspaces/${WS}"
 if [ ! -f "${WS_FILE}" ]; then
     mkdir -p "$(dirname "${WS_FILE}")"

@@ -88,10 +88,22 @@ command -v aws  >/dev/null 2>&1 || { echo "aws CLI not found" >&2; exit 1; }
 [ -d "${TUNNEL_DIR}/node_modules" ] || { echo "tunnel deps missing (cd tunnel && npm install)" >&2; exit 1; }
 [ -f "${FAKE_ZED}" ] || { echo "missing ${FAKE_ZED}" >&2; exit 1; }
 
+# Registry and isolation stacks (TASK-20.5): workspaces are created through
+# the registry; `sch acp` then uses the plane runtime by itself.
+# shellcheck source=lib/verify-target.sh
+. "${SCRIPT_DIR}/lib/verify-target.sh"
+sch_target_init
+
 # Seed workspace indexes with the right harness when missing (same pattern
 # as verify-remote-ui-tunnel.sh; avoids interactive creation paths).
 seed_ws() { # <ws> <harness>
     local ws="$1" harness="$2"
+    # Registry on: the registry owns the binding; create the record with the
+    # harness (sch mirrors it into the local index) instead of seeding one.
+    if sch_target_workspace "${ws}" "${harness}"; then
+        echo "-- resolved workspace '${ws}' through the registry (harness=${SCH_TARGET_HARNESS})"
+        return 0
+    fi
     [ -f "${WS_DIR}/${ws}" ] && return 0
     mkdir -p "${WS_DIR}"
     python3 -c '

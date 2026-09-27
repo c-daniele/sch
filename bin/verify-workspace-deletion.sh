@@ -11,12 +11,53 @@ fi
 
 : "${SCH_VERIFY_WORKSPACE:?set SCH_VERIFY_WORKSPACE to a disposable workspace name}"
 : "${SCH_CHECKPOINT_BUCKET:?set SCH_CHECKPOINT_BUCKET to the checkpoint bucket}"
-: "${SCH_RUNTIME_ARN:?set SCH_RUNTIME_ARN to the test runtime ARN}"
-: "${SCH_VERIFY_SESSION_ID:?set SCH_VERIFY_SESSION_ID to the active test runtime session ID}"
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BIN="$ROOT/bin/sch"
 REGISTRY_URL=${SCH_WORKSPACE_REGISTRY_URL:-}
+
+# Registry and isolation stacks (TASK-20.5).
+# shellcheck source=lib/verify-target.sh
+. "$ROOT/bin/lib/verify-target.sh"
+sch_target_init
+
+if sch_target_isolated; then
+  # Isolation on (per-principal-isolation R17, R24, R38): local index mode is
+  # not available (the shared runtime refuses every caller), and nobody but
+  # the plane roles and SCH service roles can write owner trees, so the
+  # operator cannot seed objects. The check deletes a real workspace through
+  # the registry and reads what is left through the access role, which sees
+  # current objects of checkpoints/ and workspace-writers/ only: remaining
+  # object versions and checkpoint-generations/ are not visible to an owner.
+  printf '%s\n' 'Isolation on: local deletion checks skipped (local index mode is unavailable).' >&2
+  printf 'Verifying registry deletion for %s on the caller plane\n' "$SCH_VERIFY_WORKSPACE" >&2
+  task_id=$("$BIN" task "$SCH_VERIFY_WORKSPACE" "workspace deletion probe: reply ok" | tail -n 1)
+  [ -n "$task_id" ] || { printf '%s\n' 'task submission failed' >&2; exit 1; }
+  state=""
+  for _ in $(seq 1 120); do
+    raw=$("$BIN" status "$SCH_VERIFY_WORKSPACE" --json) || test $? -eq 3
+    state=$(printf '%s' "$raw" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))')
+    case "$state" in succeeded|failed|timed-out|interrupted) break ;; esac
+    sleep 5
+  done
+  sch_target_workspace "$SCH_VERIFY_WORKSPACE"
+  ckpt_prefix=$SCH_TARGET_CKPT_PREFIX
+  writer_key="workspace-writers/$SCH_TARGET_OWNER_PREFIX/$SCH_TARGET_WS.json"
+  "$BIN" delete "$SCH_VERIFY_WORKSPACE" --yes
+  for prefix in "$ckpt_prefix" "$writer_key"; do
+    count=$(sch_target_owner_aws s3api list-objects-v2 --bucket "$SCH_CHECKPOINT_BUCKET" \
+      --prefix "$prefix" --region "${SCH_REGION:-eu-west-1}" --query 'KeyCount' --output text)
+    if [ "$count" != "0" ]; then
+      printf 'remaining objects under %s after deletion (%s)\n' "$prefix" "$count" >&2
+      exit 1
+    fi
+  done
+  printf '%s\n' 'Workspace deletion verification completed (isolation on).' >&2
+  exit 0
+fi
+
+: "${SCH_RUNTIME_ARN:?set SCH_RUNTIME_ARN to the test runtime ARN}"
+: "${SCH_VERIFY_SESSION_ID:?set SCH_VERIFY_SESSION_ID to the active test runtime session ID}"
 
 seed_scope() {
   identity=$1

@@ -1,10 +1,10 @@
 ---
 id: TASK-20.5
 title: 'Isolation: verify scripts and documentation'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-27 14:50'
-updated_date: '2026-09-27 15:20'
+updated_date: '2026-09-27 18:50'
 labels:
   - security
 dependencies:
