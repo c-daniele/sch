@@ -4,7 +4,7 @@ title: Per-user workspace isolation with runtimes provisioned at deploy time
 status: In Progress
 assignee: []
 created_date: '2026-09-27 10:12'
-updated_date: '2026-09-27 20:47'
+updated_date: '2026-09-28 09:05'
 labels:
   - security
 dependencies: []
@@ -174,4 +174,6 @@ Only after the maintainer's GO, on a workspace whose `feat/task-20` branch conta
 
 <!-- SECTION:NOTES:BEGIN -->
 TASK-20.3 done (2026-09-27): plane template, managed shared policies, bucket policy and shared-runtime lock, deploy.sh preflight and per-principal stacks, plane teardown, Access Analyzer and simulator evidence under docs/history/. Do not enable ISOLATED_PRINCIPALS on a live stack before TASK-20.4: it locks the shared runtime and no sch command uses the planes yet.
+
+2026-09-28 (operator session): double check of the five slices against the code and the suites. Found and fixed one defect: bin/verify-isolation.sh set its cleanup trap inside the pipeline subshell, so under bash 3.2 (macOS /bin/bash) the test workspaces were never deleted (cli test_verify_scripts failed on macOS, passed on Linux). Trap moved to the main shell (commit e1056df); cli 657 OK on macOS with /bin/bash 3.2, infra 215 OK, tunnel pass. AWS docs confirm requestContext.identity.user is the principal identifier for IAM-authorized callers. Live-check kit (test users template, setup/teardown scripts, run sequence) in .backlog/brainstorming/2026-09-28.IsolationLiveCheck/.
 <!-- SECTION:NOTES:END -->
