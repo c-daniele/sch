@@ -54,14 +54,82 @@ installing Python dependencies.
 - This is intentional logical isolation and discovery UX, not a data-plane
   security boundary. A principal that independently has AgentCore permissions
   and learns another session ID can still invoke it directly.
-  Opt-in per-principal isolation, which closes this gap, is specified in
-  [`per-principal-isolation.md`](specs/security/per-principal-isolation.md);
-  it is implemented but not yet verified live or documented for operators
-  (TASK-20).
+  Opt-in [per-principal isolation](#per-principal-isolation) closes this gap.
 - Existing local workspaces are not imported automatically. Enable registry
   mode to create a new owner-scoped record and checkpoint namespace; retain
   legacy mode to access legacy session mappings and checkpoint prefixes. No
   import command is included in this change.
+
+### Per-principal isolation
+
+**Problem.** Without isolation every workspace runs on one shared AgentCore
+runtime. AgentCore authorizes an invocation on the runtime, not on the
+session, so user B, allowed to invoke that runtime, can join user A's session
+once B knows its ID (`aws bedrock-agentcore invoke-agent-runtime
+--agent-runtime-arn <shared> --runtime-session-id <A's id>` returns A's
+microVM). The shared execution role can also read every user's checkpoints,
+so B's agent can read A's code.
+
+**What isolation changes.** The operator lists the SCH users at deploy time
+(`ISOLATED_PRINCIPALS`, see [Deploying: per-principal
+isolation](deploy.md#per-principal-isolation-isolated_principals)). Each listed
+principal gets its own *plane*: a runtime whose resource policy refuses
+everyone but its owner, an execution role confined to the owner's storage,
+and a read-only *access role* the owner's `sch` uses to read its own
+checkpoints. A bucket policy keeps every other principal, and every other
+plane, out of the owner's objects. Nothing is created at request time.
+Normative behavior: [`per-principal-isolation.md`](specs/security/per-principal-isolation.md).
+
+**Status.** Implemented and checked by unit tests, IAM Access Analyzer and the
+IAM policy simulator (reports:
+[Access Analyzer](history/isolation-evidence-access-analyzer.md),
+[simulator](history/isolation-evidence-simulator.md)). The simulator evaluates
+the runtime and endpoint policies one at a time and cannot model how AgentCore
+evaluates them together; only a live run of `bin/verify-isolation.sh` with two
+principals covers that, and it has not been run by the maintainers yet. Run it
+on your stack (below) before you rely on the boundary.
+
+**For users of an isolated stack:**
+
+- Set `SCH_WORKSPACE_REGISTRY_URL` as for any registry stack. Nothing else
+  changes on the client: every command asks the registry, which returns the
+  caller's plane, and `sch` uses that runtime and the access role by itself.
+  `sch info` prints an extra `isolation : on (...)` line with the owner prefix
+  and access role.
+- Every SCH user, the operator included, must be listed: the shared runtime
+  refuses every caller, and local index mode (no registry URL) does not work
+  on such a stack. An unlisted caller gets HTTP 403 with the entry to add, for
+  example `add user:carol to ISOLATED_PRINCIPALS and redeploy`.
+- The owner is the bound identity, not the session: a new CLI session of the
+  same IAM user or the same role entry is the same owner; two Identity Center
+  users of one permission set are two owners; an IAM user deleted and
+  re-created with the same name is a new owner with an empty namespace; every
+  session of a `role:` entry is one owner.
+- Storage moves under an owner segment (`checkpoints/o.<owner key>/<workspace
+  identity>/…`, the same for generations, writer claims and build sources).
+- **No migration.** With isolation on, every owner starts with an empty
+  namespace. Workspaces created before isolation stay untouched in the
+  registry table and the bucket but are not listed or reachable through the
+  isolated registry; turning isolation off again makes them reachable as
+  before. Finish, fetch or push what you need before the switch.
+- Telegram is not available on an isolated stack (the deploy refuses the
+  combination).
+- The caller permissions each listed user needs are listed in
+  [Getting started](getting-started.md#caller-permissions-on-an-isolated-stack).
+
+**Checking a stack.** `bin/verify-isolation.sh` runs the live two-principal
+check from the operator's machine: it needs AWS CLI profiles for two listed
+principals (A, B), one unlisted principal (C) and optionally a listed
+Identity Center user. It creates one test workspace per listed principal,
+proves that B, C and the optional user cannot invoke or stop A's session even
+with A's runtime ARN and session ID, cannot read A's checkpoints with their own
+credentials, their own access role or A's access role, and that A's agent
+cannot read B's owner tree, the registry table, B's plane parameter or B's
+runtime configuration; A's and B's own workflow (`sch task`, `status`, `list`,
+`list --remote-check`, the dashboard data path) must keep working. It deletes
+its test workspaces at the end and masks account IDs in its output
+(`--help` for the options). The other `bin/verify-*.sh` scripts run on an
+isolated stack as a listed user; the Telegram checks print `SKIP` there.
 
 ### Rollback / teardown
 
@@ -78,6 +146,11 @@ aws cloudformation delete-stack --stack-name sch-dev-bootstrap --region eu-west-
 > a workspace was checkpointed at least once, its data survives the runtime
 > stack's deletion in S3. Delete the checkpoint bucket separately (and only)
 > once you are certain none of its workspaces are needed anymore.
+
+With per-principal isolation on, delete the plane stacks
+(`<project>-<env>-plane-<owner key>`) before the runtime stack: they run on
+the runtime stack's managed policies and image. `sch destroy` does this in the
+right order.
 
 For a full reset that also removes the retained L2 bucket, all ECR images and
 every other resource of the deployment, use the guarded command (see

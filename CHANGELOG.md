@@ -102,5 +102,15 @@ minor versions).
   workspace cloned by an earlier image has the credential removed from
   `origin` at its next boot. Checkpoints taken before the fix still hold the
   token: rotate it.
+- Opt-in per-principal workspace isolation (`ISOLATED_PRINCIPALS`, needs the
+  workspace registry): the deploy gives each listed IAM user, IAM Identity
+  Center user or role its own plane stack (a runtime locked to its owner, an
+  execution role confined to the owner's storage, a read-only access role),
+  adds a checkpoint bucket policy and locks the shared runtime. The registry
+  maps callers by bound identity and refuses unlisted callers with the entry
+  to add; `sch` uses the caller's plane with no fallback to the shared
+  runtime. Checked by tests, IAM Access Analyzer and the policy simulator;
+  the live two-principal check `bin/verify-isolation.sh` is new and still to
+  be run. Task prompts are no longer written to the runtime logs.
 
 [Unreleased]: https://github.com/c-daniele/sch/commits/main

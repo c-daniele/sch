@@ -56,6 +56,10 @@ reused as they are) nor on capability tuning, workspace registry or watchdog
 changes: those deploy in place. `-v` names a build; it is no longer what makes
 it live.
 
+With per-principal isolation on, every deploy also updates each plane runtime
+with the same image and configuration, so the same rules apply to every plane:
+an image-rebuilding deploy is a new version of every plane runtime too.
+
 A new runtime version **resets the session storage of every workspace** and
 the platform retires the microVMs of the superseded version. Since L2
 durability this is not data loss: each workspace is repopulated from its S3
@@ -110,10 +114,83 @@ sourced it.
 | Telegram remote interaction | the two above + `ENABLE_TELEGRAM_INTERACTION` | [Telegram interaction](telegram.md#telegram-interaction) |
 | Runtime IAM posture | `RUNTIME_CAPABILITIES`, `RUNTIME_BEDROCK_ACCESS`, `RUNTIME_BEDROCK_MODEL_ALLOWLIST`, `RUNTIME_AWS_API_READ`, `RUNTIME_DATA_BUCKET_ARN`, `RUNTIME_EXTRA_POLICY_JSON` | [docs/runtime-capability-tuning.md](runtime-capability-tuning.md) |
 | IAM workspace registry | `ENABLE_WORKSPACE_REGISTRY` | [IAM Workspace Registry](workspaces.md#iam-workspace-registry) |
+| Per-principal isolation | `ISOLATED_PRINCIPALS` (needs the registry) | [below](#per-principal-isolation-isolated_principals) and [Workspaces](workspaces.md#per-principal-isolation) |
 | In-session image rebuild | `ENABLE_SESSION_IMAGE_REBUILD` | [Image Rebuild from a Session](image-rebuild.md#image-rebuild-from-a-session-codebuild) |
 | External task watchdog | `ENABLE_TASK_WATCHDOG` (on by default), `TASK_WATCHDOG_STALE_SECONDS`, `TASK_WATCHDOG_NOTIFY_AFTER_SECONDS` | [Headless tasks](headless-tasks.md#headless-tasks) |
 
 `sch deploy -h` prints the authoritative list, defaults included.
+
+### Per-principal isolation (`ISOLATED_PRINCIPALS`)
+
+What it protects and what users see: [Workspaces: per-principal
+isolation](workspaces.md#per-principal-isolation). Normative behavior:
+[`per-principal-isolation.md`](specs/security/per-principal-isolation.md).
+It has not been verified live by the maintainers yet: run
+`bin/verify-isolation.sh` on a test stack before relying on it.
+
+**Enabling.** Set `ENABLE_WORKSPACE_REGISTRY=true` and `ISOLATED_PRINCIPALS`
+to a comma-separated list of entries (keep both in `infra/setenv.sh`: a deploy
+without `ISOLATED_PRINCIPALS` turns isolation off and deletes every plane):
+
+| Entry | Who it admits | Bound to |
+| --- | --- | --- |
+| `user:<iam-user-name>` | one IAM user | the user's unique ID (`AIDA…`) |
+| `sso:<permission-set>/<identity-center-username>` | one IAM Identity Center user of that permission set | the permission-set role's unique ID plus the username |
+| `role:<role-name>` | every session of one IAM role (automation) | the role's unique ID |
+
+The deploy resolves each entry with IAM reads before it changes any stack and
+stops on an unknown, malformed or ambiguous entry. An `sso:` username cannot
+be checked without Identity Center access: the deploy accepts it with a
+warning, so write it exactly as Identity Center shows it (the comparison is
+case-sensitive; a typo binds the plane to nobody or to someone else).
+Isolation refuses `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` and
+`ENABLE_TELEGRAM_INTERACTION=true`.
+
+**What a deploy does**, in order: the preflight (entries, switches, runtime
+quota, managed-policy sizes; read-only), the bootstrap stack and image build,
+deletion of plane stacks whose entry left the list, the runtime stack (bucket
+policy, shared-runtime lock, registry with isolation on), then one
+`<project>-<env>-plane-<owner key>` stack per entry with the image and
+configuration read back from the runtime stack. A failed plane does not stop
+or roll back the others; the deploy prints one line per entry (entry, owner
+key, runtime ARN, status) and exits non-zero if any plane failed: fix the
+cause and re-run the deploy.
+
+**Adding a principal** is a new entry and a deploy. **Removing one** is
+deleting its entry and deploying: its plane stack is deleted, its storage is
+kept (the checkpoint bucket is retained and the owner tree is not touched).
+Nobody but SCH's service roles and a boundary administrator can reach that
+retained data afterwards. To purge it, the owner runs `sch delete --all`
+before the removal; afterwards a boundary administrator removes
+`*/o.<owner key>/` from the bucket with the bucket policy temporarily removed,
+or `sch destroy` purges the whole bucket.
+
+**Runtime quota.** Each entry is one AgentCore runtime. The preflight counts
+the runtimes in the region plus the planes to create, minus the planes to
+delete, and stops the deploy above the account quota (Service Quotas `Total
+Agents per Account`, code `L-F4575653`, else the documented default of 100).
+Ask for a quota increase before listing many principals.
+
+**Teardown.** `sch destroy` deletes every plane stack of the deployment before
+the runtime stack, and stops before deleting anything if it cannot list them.
+
+**Deploy-principal permissions.** Beyond the [deploy
+prerequisites](getting-started.md#prerequisites), the plane stacks need, as
+derived from the templates (not verified with a least-privilege deploy
+principal): IAM reads for entry resolution (`iam:GetUser`, `iam:GetRole`,
+`iam:ListRoles`); `bedrock-agentcore:ListAgentRuntimes` and, optionally,
+`servicequotas:GetServiceQuota` and `servicequotas:GetAWSDefaultServiceQuota`
+for the quota check; IAM role and customer managed policy management for the
+plane roles and boundary (`iam:PassRole` is needed only for the plane
+execution roles, whose names contain `BedrockAgentCore`); the AgentCore
+resource-policy actions for the runtime locks; `ssm:PutParameter`,
+`ssm:DeleteParameter` and `ssm:GetParameters` on
+`parameter/<project>/<env>/planes/*`; and `s3:PutBucketPolicy` /
+`s3:DeleteBucketPolicy` on the checkpoint bucket.
+
+**Other scripts.** `bin/verify-runtime-iam-tuning.sh` redeploys the stack: on
+an isolated stack it refuses to start unless `ISOLATED_PRINCIPALS` is
+exported, and it also checks every plane role and plane runtime version.
 
 ### Why CodeBuild by default
 

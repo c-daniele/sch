@@ -60,20 +60,79 @@ removed and a model allow-list set.
 
 ## Isolation between users
 
-With the optional IAM workspace registry, each IAM principal gets its own
-workspace names and S3 prefixes, so teams can reuse names without their SCH
-commands touching each other's state —
+**Default (isolation off).** With the optional IAM workspace registry, each
+IAM principal gets its own workspace names and S3 prefixes, so teams can reuse
+names without their SCH commands touching each other's state —
 [`owner-scoped-workspace-storage.md`](specs/security/owner-scoped-workspace-storage.md),
 [`iam-workspace-registry.md`](specs/security/iam-workspace-registry.md).
-
 This is not an access-control boundary. Every workspace runs on one shared
 runtime whose execution role can read every checkpoint, and a principal that
-can invoke the runtime and learns a session ID can join that session. Treat a
-deployment as one trust domain. Opt-in per-principal isolation, one locked
-runtime and one scoped role per listed user, is implemented but not yet
-verified live or documented for operators:
-[`per-principal-isolation.md`](specs/security/per-principal-isolation.md)
-(TASK-20).
+can invoke the runtime and learns a session ID can join that session. Treat
+such a deployment as one trust domain.
+
+**Opt-in per-principal isolation** (`ISOLATED_PRINCIPALS`, [how to enable
+it](deploy.md#per-principal-isolation-isolated_principals), [what users
+see](workspaces.md#per-principal-isolation), normative spec
+[`per-principal-isolation.md`](specs/security/per-principal-isolation.md))
+gives every listed user a plane created at deploy time:
+
+- a runtime whose resource policies (on the runtime and on its endpoint)
+  deny every data-plane call to everyone but the owner, so knowing another
+  user's runtime ARN and session ID is not enough to join or stop the session;
+  the shared runtime refuses every user;
+- an execution role, the one the owner's agent runs with, confined by a
+  permissions boundary and the checkpoint bucket policy to the owner's own
+  objects: it cannot read other owners' checkpoints, the registry and Telegram
+  tables, SCH log groups, SCH runtime and Lambda configuration or the plane
+  parameters;
+- a read-only access role that only the owner can assume, through which `sch`
+  reads the owner's checkpoints; the bucket policy denies the owner trees to
+  every other principal.
+
+What backs these statements today: unit tests of the templates, the registry
+and the CLI, IAM Access Analyzer without errors, and IAM policy simulator runs
+with the expected decision in every case (reports:
+[Access Analyzer](history/isolation-evidence-access-analyzer.md),
+[simulator](history/isolation-evidence-simulator.md)). The simulator evaluates
+one resource policy at a time, so it does not model AgentCore's joint
+evaluation of the runtime and endpoint policies, and it fills `aws:userid`
+from the caller, so Identity Center callers were simulated with explicit
+context. The live two-principal check (`bin/verify-isolation.sh`) has not been
+run by the maintainers yet: run it on your stack before relying on the
+boundary.
+
+**Boundary administrators are trusted.** Principals that hold any of IAM
+write, AgentCore control-plane write (for example `BedrockAgentCoreFullAccess`),
+`s3:PutBucketPolicy`/`s3:DeleteBucketPolicy` on the checkpoint bucket,
+CloudFormation deploy rights with `iam:PassRole`, Lambda updates of SCH
+functions, `ssm:PutParameter` on the plane parameters, or write access to the
+registry table can remove or redirect any lock. Do not give listed users these
+rights; the operator who deploys SCH is one of them.
+
+**`ReadOnlyAccess` with isolation on.** Plane execution roles carry
+`ReadOnlyAccess` exactly when the shared role does. Their boundary denies the
+SCH reads that would expose secrets or other users' data (SCH runtime and
+Lambda configuration, SCH log groups, SCH tables, plane parameters), but an
+agent can still read, among
+others: names and ARNs of SCH resources; IAM trust policies and plane stack
+parameters, which reveal the listed identities (unique IDs, Identity Center
+usernames); CloudFormation templates; the shared image in ECR; the image
+rebuild's CodeBuild logs. None of these is a secret or workspace content
+(residual risk X1). Set `RUNTIME_AWS_API_READ=false` to remove
+`ReadOnlyAccess` from every plane.
+
+**Telegram** is refused on an isolated stack: it is a single-operator feature
+of isolation-off stacks.
+
+**Residual risks** (full list in the spec, X1–X9): the `ReadOnlyAccess` reads
+above; a short window at plane creation before the locks are attached, while
+the runtime ARN is not published yet; unverified `sso:` usernames (a typo
+binds the plane to someone else or to nobody); the simulator limits above;
+the in-session image rebuild, when enabled, shares one CodeBuild project and
+image across owners; `RUNTIME_DATA_BUCKET_ARN` is shared by every owner; every
+session of a `role:` entry is one owner; a removed principal's plane may still
+be returned by the registry for up to 60 seconds; the managed-policy size caps
+the Bedrock allow-list at about 20 exact model IDs.
 
 ## The image is part of the contract
 
