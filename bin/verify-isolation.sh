@@ -429,11 +429,9 @@ raise SystemExit(0 if rows and rows[0].get("taskState") == "succeeded" else 1)' 
     [ "${FAIL}" -eq 0 ]
 }
 
-run() {
-    trap cleanup EXIT
-    main
-}
-
-# Mask account IDs (any 12-digit run) in everything the check prints.
-run 2>&1 | sed -E 's/[0-9]{12}/<account-id>/g'
+# Mask account IDs (any 12-digit run) in everything the check prints. The
+# trap is set in this shell, not inside the pipeline: bash 3.2 (macOS
+# /bin/bash) does not run an EXIT trap that was set in a pipeline subshell.
+trap cleanup EXIT
+main 2>&1 | sed -E 's/[0-9]{12}/<account-id>/g'
 exit "${PIPESTATUS[0]}"
