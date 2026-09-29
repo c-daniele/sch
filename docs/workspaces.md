@@ -95,7 +95,13 @@ Run it on your stack (below) before you rely on the boundary.
   changes on the client: every command asks the registry, which returns the
   caller's plane, and `sch` uses that runtime and the access role by itself.
   `sch info` prints an extra `isolation : on (...)` line with the owner prefix
-  and access role.
+  and access role:
+
+  ```text
+  region      : eu-west-1
+  runtime ARN : arn:aws:bedrock-agentcore:eu-west-1:<account-id>:runtime/sch_dev_o_044f48490641a561-t1bfqJ9GaA
+  isolation   : on (owner prefix o.044f48490641a561, access role arn:aws:iam::<account-id>:role/sch-dev-o-044f48490641a561-access)
+  ```
 - Every SCH user, the operator included, must be listed: the shared runtime
   refuses every caller, and local index mode (no registry URL) does not work
   on such a stack. An unlisted caller gets HTTP 403 with the entry to add, for
@@ -130,6 +136,38 @@ runtime configuration; A's and B's own workflow (`sch task`, `status`, `list`,
 its test workspaces at the end and masks account IDs in its output
 (`--help` for the options). The other `bin/verify-*.sh` scripts run on an
 isolated stack as a listed user; the Telegram checks print `SKIP` there.
+
+Trimmed output of the run that verified the feature (2026-09-29, profiles
+`alice` and `bob` listed, `carol` not):
+
+```text
+$ bin/verify-isolation.sh --profile-a alice --profile-b bob --profile-c carol
+== 1. unlisted caller ==
+PASS: C is refused by the registry with the entry to add: add user:carol to ISOLATED_PRINCIPALS
+== 3. joining A's session with its runtime ARN and session ID ==
+PASS: A invokes its own session (positive control)
+PASS: B invokes A's session: denied
+PASS: B stops A's session: denied
+PASS: B invokes the shared runtime: denied
+PASS: B opens a command on A's session (agentcore exec): denied
+== 4. reading A's checkpoint objects as another principal ==
+PASS: B reads A's task status with its own credentials: denied
+PASS: B reads A's task status through B's access role: denied
+PASS: B assumes A's access role: denied
+== 5. reading other owners' data from inside A's microVM ==
+PASS: agent of A, read B's task status: denied
+PASS: agent of A, scan the registry table: denied
+PASS: agent of A, read B's plane parameter: denied
+# isolation result: 37 passed, 0 failed
+```
+
+B and C held `bedrock-agentcore:*` on `*` and read access to the whole
+checkpoint bucket during that run, so every denial came from the plane
+resource policies, the access-role trust and the bucket policy. A first
+attempt can end with `note: could not delete <workspace> of A`: the registry
+deletion timed out while the session's microVM was still being stopped and
+the script retries; if the note remains, run `sch delete <workspace> --yes`
+as that principal (TASK-24).
 
 ### Rollback / teardown
 

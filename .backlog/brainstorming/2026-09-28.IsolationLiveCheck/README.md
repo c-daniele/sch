@@ -60,9 +60,23 @@ bin/verify-workspace-deletion.sh
 
 ## 5. Afterwards
 
-Keep isolation on: leave `setenv.sh` as is; to use the installed `sch` against this stack,
-push `dev`, `uv tool upgrade sch`, and point the tunnel helpers at this checkout with
-`SCH_REPO_ROOT=$PWD` until `main` carries the work.
+Keep isolation on, drop the test users (chosen 2026-09-29):
+
+```bash
+.backlog/brainstorming/2026-09-28.IsolationLiveCheck/apply-caller-policy.sh dev_generic   # minimal policy on, test policy off
+bin/sch info                                                                             # must still print the isolation line
+sed -i '' 's/, user:sch-iso-b//' "$(readlink -f infra/setenv.sh)"                        # only your own user stays listed
+source infra/setenv.sh && infra/deploy.sh -s                                             # deletes the plane of sch-iso-b
+.backlog/brainstorming/2026-09-28.IsolationLiveCheck/teardown-test-principals.sh         # users, keys, test policy
+```
+
+`apply-caller-policy.sh` attaches the minimal identity policy of
+`docs/getting-started.md` (built from the live stack) before detaching the
+broad test policy, so `sch` never loses access; a working `bin/sch info` and
+`bin/sch task` afterwards is the live confirmation of that minimal shape. To
+use the installed `sch` against this stack, push `dev`, `uv tool upgrade sch`,
+and point the tunnel helpers at this checkout with `SCH_REPO_ROOT=$PWD` until
+`main` carries the work.
 
 Back to the previous setup: remove `ISOLATED_PRINCIPALS`, restore the Telegram exports,
 `source infra/setenv.sh && infra/deploy.sh -s` (deletes the two planes, drops the bucket

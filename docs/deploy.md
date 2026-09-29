@@ -150,6 +150,18 @@ case-sensitive; a typo binds the plane to nobody or to someone else).
 Isolation refuses `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` and
 `ENABLE_TELEGRAM_INTERACTION=true`.
 
+Example `infra/setenv.sh` for two IAM users (the operator included):
+
+```bash
+export ENABLE_WORKSPACE_REGISTRY=true
+export ISOLATED_PRINCIPALS="user:alice, user:bob"
+# no TELEGRAM_* / ENABLE_TELEGRAM_INTERACTION exports with isolation on
+```
+
+then `source infra/setenv.sh && infra/deploy.sh`. The entry is the IAM user
+name, not its ARN. If `infra/setenv.sh` is a symlink, edit the file it points
+to: macOS `sed -i` refuses to edit through a link.
+
 **What a deploy does**, in order: the preflight (entries, switches, runtime
 quota, managed-policy sizes; read-only), the bootstrap stack and image build,
 deletion of plane stacks whose entry left the list, the runtime stack (bucket

@@ -165,6 +165,35 @@ what `sch` calls; the owner key is printed by the deploy and by `sch info`):
   `arn:aws:iam::<account-id>:role/<project>-<env>-o-<owner key>-access`;
 - `cloudformation:DescribeStacks` on the runtime stack.
 
+As one identity policy for the listed user whose owner key is
+`044f48490641a561` on project `sch`, environment `dev` (replace the region,
+account ID, API ID and owner key; the runtime ARN keeps its `-*` suffix because
+the runtime ID is assigned at deploy time). The live check of 2026-09-29 ran
+with broader grants; this minimal shape is derived from what `sch` calls:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": "execute-api:Invoke",
+     "Resource": "arn:aws:execute-api:eu-west-1:<account-id>:<api-id>/v1/*/*"},
+    {"Effect": "Allow",
+     "Action": ["bedrock-agentcore:InvokeAgentRuntime",
+                "bedrock-agentcore:InvokeAgentRuntimeCommand",
+                "bedrock-agentcore:InvokeAgentRuntimeCommandShell",
+                "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                "bedrock-agentcore:StopRuntimeSession",
+                "bedrock-agentcore:GetAgentRuntime"],
+     "Resource": ["arn:aws:bedrock-agentcore:eu-west-1:<account-id>:runtime/sch_dev_o_044f48490641a561-*",
+                  "arn:aws:bedrock-agentcore:eu-west-1:<account-id>:runtime/sch_dev_o_044f48490641a561-*/runtime-endpoint/DEFAULT"]},
+    {"Effect": "Allow", "Action": "sts:AssumeRole",
+     "Resource": "arn:aws:iam::<account-id>:role/sch-dev-o-044f48490641a561-access"},
+    {"Effect": "Allow", "Action": "cloudformation:DescribeStacks",
+     "Resource": "arn:aws:cloudformation:eu-west-1:<account-id>:stack/sch-dev-runtime/*"}
+  ]
+}
+```
+
 Broader grants (for example `bedrock-agentcore:*` on `*`) do not reach another
 user's plane: the plane's resource policy denies everyone but its owner, and
 the checkpoint bucket policy denies owner trees to everyone but that owner's
