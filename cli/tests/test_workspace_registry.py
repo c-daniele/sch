@@ -114,6 +114,22 @@ class RegistryRecordValidationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 workspace_registry.RegistryWorkspace(record)
 
+    def test_api_gateway_denial_message_is_reported(self):
+        # API Gateway refuses a caller without execute-api:Invoke with a
+        # "Message" body (capital M) before the registry Lambda runs.
+        import io
+        import urllib.error
+        cfg = _cfg("/tmp")
+        cfg.workspace_registry_url = "https://example.execute-api.eu-west-1.amazonaws.com/v1"
+        cfg.region = "eu-west-1"
+        body = b'{"Message":"User: arn:aws:iam::111122223333:user/carol is not authorized to perform: execute-api:Invoke"}'
+        error = urllib.error.HTTPError("https://example/v1/workspaces", 403, "Forbidden", {}, io.BytesIO(body))
+        with patch("sch.workspace_registry._credentials", return_value=("AKIA", "secret", "")), \
+                patch("sch.workspace_registry.urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(RuntimeError) as ctx:
+                workspace_registry._request(cfg, "GET", "/workspaces")
+        self.assertIn("execute-api:Invoke", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

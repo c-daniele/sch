@@ -121,7 +121,14 @@ argv = sys.argv[1:]
 runtime = argv[argv.index("--runtime") + 1]
 profile = os.environ.get("AWS_PROFILE", "")
 if world["runtimes"].get(profile) != runtime:
-    sys.stderr.write("AccessDeniedException: not authorized to perform InvokeAgentRuntimeCommand\n")
+    # Like the real CLI (0.24.x): with --json a denial is reported as a bare
+    # {"success": false, ...} and the AWS error text is dropped.
+    if "--json" in argv:
+        print(json.dumps({"success": False, "stdout": "", "stderr": ""}))
+    else:
+        sys.stderr.write("Error: User: arn:aws:iam::111122223333:user/" + profile
+                         + " is not authorized to perform: bedrock-agentcore:InvokeAgentRuntimeCommand"
+                         " on resource: " + runtime + " with an explicit deny in a resource-based policy\n")
     sys.exit(1)
 command = " ".join(argv[argv.index("--") + 1:])
 env = dict(os.environ, FAKE_AGENT=profile)
@@ -185,7 +192,10 @@ elif argv[0] == "list":
     if os.path.exists(marker):
         print("%s opencode s3 sid-%s" % (open(marker).read().strip(), profile))
 elif argv[0] == "delete":
-    open(os.path.join(state, "deleted-" + profile), "w").write(argv[1])
+    # The registry URL is recorded too: a delete without it would run in
+    # local-index mode against the locked shared runtime (regression check).
+    open(os.path.join(state, "deleted-" + profile), "w").write(
+        argv[1] + "\n" + os.environ.get("SCH_WORKSPACE_REGISTRY_URL", ""))
 '''
 
 
@@ -239,6 +249,8 @@ class VerifyIsolationScriptTests(unittest.TestCase):
             result = subprocess.run(args, capture_output=True, text=True, env=world.env(**env),
                                     timeout=120)
             deleted = sorted(p.name for p in world.state.glob("deleted-*"))
+            delete_urls = [p.read_text().split("\n")[1] for p in sorted(world.state.glob("deleted-*"))]
+        self.assertTrue(all(url.startswith("https://") for url in delete_urls), delete_urls)
         return result, deleted
 
     def test_passes_on_an_isolated_world_and_cleans_up(self):

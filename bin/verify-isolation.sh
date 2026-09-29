@@ -221,11 +221,15 @@ remote_expect_denied() { # <label> <command>
 }
 
 cleanup() {
+    local label
     if [ "${KEEP}" -eq 1 ]; then
         echo "note: --keep: leaving workspace ${WS} of A and B"
     else
-        as_principal a "${SCH}" delete "${WS}" --yes >/dev/null 2>&1 || echo "note: could not delete ${WS} of A"
-        as_principal b "${SCH}" delete "${WS}" --yes >/dev/null 2>&1 || echo "note: could not delete ${WS} of B"
+        for label in a b; do
+            [ -e "${TMP_DIR}/created-${label}" ] || continue
+            as_principal "${label}" "${SCH}" delete "${WS}" --yes >/dev/null 2>&1 \
+                || echo "note: could not delete ${WS} of $(printf '%s' "${label}" | tr a-z A-Z)"
+        done
     fi
     rm -rf "${TMP_DIR}"
 }
@@ -245,9 +249,6 @@ main() {
     [ "$(stack_output a IsolationStatus)" = "true" ] \
         || { bad "stack ${STACK} does not report IsolationStatus=true (deploy with ISOLATED_PRINCIPALS first)"; return 1; }
     ok "stack reports IsolationStatus=true"
-    if [ -z "${REGISTRY_URL}" ]; then
-        REGISTRY_URL="$(stack_output a WorkspaceRegistryUrl)"
-    fi
     [ -n "${REGISTRY_URL}" ] || { bad "no registry URL (set --registry-url or SCH_WORKSPACE_REGISTRY_URL)"; return 1; }
     BUCKET="$(stack_output a CheckpointBucketName)"
     TABLE="$(stack_output a WorkspaceRegistryTableName)"
@@ -299,6 +300,9 @@ main() {
     # --- 2. own workflow ----------------------------------------------------
     echo "== 2. own workflow on each plane (same logical name ${WS}) =="
     for label in a b; do
+        # The marker tells cleanup (main shell) that this principal's
+        # workspace may exist; main itself runs in the pipeline subshell.
+        : >"${TMP_DIR}/created-${label}"
         if as_principal "${label}" "${SCH}" task "${WS}" --harness "${HARNESS}" \
             "Reply exactly: isolation check ${label}" >/dev/null 2>"${TMP_DIR}/task-${label}.err"; then
             ok "${label}: sch task submitted"
@@ -359,8 +363,10 @@ raise SystemExit(0 if rows and rows[0].get("taskState") == "succeeded" else 1)' 
     expect_denied "C invokes A's session" - invoke_info c "${ARN_A}" "${SID_A}" "${payload}"
     expect_denied "B invokes the shared runtime" - invoke_info b "${SHARED_ARN}" "${SID_A}" "${payload}"
     if command -v agentcore >/dev/null 2>&1; then
+        # No --json here: in that mode the agentcore CLI reports only
+        # {"success":false,...} and drops the AWS error text the check needs.
         out="$(as_principal b agentcore exec --runtime "${ARN_A}" --session-id "${SID_A}" \
-            --region "${REGION}" --timeout 60 --json -- true 2>&1)" || true
+            --region "${REGION}" --timeout 60 -- true 2>&1)" || true
         if is_denial "${out}"; then
             ok "B opens a command on A's session (agentcore exec): denied"
         else
@@ -432,6 +438,12 @@ raise SystemExit(0 if rows and rows[0].get("taskState") == "succeeded" else 1)' 
 # Mask account IDs (any 12-digit run) in everything the check prints. The
 # trap is set in this shell, not inside the pipeline: bash 3.2 (macOS
 # /bin/bash) does not run an EXIT trap that was set in a pipeline subshell.
+# For the same reason the registry URL is resolved here: main runs in the
+# pipeline subshell and cleanup, which deletes through the registry, would
+# not see a value assigned there.
+if [ -z "${REGISTRY_URL}" ] && command -v aws >/dev/null 2>&1; then
+    REGISTRY_URL="$(stack_output a WorkspaceRegistryUrl)"
+fi
 trap cleanup EXIT
 main 2>&1 | sed -E 's/[0-9]{12}/<account-id>/g'
 exit "${PIPESTATUS[0]}"

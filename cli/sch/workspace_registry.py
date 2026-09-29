@@ -109,9 +109,11 @@ def _request(cfg, method, path, body=None):
     except json.JSONDecodeError as exc:
         raise RuntimeError("workspace registry returned invalid JSON") from exc
     if status < 200 or status >= 300:
+        # The registry answers with "error"; API Gateway itself (for example
+        # a caller without execute-api:Invoke) answers with "Message".
         raise RuntimeError(
             "workspace registry rejected request: {}".format(
-                data.get("error") or data.get("message") or status
+                data.get("error") or data.get("message") or data.get("Message") or status
             )
         )
     return data
