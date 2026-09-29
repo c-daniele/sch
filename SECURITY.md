@@ -54,8 +54,8 @@ Out of scope:
   resource policies, the bucket policy, SCH Lambdas, CloudFormation stacks or
   the plane parameters administer that boundary and can remove it. The
   boundary is checked by tests, IAM Access Analyzer and the IAM policy
-  simulator; its live two-principal check (`bin/verify-isolation.sh`) is still
-  pending. A way around it for a listed user without those rights is in scope
+  simulator, and by the live two-principal check (`bin/verify-isolation.sh`,
+  passed 2026-09-29 with IAM users). A way around it for a listed user without those rights is in scope
   for reports. Details and residual risks:
   [security posture](docs/security.md#isolation-between-users),
   [spec](docs/specs/security/per-principal-isolation.md).

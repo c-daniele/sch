@@ -1,0 +1,56 @@
+############################################
+# per-principal isolation: live check
+# stack sch-dev-runtime (eu-west-1), workspace iso-verify-1790671509, harness opencode
+############################################
+== 0. preflight ==
+PASS: stack reports IsolationStatus=true
+   principal a: arn:aws:iam::<account-id>:user/dev_generic
+   principal b: arn:aws:iam::<account-id>:user/sch-iso-b
+   principal c: arn:aws:iam::<account-id>:user/sch-iso-c
+PASS: the profiles are distinct identities
+PASS: A and B have distinct planes (o.044f48490641a561, o.4f61dfe72db147bc)
+== 1. unlisted caller ==
+PASS: C is refused by the registry with the entry to add: add user:sch-iso-c to ISOLATED_PRINCIPALS
+== 2. own workflow on each plane (same logical name iso-verify-1790671509) ==
+PASS: a: sch task submitted
+PASS: b: sch task submitted
+PASS: a: task succeeded (sch status)
+PASS: a: sch list shows the workspace
+PASS: a: sch list --remote-check
+PASS: a: the dashboard data path reads the task state
+PASS: b: task succeeded (sch status)
+PASS: b: sch list shows the workspace
+PASS: b: sch list --remote-check
+PASS: b: the dashboard data path reads the task state
+PASS: the same logical name maps to distinct sessions, identities and runtimes
+PASS: A reads its own task status through its access role
+PASS: B reads its own task status through its access role
+== 3. joining A's session with its runtime ARN and session ID ==
+PASS: A invokes its own session (positive control)
+PASS: B invokes A's session: denied
+PASS: B stops A's session: denied
+PASS: C invokes A's session: denied
+PASS: B invokes the shared runtime: denied
+PASS: B opens a command on A's session (agentcore exec): denied
+== 4. reading A's checkpoint objects as another principal ==
+PASS: B reads A's task status with its own credentials: denied
+PASS: B reads A's task status through B's access role: denied
+PASS: B lists A's owner tree through B's access role: denied
+PASS: B assumes A's access role: denied
+PASS: C reads A's task status: denied
+== 5. reading other owners' data from inside A's microVM ==
+PASS: agent of A reads its own task status (positive control)
+PASS: B's task status exists (positive control for the next check)
+PASS: agent of A, read B's task status: denied
+PASS: agent of A, list B's owner tree: denied
+PASS: agent of A, list the whole checkpoints/ tree: denied
+PASS: agent of A, scan the registry table: denied
+PASS: agent of A, read B's plane parameter: denied
+PASS: agent of A, read B's runtime configuration: denied
+PASS: agent of A, assume B's access role: denied
+
+############################################
+# isolation result: 37 passed, 0 failed
+############################################
+note: could not delete iso-verify-1790671509 of A
+note: could not delete iso-verify-1790671509 of B

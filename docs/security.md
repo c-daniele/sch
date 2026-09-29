@@ -97,9 +97,13 @@ with the expected decision in every case (reports:
 one resource policy at a time, so it does not model AgentCore's joint
 evaluation of the runtime and endpoint policies, and it fills `aws:userid`
 from the caller, so Identity Center callers were simulated with explicit
-context. The live two-principal check (`bin/verify-isolation.sh`) has not been
-run by the maintainers yet: run it on your stack before relying on the
-boundary.
+context. The live two-principal check (`bin/verify-isolation.sh`) passed on
+2026-09-29 on a deployed stack with two IAM users and one unlisted IAM user (37
+checks): joining, stopping and opening a command on another user's session fail
+with an explicit deny in a resource-based policy, and cross-owner reads fail
+from the CLI and from inside the agent's microVM. Identity Center owners have
+simulator evidence only. Run the script on your own stack before relying on
+the boundary.
 
 **Boundary administrators are trusted.** Principals that hold any of IAM
 write, AgentCore control-plane write (for example `BedrockAgentCoreFullAccess`),

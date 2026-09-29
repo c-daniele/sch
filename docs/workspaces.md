@@ -86,8 +86,8 @@ IAM policy simulator (reports:
 [simulator](history/isolation-evidence-simulator.md)). The simulator evaluates
 the runtime and endpoint policies one at a time and cannot model how AgentCore
 evaluates them together; only a live run of `bin/verify-isolation.sh` with two
-principals covers that, and it has not been run by the maintainers yet. Run it
-on your stack (below) before you rely on the boundary.
+principals covers that; it passed on 2026-09-29 with two IAM users (37 checks).
+Run it on your stack (below) before you rely on the boundary.
 
 **For users of an isolated stack:**
 

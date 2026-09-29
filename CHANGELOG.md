@@ -109,8 +109,7 @@ minor versions).
   adds a checkpoint bucket policy and locks the shared runtime. The registry
   maps callers by bound identity and refuses unlisted callers with the entry
   to add; `sch` uses the caller's plane with no fallback to the shared
-  runtime. Checked by tests, IAM Access Analyzer and the policy simulator;
-  the live two-principal check `bin/verify-isolation.sh` is new and still to
-  be run. Task prompts are no longer written to the runtime logs.
+  runtime. Checked by tests, IAM Access Analyzer, the policy simulator and
+  the live two-principal check `bin/verify-isolation.sh` (IAM users). Task prompts are no longer written to the runtime logs.
 
 [Unreleased]: https://github.com/c-daniele/sch/commits/main

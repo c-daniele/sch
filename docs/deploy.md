@@ -125,8 +125,12 @@ sourced it.
 What it protects and what users see: [Workspaces: per-principal
 isolation](workspaces.md#per-principal-isolation). Normative behavior:
 [`per-principal-isolation.md`](specs/security/per-principal-isolation.md).
-It has not been verified live by the maintainers yet: run
-`bin/verify-isolation.sh` on a test stack before relying on it.
+It was verified live on 2026-09-29 with two IAM users (`bin/verify-isolation.sh`,
+37 checks passed); run the same script on your own stack before relying on it,
+and note that each listed caller needs the permissions in
+[Getting started](getting-started.md#caller-permissions-on-an-isolated-stack),
+`execute-api:Invoke` on the registry included: without it API Gateway answers
+403 before the registry runs.
 
 **Enabling.** Set `ENABLE_WORKSPACE_REGISTRY=true` and `ISOLATED_PRINCIPALS`
 to a comma-separated list of entries (keep both in `infra/setenv.sh`: a deploy

@@ -221,14 +221,23 @@ remote_expect_denied() { # <label> <command>
 }
 
 cleanup() {
-    local label
+    local label attempt
     if [ "${KEEP}" -eq 1 ]; then
         echo "note: --keep: leaving workspace ${WS} of A and B"
     else
         for label in a b; do
             [ -e "${TMP_DIR}/created-${label}" ] || continue
-            as_principal "${label}" "${SCH}" delete "${WS}" --yes >/dev/null 2>&1 \
-                || echo "note: could not delete ${WS} of $(printf '%s' "${label}" | tr a-z A-Z)"
+            # Registry deletion is resumable: a first attempt can time out while
+            # the session's microVM is still being stopped, and a retry finishes it.
+            for attempt in 1 2 3; do
+                if as_principal "${label}" "${SCH}" delete "${WS}" --yes >/dev/null 2>&1; then
+                    break
+                elif [ "${attempt}" -eq 3 ]; then
+                    echo "note: could not delete ${WS} of $(printf '%s' "${label}" | tr a-z A-Z) (retry: sch delete ${WS} --yes as that principal)"
+                else
+                    sleep 10
+                fi
+            done
         done
     fi
     rm -rf "${TMP_DIR}"

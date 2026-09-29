@@ -1,10 +1,10 @@
 ---
 id: TASK-20
 title: Per-user workspace isolation with runtimes provisioned at deploy time
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-27 10:12'
-updated_date: '2026-09-28 09:05'
+updated_date: '2026-09-29 08:57'
 labels:
   - security
 dependencies: []
@@ -160,14 +160,14 @@ Only after the maintainer's GO, on a workspace whose `feat/task-20` branch conta
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Subtasks TASK-20.1 to TASK-20.5 are Done; their acceptance criteria together cover the feature
-- [ ] #2 Operator-side live check passes: a test stack deployed with two IAM users (and one Identity Center user when available) runs bin/verify-isolation.sh successfully; the executing agent leaves this criterion unchecked
+- [x] #2 Operator-side live check passes: a test stack deployed with two IAM users (and one Identity Center user when available) runs bin/verify-isolation.sh successfully; the executing agent leaves this criterion unchecked
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cli, infra and tunnel suites, the image-side tests (with sandboxed paths) and bin/verify-docs.sh pass
-- [ ] #2 Journal entry and masterplan updated as AGENTS.md requires; implementation notes list every assumption and the verification results
-- [ ] #3 Work committed on feat/task-20, never pushed
+- [x] #1 cli, infra and tunnel suites, the image-side tests (with sandboxed paths) and bin/verify-docs.sh pass
+- [x] #2 Journal entry and masterplan updated as AGENTS.md requires; implementation notes list every assumption and the verification results
+- [x] #3 Work committed on feat/task-20, never pushed
 <!-- DOD:END -->
 
 ## Implementation Notes
@@ -176,4 +176,16 @@ Only after the maintainer's GO, on a workspace whose `feat/task-20` branch conta
 TASK-20.3 done (2026-09-27): plane template, managed shared policies, bucket policy and shared-runtime lock, deploy.sh preflight and per-principal stacks, plane teardown, Access Analyzer and simulator evidence under docs/history/. Do not enable ISOLATED_PRINCIPALS on a live stack before TASK-20.4: it locks the shared runtime and no sch command uses the planes yet.
 
 2026-09-28 (operator session): double check of the five slices against the code and the suites. Found and fixed one defect: bin/verify-isolation.sh set its cleanup trap inside the pipeline subshell, so under bash 3.2 (macOS /bin/bash) the test workspaces were never deleted (cli test_verify_scripts failed on macOS, passed on Linux). Trap moved to the main shell (commit e1056df); cli 657 OK on macOS with /bin/bash 3.2, infra 215 OK, tunnel pass. AWS docs confirm requestContext.identity.user is the principal identifier for IAM-authorized callers. Live-check kit (test users template, setup/teardown scripts, run sequence) in .backlog/brainstorming/2026-09-28.IsolationLiveCheck/.
+
+2026-09-29 live check (operator-side, AC #2): stack sch-dev-runtime (eu-west-1) deployed in place with ISOLATED_PRINCIPALS="user:<operator>, user:sch-iso-b"; test users from .backlog/brainstorming/2026-09-28.IsolationLiveCheck/test-principals.yaml with deliberately broad grants (bedrock-agentcore:* on *, read on the whole checkpoint bucket, sts:AssumeRole on every access role). Deploy: runtime stack UPDATE_COMPLETE with IsolationStatus=true, CheckpointBucketPolicy and both shared-runtime locks CREATE_COMPLETE, two plane stacks CREATE_COMPLETE (7 resources each), SSM plane parameters present, resource policies on runtime and endpoint as in R16/R17. bin/verify-isolation.sh: run 1 (2026-09-28) 36 passed, 1 false negative (agentcore --json hides the error text; reproduced by hand: 'explicit deny in a resource-based policy' on InvokeAgentRuntimeCommand); run 2 (2026-09-29, after the script fixes) 37 passed, 0 failed (log: .backlog/brainstorming/2026-09-28.IsolationLiveCheck/run-2.log, account IDs masked). Not exercised live: an sso: owner. Findings fixed on the way: verify-isolation.sh cleanup trap under bash 3.2, registry URL invisible to cleanup (pipeline subshell), agentcore exec check without --json, registry client reporting API Gateway's own 403 (Message field). Prerequisite that blocked run 0: the operator's user lacked execute-api:Invoke and sts:AssumeRole (API Gateway 403 before the registry); attached the test caller policy. Open defect found (not isolation-specific, follow-up proposed): the registry DELETE times out (Lambda Timeout 10 s, client timeout 10 s) while the session's microVM is still being stopped; the resumable deletion left records in 'deleting' and a retry completed in 1-2 s; the script cleanup now retries three times.
+
+DoD #1 basis on 2026-09-29: cli 658 OK (macOS, /bin/bash 3.2 for the script tests), infra 215 OK, tunnel pass, bin/verify-docs.sh pass; image/ is unchanged since TASK-20.5, whose image-side run (534 tests, only the 7 known TASK-22 failures) stands.
+
+Live-check logs are kept as run-1.txt and run-2.txt in the brainstorming folder (*.log is gitignored).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Per-user workspace isolation delivered through TASK-20.1 to TASK-20.5 (design and spec, owner-scoped storage and shim, per-principal plane stacks and deploy, registry owner mapping and CLI, verify scripts and docs) and verified live on 2026-09-29: a stack deployed with two listed IAM users and one unlisted user passed bin/verify-isolation.sh with 37 checks and 0 failures (join, stop and exec on another user's session denied by the resource-based policies; cross-owner reads denied from the CLI and from inside the agent's microVM; unlisted caller refused with the entry to add; own workflow working on each plane). Evidence: unit suites (cli 658, infra 215, tunnel), Access Analyzer and simulator reports under docs/history/, run-2.log under .backlog/brainstorming/2026-09-28.IsolationLiveCheck/. The spec is Implemented; guides and SECURITY.md claim the live result. Left open as follow-ups: registry DELETE timeout while a microVM is being stopped (not isolation-specific), and an Identity Center owner never exercised live.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -1,6 +1,6 @@
 # Per-Principal Workspace Isolation
 
-> Domain: [Security](../README.md) · Status: Partially verified (TASK-20; design TASK-20.1; runtime side R26–R35 by TASK-20.2; templates, deploy and teardown R1–R6, R10–R25, R27, R39, R44–R48 by TASK-20.3; registry and CLI R7–R9, R36–R38, R40–R43 by TASK-20.4; verify scripts and guides by TASK-20.5. Every requirement is implemented and covered by unit tests, Access Analyzer and simulator evidence; not yet checked live: a deploy with planes (CloudFormation acceptance of the locks), the joint runtime and endpoint lock evaluation (R16, R17, X4), the principal-ID field of R36 and the 403 text of R37, the bucket policy against real callers (R24), all covered by `bin/verify-isolation.sh`) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
+> Domain: [Security](../README.md) · Status: Implemented (TASK-20; design TASK-20.1; runtime side R26–R35 by TASK-20.2; templates, deploy and teardown R1–R6, R10–R25, R27, R39, R44–R48 by TASK-20.3; registry and CLI R7–R9, R36–R38, R40–R43 by TASK-20.4; verify scripts and guides by TASK-20.5. Every requirement is implemented and covered by unit tests, Access Analyzer and simulator evidence. Live check 2026-09-29 on a deployed stack with two IAM users and one unlisted IAM user: `bin/verify-isolation.sh` 37 passed, 0 failed, which covers CloudFormation acceptance of the locks, the joint runtime and endpoint lock evaluation (R16, R17), the principal-ID field of R36, the 403 text of R37 and the bucket policy against real callers (R24). Not exercised live: an Identity Center (`sso:`) owner) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
 
 ## Purpose
 
@@ -284,8 +284,9 @@ Out of scope:
   of the registry function's own ARN; a mismatch is a `403`). A principal
   ID without `:` gives the candidate owner string `user:<id>`; `AROA…:<name>` gives
   `sso:AROA…:<name>` then `role:AROA…`. The first candidate whose plane-mapping parameter
-  exists is the owner; R4 guarantees at most one exists. The exact field carrying the
-  principal ID is verified live by the parent task's check (unverified).
+  exists is the owner; R4 guarantees at most one exists. The field carrying the
+  principal ID was confirmed by the live check (an IAM user with `GetSessionToken` MFA
+  credentials maps to its `AIDA…` unique ID).
 - **R37.** A caller with no plane SHALL get HTTP 403 and no record SHALL be read or created.
   The error names the identity to add, derived from the caller ARN: `user:<name>` for an IAM
   user, `sso:<permission-set>/<session-name>` for an assumed `AWSReservedSSO_<ps>_<hex>` role,
@@ -492,8 +493,11 @@ The same call by an unlisted user `carol` answers
 - **X4. Simulator limits.** The IAM policy simulator evaluates one resource policy per call,
   so it does not model the joint runtime and endpoint evaluation; each policy is simulated
   separately. It fills `aws:userid` from the caller, so Identity Center callers are simulated
-  in custom mode with explicit context entries. Only the operator-side live check
-  (`bin/verify-isolation.sh`, two principals) covers the joint evaluation.
+  in custom mode with explicit context entries. The joint evaluation is covered only by the
+  live check (`bin/verify-isolation.sh`, two principals), which passed on 2026-09-29 for IAM
+  users: a second user's `InvokeAgentRuntime`, `InvokeAgentRuntimeCommand` and
+  `StopRuntimeSession` on the owner's runtime and session fail with an explicit deny in a
+  resource-based policy. Identity Center owners have only the simulator evidence.
 - **X5. Shared image rebuild.** With `ENABLE_SESSION_IMAGE_REBUILD=true`, every owner can start
   the one CodeBuild project, whose role pushes the image all planes run on and reads every
   `builds/` source (the existing risk R1 of that feature now spans owners). Enable it only
