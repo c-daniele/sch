@@ -28,9 +28,9 @@ class RuntimeDependencyPinTests(unittest.TestCase):
         text = DOCKERFILE.read_text(encoding="utf-8")
         pins = dict(re.findall(r"^ARG (OPENCODE_VERSION|PI_VERSION|CLAUDE_CODE_VERSION)=(\S+)$", text, re.MULTILINE))
         self.assertEqual(pins, {
-            "OPENCODE_VERSION": "2.0.18",
-            "PI_VERSION": "0.87.1",
-            "CLAUDE_CODE_VERSION": "2.1.282",
+            "OPENCODE_VERSION": "2.0.20",
+            "PI_VERSION": "0.99.1",
+            "CLAUDE_CODE_VERSION": "2.1.285",
         })
 
     def test_gh_cli_pinned_with_versioned_install(self):
