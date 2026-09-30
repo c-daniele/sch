@@ -41,6 +41,20 @@ class CmdDeployTests(unittest.TestCase):
             [["bash", str(self.root / "infra" / "deploy.sh"), "-l", "-v", "v7"]],
         )
 
+    def test_isolation_switch_reaches_the_script_through_the_environment(self):
+        """per-principal-isolation R1: `ISOLATED_PRINCIPALS=... sch deploy`
+        works like the script, because the environment is inherited."""
+        seen = self.root / "seen"
+        (self.root / "infra" / "deploy.sh").write_text(
+            '#!/bin/bash\nprintf %s "${ISOLATED_PRINCIPALS:-}" > "' + str(seen) + '"\n'
+        )
+        with patch.object(repo, "repo_root", return_value=self.root), \
+             patch.object(deploy.sys, "platform", "darwin"), \
+             patch.dict("os.environ", {"ISOLATED_PRINCIPALS": "user:alice, sso:Dev/bob"}):
+            rc, _, _ = run_deploy([])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen.read_text(), "user:alice, sso:Dev/bob")
+
     def test_script_exit_code_is_propagated(self):
         with patch.object(repo, "repo_root", return_value=self.root), \
              patch.object(deploy.sys, "platform", "darwin"), \

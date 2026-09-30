@@ -807,5 +807,133 @@ class RobustnessTests(WatchdogTestCase):
         self.assertEqual(summary, _summary())
 
 
+OWNER = "o.0123456789abcdef"
+OTHER_OWNER = "o.fedcba9876543210"
+
+try:  # botocore ships with the dev extra (boto3); the suite runs without it too.
+    import botocore.session
+    from botocore.validate import ParamValidator
+except ImportError:  # pragma: no cover - exercised only without the dev extra
+    botocore = None
+
+
+class RecordingS3(FakeS3):
+    """FakeS3 that also records every list_objects_v2 request."""
+
+    def __init__(self):
+        super().__init__()
+        self.list_requests = []
+
+    def list_objects_v2(self, **kwargs):
+        self.list_requests.append(dict(kwargs))
+        return super().list_objects_v2(**kwargs)
+
+
+class OwnerLayoutTests(WatchdogTestCase):
+    """Per-principal isolation (spec per-principal-isolation R35): owner
+    trees ``checkpoints/o.<k>/<ws>/`` are listed one level deeper."""
+
+    def setUp(self):
+        super().setUp()
+        self.s3 = RecordingS3()
+        watchdog._S3 = self.s3
+
+    def test_both_layouts_are_listed(self):
+        self.seed(_running(heartbeat_ago=10), workspace="ws-flat")
+        self.seed(_running(heartbeat_ago=10), workspace=OWNER + "/ws-a")
+        self.seed(_running(heartbeat_ago=10), workspace=OWNER + "/ws-b")
+        self.seed(_running(heartbeat_ago=10), workspace=OTHER_OWNER + "/ws-c")
+        self.assertEqual(
+            sorted(watchdog.list_workspaces()),
+            sorted(["ws-flat", OWNER + "/ws-a", OWNER + "/ws-b", OTHER_OWNER + "/ws-c"]),
+        )
+        prefixes = [request["Prefix"] for request in self.s3.list_requests]
+        self.assertEqual(prefixes[0], "checkpoints/")
+        self.assertEqual(
+            sorted(prefixes[1:]),
+            sorted(["checkpoints/{}/".format(OTHER_OWNER), "checkpoints/{}/".format(OWNER)]),
+        )
+
+    def test_names_that_only_look_like_owner_trees_are_workspaces(self):
+        for name in ("o.0123", "o.0123456789ABCDEF", "o0123456789abcdef"):
+            self.seed(_running(heartbeat_ago=10), workspace=name)
+        self.assertEqual(
+            sorted(watchdog.list_workspaces()),
+            sorted(["o.0123", "o.0123456789ABCDEF", "o0123456789abcdef"]),
+        )
+        self.assertEqual(len(self.s3.list_requests), 1)
+
+    def test_stale_task_in_an_owner_tree_is_reconciled_at_the_nested_key(self):
+        workspace = OWNER + "/ws-a"
+        self.seed(_running(heartbeat_ago=1800), workspace=workspace)
+        self.seed(_running(heartbeat_ago=10), workspace="ws-flat")
+        summary = watchdog.handler()
+        self.assertEqual(summary["scanned"], 2)
+        self.assertEqual(summary["reconciled"], 1)
+        key = "checkpoints/{}/ws-a/task-status.json".format(OWNER)
+        self.assertEqual(self.s3.stored_json(key)["state"], "interrupted")
+        self.assertEqual(self.s3.stored_json(self.status_key("ws-flat"))["state"], "running")
+        self.assertTrue(all(put["Key"] == key for put in self.s3.puts))
+
+    def test_pending_terminal_in_an_owner_tree_is_resent_and_marked(self):
+        workspace = OWNER + "/ws-a"
+        self.seed(_terminal(), workspace=workspace)
+        summary = watchdog.handler()
+        self.assertEqual(summary["resent"], 1)
+        key = "checkpoints/{}/ws-a/task-status.json".format(OWNER)
+        self.assertEqual(self.s3.stored_json(key)["notification_status"], "delivered")
+
+    def test_paginated_owner_tree(self):
+        pages = {
+            "checkpoints/": [{"CommonPrefixes": [{"Prefix": "checkpoints/{}/".format(OWNER)}],
+                              "IsTruncated": False}],
+            "checkpoints/{}/".format(OWNER): [
+                {"CommonPrefixes": [{"Prefix": "checkpoints/{}/ws-a/".format(OWNER)}],
+                 "IsTruncated": True, "NextContinuationToken": "p2"},
+                {"_token": "p2",
+                 "CommonPrefixes": [{"Prefix": "checkpoints/{}/ws-b/".format(OWNER)}],
+                 "IsTruncated": False},
+            ],
+        }
+
+        def listing(**kwargs):
+            self.s3.list_requests.append(dict(kwargs))
+            candidates = pages[kwargs["Prefix"]]
+            token = kwargs.get("ContinuationToken")
+            if token is None:
+                return candidates[0]
+            return next(page for page in candidates if page.get("_token") == token)
+
+        self.s3.list_objects_v2 = listing
+        self.assertEqual(watchdog.list_workspaces(), [OWNER + "/ws-a", OWNER + "/ws-b"])
+
+    @unittest.skipIf(botocore is None, "botocore not installed (dev extra)")
+    def test_every_request_matches_the_s3_api_model(self):
+        self.seed(_running(heartbeat_ago=1800), workspace=OWNER + "/ws-a")
+        self.seed(_terminal(), workspace="ws-flat")
+        recorded = []
+        for name in ("get_object", "put_object"):
+            original = getattr(self.s3, name)
+
+            def wrapper(_original=original, _name=name, **kwargs):
+                recorded.append((_name, dict(kwargs)))
+                return _original(**kwargs)
+
+            setattr(self.s3, name, wrapper)
+        watchdog.handler()
+        recorded.extend(("list_objects_v2", request) for request in self.s3.list_requests)
+        model = botocore.session.get_session().get_service_model("s3")
+        validator = ParamValidator()
+        operations = {
+            "list_objects_v2": "ListObjectsV2", "get_object": "GetObject",
+            "put_object": "PutObject",
+        }
+        self.assertTrue(any(name == "list_objects_v2" for name, _ in recorded))
+        for name, params in recorded:
+            shape = model.operation_model(operations[name]).input_shape
+            report = validator.validate(params, shape)
+            self.assertFalse(report.has_errors(), (name, params, report.generate_report()))
+
+
 if __name__ == "__main__":
     unittest.main()

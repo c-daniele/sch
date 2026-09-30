@@ -7,6 +7,12 @@ from .. import userenv
 def cmd_info(cfg, args):
     print("region      : {}".format(cfg.region))
     print("runtime ARN : {}".format(config_mod.runtime_arn(cfg)))
+    plane = getattr(cfg, "plane", None)
+    if plane is not None:
+        # per-principal-isolation R40: printed only with isolation on, so
+        # the isolation-off output is unchanged.
+        print("isolation   : on (owner prefix {}, access role {})".format(
+            plane.owner_prefix, plane.access_role_arn))
     print("workspaces  : {}".format(cfg.ws_dir))
     print("default harness (new workspaces): {}".format(cfg.default_harness))
     print("default storage (new workspaces): {}".format(cfg.default_storage))

@@ -10,15 +10,16 @@ import urllib.parse
 import urllib.request
 import re
 
+from . import plane as plane_mod
 from .config import die
 
 IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 class RegistryWorkspace:
-    __slots__ = ("name", "sid", "harness", "identity", "storage", "epoch", "was_created")
+    __slots__ = ("name", "sid", "harness", "identity", "storage", "epoch", "was_created", "plane")
 
-    def __init__(self, data, was_created=False):
+    def __init__(self, data, was_created=False, plane=None):
         required = ("logicalWorkspace", "runtimeSessionId", "harness", "workspaceIdentity")
         if not isinstance(data, dict) or any(not isinstance(data.get(key), str) or not data[key] for key in required):
             raise ValueError("registry returned an invalid workspace record")
@@ -35,6 +36,15 @@ class RegistryWorkspace:
         if not isinstance(self.epoch, int) or isinstance(self.epoch, bool) or self.epoch < 0:
             raise ValueError("registry returned an invalid session epoch")
         self.was_created = was_created
+        # per-principal-isolation R38/R41: the owner's plane with isolation
+        # on (validated by the caller against the response's plane), else None.
+        self.plane = plane
+
+
+def _workspace(cfg, data, record, was_created=False):
+    """A validated record of ``data`` (a whole response), adopting its plane."""
+    plane = plane_mod.adopt(cfg, data)
+    return RegistryWorkspace(record, was_created, plane_mod.record_plane(cfg, record, plane))
 
 
 def enabled(cfg):
@@ -99,9 +109,11 @@ def _request(cfg, method, path, body=None):
     except json.JSONDecodeError as exc:
         raise RuntimeError("workspace registry returned invalid JSON") from exc
     if status < 200 or status >= 300:
+        # The registry answers with "error"; API Gateway itself (for example
+        # a caller without execute-api:Invoke) answers with "Message".
         raise RuntimeError(
             "workspace registry rejected request: {}".format(
-                data.get("error") or data.get("message") or status
+                data.get("error") or data.get("message") or data.get("Message") or status
             )
         )
     return data
@@ -116,7 +128,7 @@ def resolve(cfg, workspace, harness="", storage="", default_storage=""):
     if default_storage:
         body["defaultStorage"] = default_storage
     data = _request(cfg, "POST", "/workspaces/{}/resolve".format(urllib.parse.quote(workspace, safe="")), body)
-    return RegistryWorkspace(data.get("workspace"), bool(data.get("created")))
+    return _workspace(cfg, data, data.get("workspace"), bool(data.get("created")))
 
 
 def list_workspaces(cfg):
@@ -124,16 +136,19 @@ def list_workspaces(cfg):
     records = data.get("workspaces")
     if not isinstance(records, list):
         raise RuntimeError("registry returned an invalid workspace list")
-    return [RegistryWorkspace(record) for record in records]
+    plane = plane_mod.adopt(cfg, data)
+    return [RegistryWorkspace(record, False, plane_mod.record_plane(cfg, record, plane))
+            for record in records]
 
 
 def rotate(cfg, workspace):
     data = _request(cfg, "POST", "/workspaces/{}/rotate-session".format(urllib.parse.quote(workspace, safe="")), {})
-    return RegistryWorkspace(data.get("workspace"))
+    return _workspace(cfg, data, data.get("workspace"))
 
 
 def delete(cfg, workspace):
     data = _request(cfg, "DELETE", "/workspaces/{}".format(urllib.parse.quote(workspace, safe="")))
+    plane_mod.adopt(cfg, data)
     result = data.get("workspace", data)
     if not isinstance(result, dict):
         raise RuntimeError("registry returned an invalid deletion response")
@@ -141,7 +156,9 @@ def delete(cfg, workspace):
 
 
 def delete_all(cfg):
-    return _request(cfg, "DELETE", "/workspaces")
+    data = _request(cfg, "DELETE", "/workspaces")
+    plane_mod.adopt(cfg, data)
+    return data
 
 
 def resolve_or_die(cfg, workspace, harness="", storage="", default_storage=""):

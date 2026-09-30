@@ -1,0 +1,437 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  SCH per-principal isolation plane (docs/specs/security/per-principal-isolation.md):
+  one AgentCore runtime locked to one listed principal, its execution role
+  limited by a permissions boundary, a read-only access role for the owner's
+  CLI, and the plane-mapping parameter the registry reads. One stack per
+  listed principal, deployed by infra/deploy.sh after the runtime stack
+  (<project>-<env>-plane-<ownerKey>). No custom resources.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: sch
+    AllowedPattern: ^[a-z][a-z0-9]{2,7}$
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - stg
+      - prd
+  OwnerKey:
+    Type: String
+    Description: First 16 hex characters of sha256("<kind>:<boundId>") (spec R7)
+    AllowedPattern: ^[0-9a-f]{16}$
+  OwnerKind:
+    Type: String
+    Description: Entry kind of the listed principal (spec R3)
+    AllowedValues:
+      - user
+      - sso
+      - role
+  OwnerUserIdPattern:
+    Type: String
+    Description: >-
+      aws:userid pattern of the owner (spec R3): AIDA… for an IAM user,
+      AROA…:<username> for an Identity Center user, AROA…:* for a role.
+      Resolved by deploy.sh; the character set keeps the JSON of the lock
+      policies well-formed and excludes the IAM wildcards from usernames.
+    AllowedPattern: ^A[A-Z0-9]{15,127}(:(\*|[A-Za-z0-9._@+=,-]{1,64}))?$
+  PrincipalEntry:
+    Type: String
+    Description: The ISOLATED_PRINCIPALS entry this plane belongs to (informational)
+    Default: ''
+  ApplicationVersion:
+    Type: String
+    Description: Image tag (same as the runtime stack)
+    Default: v1
+  ImageDigest:
+    Type: String
+    Description: Image digest pinned by deploy.sh (same as the runtime stack, decision-9)
+    Default: ''
+    AllowedPattern: ^(sha256:[0-9a-f]{64})?$
+  IdleRuntimeSessionTimeoutSeconds:
+    Type: Number
+    Default: 900
+    MinValue: 60
+    MaxValue: 28800
+  MaxLifetimeSeconds:
+    Type: Number
+    Default: 28800
+    MinValue: 60
+    MaxValue: 28800
+  PiDefaultModel:
+    Type: String
+    Default: ''
+  NodeHeapMb:
+    Type: Number
+    Default: 1792
+    MinValue: 0
+  BuildJobs:
+    Type: Number
+    Default: 2
+    MinValue: 1
+  CheckpointBucket:
+    Type: String
+    Description: Checkpoint bucket of the runtime stack (CheckpointBucketName output)
+  SharedPolicyArns:
+    Type: CommaDelimitedList
+    Description: Customer managed policies of the runtime stack (SharedRuntimePolicyArns output, spec R18)
+  AwsApiRead:
+    Type: String
+    Description: Attach ReadOnlyAccess exactly when the shared role has it (RuntimeAwsApiRead)
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  ImageRebuildProject:
+    Type: String
+    Description: CodeBuild project of the in-session image rebuild, empty when disabled
+    Default: ''
+  RegistryRoleArn:
+    Type: String
+    Description: Registry Lambda role (WorkspaceRegistryRoleArn output), the only non-owner allowed to stop sessions
+    AllowedPattern: ^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$
+
+Conditions:
+  ImageDigestPinned: !Not [!Equals [!Ref ImageDigest, '']]
+  AwsApiReadEnabled: !Equals [!Ref AwsApiRead, 'true']
+  ImageRebuildSet: !Not [!Equals [!Ref ImageRebuildProject, '']]
+
+Resources:
+  # R20: allows everything the role's own policies allow, except SCH-owned
+  # shared resources of this deployment. S3 is deliberately NOT restricted
+  # here (the bucket policy of the runtime stack confines plane roles to
+  # their owner segment, R24), so build-source uploads and data-bucket writes
+  # keep working.
+  PlaneBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-o-${OwnerKey}-boundary'
+      Description: !Sub 'Permissions boundary of the ${ProjectName}/${Environment} plane ${OwnerKey}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowWithinRolePolicies
+            Effect: Allow
+            Action: '*'
+            Resource: '*'
+          - Sid: DenySchTables
+            Effect: Deny
+            Action: 'dynamodb:*'
+            Resource: !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/${ProjectName}-${Environment}-*'
+          # Every CloudWatch Logs read-level action that accepts a log-group
+          # or log-stream resource (service reference, checked 2026-09-27);
+          # list-level actions (DescribeLogStreams, DescribeMetricFilters,
+          # DescribeSubscriptionFilters, ListTagsLogGroup) return no log
+          # content and stay allowed. The owner's own runtime log group is
+          # covered by the runtime pattern too.
+          - Sid: DenySchLogReads
+            Effect: Deny
+            Action:
+              - logs:FilterLogEvents
+              - logs:GetDataProtectionPolicy
+              - logs:GetLogEvents
+              - logs:GetLogGroupFields
+              - logs:GetLogRecord
+              - logs:GetQueryResults
+              - logs:GetTransformer
+              - logs:StartLiveTail
+              - logs:StartQuery
+              - logs:Unmask
+            Resource:
+              - !Sub 'arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/${ProjectName}_${Environment}_*'
+              - !Sub 'arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/bedrock/agentcore/${ProjectName}-${Environment}-*'
+              - !Sub 'arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-*'
+          # Configuration reads that expose environment variables (the
+          # Telegram token of the shared runtime, Lambda secrets) or the
+          # locks. ListAgentRuntimeVersions/ListAgentRuntimeEndpoints accept
+          # no resource and return no configuration: not listed.
+          - Sid: DenySchRuntimeConfiguration
+            Effect: Deny
+            Action:
+              - bedrock-agentcore:GetAgentRuntime
+              - bedrock-agentcore:GetAgentRuntimeEndpoint
+              - bedrock-agentcore:GetResourcePolicy
+            Resource: !Sub 'arn:aws:bedrock-agentcore:*:${AWS::AccountId}:runtime/${ProjectName}_${Environment}_*'
+          - Sid: DenySchFunctionConfiguration
+            Effect: Deny
+            Action: 'lambda:Get*'
+            Resource: !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:${ProjectName}-${Environment}-*'
+          # Not resource-scoped, and it returns every function's environment.
+          - Sid: DenyListFunctions
+            Effect: Deny
+            Action: lambda:ListFunctions
+            Resource: '*'
+          - Sid: DenySchParameters
+            Effect: Deny
+            Action: 'ssm:GetParameter*'
+            Resource: !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/${Environment}/*'
+          - Sid: DenySchIdentityChanges
+            Effect: Deny
+            Action:
+              - 'iam:Tag*'
+              - 'iam:Untag*'
+              - 'iam:Put*'
+              - 'iam:Attach*'
+              - 'iam:Detach*'
+              - 'iam:Delete*'
+              - 'iam:Update*'
+            Resource:
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-*'
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:policy/${ProjectName}-${Environment}-*'
+          - Sid: DenySchRoleAssumption
+            Effect: Deny
+            Action: sts:AssumeRole
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-*'
+
+  # R18/R19: the shared role's trust and managed policies (one definition in
+  # the runtime stack), capped by the boundary. Never the Telegram session
+  # policy (R44). The name contains BedrockAgentCore so the deploy
+  # principal's iam:PassRole scope still applies (R15).
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-o-${OwnerKey}-BedrockAgentCore'
+      Description: !Sub 'Execution role of the ${ProjectName}/${Environment} plane ${OwnerKey}'
+      Path: /
+      PermissionsBoundary: !Ref PlaneBoundary
+      ManagedPolicyArns: !If
+        - AwsApiReadEnabled
+        - !Split
+          - ','
+          - !Join
+            - ','
+            - - !Join [',', !Ref SharedPolicyArns]
+              - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - !Ref SharedPolicyArns
+      # No sts:TagSession (R19/R25): a session tag sch-owner would override
+      # the role tag the bucket policy relies on.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*'
+      Tags:
+        - Key: sch-owner
+          Value: !Ref OwnerKey
+
+  UserRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub '${ProjectName}_${Environment}_o_${OwnerKey}'
+      Description: !Sub 'SCH isolated runtime of plane ${OwnerKey} (${ProjectName}/${Environment})'
+      RoleArn: !GetAtt ExecutionRole.Arn
+      AgentRuntimeArtifact:
+        ContainerConfiguration:
+          ContainerUri: !If
+            - ImageDigestPinned
+            - !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-${Environment}@${ImageDigest}'
+            - !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-${Environment}:${ApplicationVersion}'
+      NetworkConfiguration:
+        NetworkMode: PUBLIC
+      FilesystemConfigurations:
+        - SessionStorage:
+            MountPath: /mnt/workspace
+      LifecycleConfiguration:
+        IdleRuntimeSessionTimeout: !Ref IdleRuntimeSessionTimeoutSeconds
+        MaxLifetime: !Ref MaxLifetimeSeconds
+      # R21: the shared runtime's environment minus every SCH_TELEGRAM_*
+      # variable, plus the owner prefix the shim writes under (R29).
+      EnvironmentVariables:
+        LOG_LEVEL: INFO
+        AGENT_PORT: '8080'
+        PROJECT_NAME: !Ref ProjectName
+        ENVIRONMENT: !Ref Environment
+        SCH_CHECKPOINT_BUCKET: !Ref CheckpointBucket
+        SCH_IMAGE_DIGEST: !If
+          - ImageDigestPinned
+          - !Ref ImageDigest
+          - !Ref AWS::NoValue
+        SCH_IMAGE_REBUILD_PROJECT: !If
+          - ImageRebuildSet
+          - !Ref ImageRebuildProject
+          - !Ref AWS::NoValue
+        SCH_PI_DEFAULT_MODEL: !Ref PiDefaultModel
+        SCH_NODE_HEAP_MB: !Ref NodeHeapMb
+        SCH_BUILD_JOBS: !Ref BuildJobs
+        SCH_OWNER_PREFIX: !Sub 'o.${OwnerKey}'
+      Tags:
+        Name: !Sub '${ProjectName}-${Environment}-plane-${OwnerKey}'
+        Environment: !Ref Environment
+        Project: !Ref ProjectName
+        ManagedBy: CloudFormation
+        sch-owner: !Ref OwnerKey
+
+  # R16: deny-only locks on the runtime and on its DEFAULT endpoint (both are
+  # evaluated). No Allow and no principal ARN in them, so nothing has to
+  # exist or carry a path; access still needs the owner's identity policy. A
+  # rejected policy fails the stack and rolls the runtime back.
+  RuntimeLock:
+    Type: AWS::BedrockAgentCore::ResourcePolicy
+    Properties:
+      ResourceArn: !GetAtt UserRuntime.AgentRuntimeArn
+      Policy: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "DenyNonOwnerDataPlane",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": [
+                  "bedrock-agentcore:InvokeAgentRuntime",
+                  "bedrock-agentcore:InvokeAgentRuntimeForUser",
+                  "bedrock-agentcore:InvokeAgentRuntimeCommand",
+                  "bedrock-agentcore:InvokeAgentRuntimeCommandShell",
+                  "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                  "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStreamForUser",
+                  "bedrock-agentcore:GetAgentCard"
+                ],
+                "Resource": "${Target}",
+                "Condition": {"StringNotLike": {"aws:userid": "${OwnerUserIdPattern}"}}
+              },
+              {
+                "Sid": "DenyNonOwnerStop",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": "bedrock-agentcore:StopRuntimeSession",
+                "Resource": "${Target}",
+                "Condition": {
+                  "StringNotLike": {"aws:userid": "${OwnerUserIdPattern}"},
+                  "ArnNotEquals": {"aws:PrincipalArn": "${RegistryRoleArn}"}
+                }
+              }
+            ]
+          }
+        - Target: !GetAtt UserRuntime.AgentRuntimeArn
+
+  EndpointLock:
+    Type: AWS::BedrockAgentCore::ResourcePolicy
+    Properties:
+      ResourceArn: !Sub '${UserRuntime.AgentRuntimeArn}/runtime-endpoint/DEFAULT'
+      Policy: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "DenyNonOwnerDataPlane",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": [
+                  "bedrock-agentcore:InvokeAgentRuntime",
+                  "bedrock-agentcore:InvokeAgentRuntimeForUser",
+                  "bedrock-agentcore:InvokeAgentRuntimeCommand",
+                  "bedrock-agentcore:InvokeAgentRuntimeCommandShell",
+                  "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                  "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStreamForUser",
+                  "bedrock-agentcore:GetAgentCard"
+                ],
+                "Resource": "${Target}",
+                "Condition": {"StringNotLike": {"aws:userid": "${OwnerUserIdPattern}"}}
+              },
+              {
+                "Sid": "DenyNonOwnerStop",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": "bedrock-agentcore:StopRuntimeSession",
+                "Resource": "${Target}",
+                "Condition": {
+                  "StringNotLike": {"aws:userid": "${OwnerUserIdPattern}"},
+                  "ArnNotEquals": {"aws:PrincipalArn": "${RegistryRoleArn}"}
+                }
+              }
+            ]
+          }
+        - Target: !Sub '${UserRuntime.AgentRuntimeArn}/runtime-endpoint/DEFAULT'
+
+  # R22/R23: the owner's CLI reads its own checkpoint objects through this
+  # role. Trusted by the account root with the owner's aws:userid only; no
+  # sts:TagSession (R25). Its name matches the plane-role pattern of the
+  # bucket policy and it carries the sch-owner tag, so R24 confines it to the
+  # owner segment as well.
+  AccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-o-${OwnerKey}-access'
+      Description: !Sub 'Read-only checkpoint access of the ${ProjectName}/${Environment} plane ${OwnerKey}'
+      Path: /
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OwnerOnly
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringLike:
+                aws:userid: !Ref OwnerUserIdPattern
+      Policies:
+        - PolicyName: !Sub '${ProjectName}-${Environment}-o-${OwnerKey}-access-read'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadOwnCheckpointObjects
+                Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${CheckpointBucket}/checkpoints/o.${OwnerKey}/*'
+                  - !Sub 'arn:aws:s3:::${CheckpointBucket}/workspace-writers/o.${OwnerKey}/*'
+              - Sid: ListOwnCheckpointTrees
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${CheckpointBucket}'
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Sub 'checkpoints/o.${OwnerKey}/*'
+                      - !Sub 'workspace-writers/o.${OwnerKey}/*'
+      Tags:
+        - Key: sch-owner
+          Value: !Ref OwnerKey
+
+  # R14: how the registry finds this plane. Created only after both locks, so
+  # the runtime ARN is never handed out before the runtime is locked (X2).
+  # No secret and no bound identity in the value.
+  PlaneParameter:
+    Type: AWS::SSM::Parameter
+    DependsOn:
+      - RuntimeLock
+      - EndpointLock
+    Properties:
+      Name: !Sub '/${ProjectName}/${Environment}/planes/${OwnerKey}'
+      Type: String
+      Description: !Sub 'SCH plane mapping of owner key ${OwnerKey}'
+      Value: !Sub
+        - '{"schemaVersion": 1, "ownerKey": "${OwnerKey}", "ownerPrefix": "o.${OwnerKey}", "runtimeArn": "${RuntimeArn}", "accessRoleArn": "${AccessRoleArn}"}'
+        - RuntimeArn: !GetAtt UserRuntime.AgentRuntimeArn
+          AccessRoleArn: !GetAtt AccessRole.Arn
+
+Outputs:
+  RuntimeArn:
+    Description: ARN of the plane runtime
+    Value: !GetAtt UserRuntime.AgentRuntimeArn
+  RuntimeVersion:
+    Description: Version of the plane runtime (updates reset session storage)
+    Value: !GetAtt UserRuntime.AgentRuntimeVersion
+  AccessRoleArn:
+    Description: Read-only role of the owner's CLI for its checkpoint objects
+    Value: !GetAtt AccessRole.Arn
+  ExecutionRoleArn:
+    Description: Execution role of the plane runtime
+    Value: !GetAtt ExecutionRole.Arn
+  OwnerPrefix:
+    Description: Owner segment of this plane's storage
+    Value: !Sub 'o.${OwnerKey}'

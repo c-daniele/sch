@@ -35,6 +35,9 @@ class DestroyPlanTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.cfg = Cfg(self._tmp.name)
+        planes = patch.object(awsteardown, "plane_stacks", return_value=[])
+        planes.start()
+        self.addCleanup(planes.stop)
 
     def test_refuses_when_the_account_cannot_be_resolved(self):
         with patch.object(awsteardown, "account_id", return_value=""):
@@ -139,7 +142,8 @@ class DestroyExecutionTests(unittest.TestCase):
             "bucket_exists": lambda name, region: False,
             "delete_stack": lambda name, region, retain_resources=(): "deleted",
             "purge_repository_images": lambda name, region: 0,
-            "delete_bucket": lambda name, region: "deleted",
+            "delete_bucket": lambda name, region, drop_policy=False: "deleted",
+            "plane_stacks": lambda project, env, region: [],
             "deregister_telegram_webhook": lambda token: "skipped (no bot token available)",
             "read_setenv_token": lambda root: "",
         }
@@ -187,6 +191,95 @@ class DestroyExecutionTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [(), ("ImageRebuildProject",)])
         self.assertIn("retained ImageRebuildProject", out)
+
+
+class IsolationPlaneTeardownTests(unittest.TestCase):
+    """per-principal-isolation R48: planes go before the runtime stack, and
+    the checkpoint purge covers both layouts."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = Cfg(self._tmp.name)
+
+    def test_plane_stacks_are_deleted_before_the_runtime_stack(self):
+        order = []
+        drops = []
+
+        def delete_stack(name, region, retain_resources=()):
+            order.append(name)
+            return "deleted"
+
+        def delete_bucket(name, region, drop_policy=False):
+            order.append(name)
+            drops.append((name, drop_policy))
+            return "deleted"
+
+        planes = ["sch-dev-plane-0123456789abcdef", "sch-dev-plane-fedcba9876543210"]
+        with patch.object(awsteardown, "account_id", return_value="111122223333"), \
+             patch.object(awsteardown, "plane_stacks", return_value=planes), \
+             patch.object(awsteardown, "stack_exists", side_effect=lambda n, r: n.endswith("-runtime")), \
+             patch.object(awsteardown, "repository_exists", return_value=False), \
+             patch.object(awsteardown, "bucket_exists",
+                          side_effect=lambda n, r: n.startswith("sch-dev-checkpoints-")), \
+             patch.object(awsteardown, "delete_stack", side_effect=delete_stack), \
+             patch.object(awsteardown, "delete_bucket", side_effect=delete_bucket), \
+             patch.object(awsteardown, "deregister_telegram_webhook", return_value="skipped"), \
+             patch.object(awsteardown, "read_setenv_token", return_value=""):
+            rc, out, _ = run_destroy(self.cfg, ["--yes"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(order[:3], planes + ["sch-dev-runtime"])
+        self.assertIn("stack (plane)", out)
+        self.assertEqual(drops, [("sch-dev-checkpoints-111122223333", True)])
+
+    def test_a_plane_listing_failure_stops_before_anything_is_deleted(self):
+        with patch.object(awsteardown, "account_id", return_value="111122223333"), \
+             patch.object(awsteardown, "plane_stacks",
+                          side_effect=awsteardown.TeardownError("could not list the plane stacks: AccessDenied")), \
+             patch.object(awsteardown, "delete_stack") as del_stack:
+            rc, _, err = run_destroy(self.cfg, ["--yes"])
+        self.assertEqual(rc, 1)
+        self.assertIn("AccessDenied", err)
+        del_stack.assert_not_called()
+
+    def test_plane_discovery_needs_both_the_prefix_and_the_deployment_tag(self):
+        calls = []
+
+        def fake_aws(args, timeout=None):
+            calls.append(args)
+            if args[:2] == ["cloudformation", "list-stacks"]:
+                return 0, json.dumps([
+                    "sch-dev-plane-0123456789abcdef",
+                    "sch-dev-plane-1111111111111111",
+                ]), ""
+            name = args[args.index("--stack-name") + 1]
+            if name.endswith("0123456789abcdef"):
+                return 0, json.dumps([{"Key": "sch:deployment", "Value": "sch-dev"}]), ""
+            return 0, json.dumps([{"Key": "sch:deployment", "Value": "other-dev"}]), ""
+
+        with patch.object(awsteardown, "_aws", side_effect=fake_aws):
+            planes = awsteardown.plane_stacks("sch", "dev", "eu-west-1")
+        self.assertEqual(planes, ["sch-dev-plane-0123456789abcdef"])
+        query = calls[0][calls[0].index("--query") + 1]
+        self.assertIn("starts_with(StackName, 'sch-dev-plane-')", query)
+        self.assertIn("DELETE_COMPLETE", query)
+
+    def test_purge_drops_the_bucket_policy_first_when_asked(self):
+        calls = []
+
+        def fake_aws(args, timeout=None):
+            calls.append(args[:2])
+            if args[:2] == ["s3api", "list-object-versions"]:
+                return 0, "[]", ""
+            return 0, "", ""
+
+        with patch.object(awsteardown, "_aws", side_effect=fake_aws):
+            outcome = awsteardown.delete_bucket("b", "eu-west-1", drop_policy=True)
+        self.assertEqual(outcome, "deleted")
+        self.assertEqual(calls[1], ["s3api", "delete-bucket-policy"])
+        self.assertLess(calls.index(["s3api", "delete-bucket-policy"]),
+                        calls.index(["s3api", "list-object-versions"]))
 
 
 class StackFailureReasonTests(unittest.TestCase):

@@ -61,8 +61,10 @@ MUST continue unchanged, with the problem tracked in the logs.
 prompts reaches a new tool-approval wait, the notification in the topic SHALL
 include an inline keyboard with Approve and Deny actions unambiguously tied to that
 specific request. The received decision SHALL unblock the harness wait with the
-corresponding outcome for claude (`PreToolUse` hook) and opencode
-(`permission.asked` event and reply via the API of the native request); the request
+corresponding outcome for claude (`PreToolUse` hook) and opencode (the OpenCode 2
+plugin `evaluate` permission hook: the plugin holds an `ask` evaluation while the
+remote decision is pending and resolves it to `allow`/`deny`; on timeout the
+evaluation stays `ask` and the native prompt is published unchanged); the request
 message SHALL be updated with the outcome (`editMessageText`).
 
 **R6.** Before publishing the request the system MUST re-verify that no client lease

@@ -7,6 +7,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 
 from .. import deps, harness as harness_mod
 from .. import repo, runtime, workspace
@@ -87,6 +88,17 @@ def _stop_bridge(child):
 def _forward_stderr(stream):
     for line in stream:
         sys.stderr.write(line)
+
+
+def _with_basic_auth(url, user, password):
+    """``http://user:password@host:port`` form of a local bridge URL (RFC 3986
+    userinfo, percent-encoded). Unchanged when there is no password."""
+    if not password:
+        return url
+    scheme, rest = url.split("://", 1)
+    return "{}://{}:{}@{}".format(
+        scheme, quote(user, safe=""), quote(password, safe=""), rest
+    )
 
 
 def _start_bridge(argv):
@@ -203,6 +215,7 @@ def cmd_web(cfg, args):
         die(storage_error)
 
     remote_port = ""
+    remote_password = ""
     serve_status = ""
     attempt = 0
     while attempt < _SERVE_ENSURE_ATTEMPTS:
@@ -221,6 +234,9 @@ def cmd_web(cfg, args):
                 die("runtime image predates web access; deploy an updated runtime image")
             if serve_status == "ok":
                 remote_port = str(result.get("port", "") or "")
+                remote_password = str(
+                    ((result.get("auth") or {}).get("password") or "")
+                )
                 if remote_port:
                     break
         else:
@@ -252,6 +268,11 @@ def cmd_web(cfg, args):
         remote_port,
     ]
     child, url = _start_bridge(bridge_argv)
+    # OpenCode 2 `serve` requires basic auth (user "opencode"): the printed URL
+    # carries the credentials so the browser and dashboard launchers open the
+    # UI without a prompt. The bridge listens on 127.0.0.1 only and the
+    # password is per-microVM, minted by the shim (see serve-ensure).
+    url = _with_basic_auth(url, "opencode", remote_password)
     active = False
     try:
         runtime.invoke_best_effort(

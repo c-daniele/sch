@@ -78,8 +78,34 @@ class ServeWebTests(unittest.TestCase):
                 "supervisor_started": False,
             }
         )
+        # The pinned serve password lives on local disk next to opencode.db;
+        # point it at a per-test file so the real mint/reuse path runs.
+        self._pw_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._pw_tmp.cleanup)
+        self._saved_pw_file = main.OPENCODE_SERVE_PASSWORD_FILE
+        main.OPENCODE_SERVE_PASSWORD_FILE = Path(self._pw_tmp.name) / "serve.password"
+        self.addCleanup(setattr, main, "OPENCODE_SERVE_PASSWORD_FILE", self._saved_pw_file)
 
-    def test_supervisor_starts_web_on_localhost_without_output_pipes(self):
+    def test_opencode_version_strips_the_2x_prefix(self):
+        # `opencode --version` prints `opencode v2.0.18` on 2.x (bare `1.18.31`
+        # on 1.x); the shim reports the bare version for pin/parity checks.
+        self.assertEqual(main._normalize_opencode_version("opencode v2.0.18\n"), "2.0.18")
+        self.assertEqual(main._normalize_opencode_version("1.18.31"), "1.18.31")
+        self.assertEqual(main._normalize_opencode_version("opencode v2.1.0-beta.3"), "2.1.0-beta.3")
+        self.assertEqual(main._normalize_opencode_version("unknown"), "unknown")
+
+    def test_serve_password_is_minted_once_and_persisted_0600(self):
+        first = main._opencode_serve_password()
+        second = main._opencode_serve_password()
+        self.assertEqual(first, second)
+        self.assertGreaterEqual(len(first), 32)
+        self.assertEqual(main.OPENCODE_SERVE_PASSWORD_FILE.read_text().strip(), first)
+        self.assertEqual(main.OPENCODE_SERVE_PASSWORD_FILE.stat().st_mode & 0o777, 0o600)
+        # Deleting the file mints a new one (operator rotation path).
+        main.OPENCODE_SERVE_PASSWORD_FILE.unlink()
+        self.assertNotEqual(main._opencode_serve_password(), first)
+
+    def test_supervisor_starts_serve_on_localhost_with_pinned_password(self):
         process = Mock(pid=1234, returncode=None)
         process.poll.return_value = None
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,7 +126,7 @@ class ServeWebTests(unittest.TestCase):
         popen.assert_called_once_with(
             [
                 "/usr/local/bin/opencode",
-                "web",
+                "serve",
                 "--hostname",
                 "127.0.0.1",
                 "--port",
@@ -114,7 +140,9 @@ class ServeWebTests(unittest.TestCase):
             start_new_session=True,
             env=unittest.mock.ANY,
         )
-        self.assertEqual(popen.call_args.kwargs["env"]["SCH_HARNESS"], "opencode")
+        env = popen.call_args.kwargs["env"]
+        self.assertEqual(env["SCH_HARNESS"], "opencode")
+        self.assertEqual(env["OPENCODE_SERVER_PASSWORD"], main._opencode_serve_password())
         self.assertIs(main._SERVE_STATE["proc"], process)
         self.assertEqual(main._SERVE_STATE["port"], main.OPENCODE_SERVE_PORT)
 
@@ -149,6 +177,10 @@ class ServeWebTests(unittest.TestCase):
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["capabilities"], {"web": True})
         self.assertEqual(response["port"], main.OPENCODE_SERVE_PORT)
+        # OpenCode 2: the client needs the pinned basic-auth credentials.
+        self.assertEqual(response["auth"]["scheme"], "basic")
+        self.assertEqual(response["auth"]["user"], "opencode")
+        self.assertEqual(response["auth"]["password"], main._opencode_serve_password())
 
     def test_starting_response_also_advertises_web_capability(self):
         with patch.object(main, "_ensure_serve_supervisor_started"), patch.object(

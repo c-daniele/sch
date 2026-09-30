@@ -96,15 +96,27 @@ class HeadlessArgvTests(unittest.TestCase):
         self.assertNotIn("--agent", argv)
         self.assertIn("--dangerously-skip-permissions", argv)
 
-    def test_opencode_argv_is_unchanged(self):
-        with patch.object(main.shutil, "which", return_value="/bin/opencode"):
+    def test_opencode_argv_shape(self):
+        # OpenCode 2 (TASK-7): --standalone (private embedded server), --agent
+        # only when the seeded agent file exists, `--` before the prompt so a
+        # boolean-literal prompt is never swallowed by `--auto`.
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"), patch.object(
+            main, "_opencode_agent_available", return_value=True,
+        ):
             self.assertEqual(
                 main._build_headless_argv("opencode", "oc-session", "prompt"),
                 [
-                    "/bin/opencode", "run", "--session", "oc-session",
-                    "--agent", "remote-auto", "--auto", "prompt",
+                    "/bin/opencode", "run", "--standalone", "--session", "oc-session",
+                    "--agent", "remote-auto", "--auto", "--", "prompt",
                 ],
             )
+
+    def test_opencode_boolean_literal_prompt_is_guarded(self):
+        with patch.object(main.shutil, "which", return_value="/bin/opencode"), patch.object(
+            main, "_opencode_agent_available", return_value=False,
+        ):
+            argv = main._build_headless_argv("opencode", None, "y")
+        self.assertEqual(argv, ["/bin/opencode", "run", "--standalone", "--auto", "--", "y"])
 
     def test_headless_environment_sets_origin_and_strips_telegram_secrets(self):
         secrets = {

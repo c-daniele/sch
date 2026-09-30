@@ -98,6 +98,20 @@ Parameters:
     AllowedValues:
       - 'true'
       - 'false'
+  IsolationEnabled:
+    Type: String
+    Description: >-
+      Per-principal isolation (docs/specs/security/per-principal-isolation.md).
+      Set to 'true' by deploy.sh when ISOLATED_PRINCIPALS is non-empty; only
+      effective together with EnableWorkspaceRegistry='true'. Adds the
+      checkpoint bucket policy, locks the shared runtime and lets the
+      registry read the plane-mapping parameters. The planes themselves are
+      separate stacks (infra/user_plane.yaml). Default 'false': none of this
+      exists.
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
   EnableSessionImageRebuild:
     Type: String
     Description: >-
@@ -353,6 +367,11 @@ Conditions:
   # new runtime version running the new image).
   ImageDigestPinned: !Not [!Equals [!Ref ImageDigest, '']]
   WorkspaceRegistryEnabled: !Equals [!Ref EnableWorkspaceRegistry, 'true']
+  # per-principal-isolation R1/R2: isolation needs the registry (deploy.sh
+  # refuses the switch without it; the condition makes a direct deploy inert).
+  IsolationOn: !And
+    - !Condition WorkspaceRegistryEnabled
+    - !Equals [!Ref IsolationEnabled, 'true']
   SessionImageRebuildEnabled: !Equals [!Ref EnableSessionImageRebuild, 'true']
   TelegramConfigured: !And
     - !Not [!Equals [!Ref TelegramBotToken, '']]
@@ -527,16 +546,33 @@ Resources:
                 Resource:
                   - !GetAtt CheckpointBucket.Arn
                   - !Sub '${CheckpointBucket.Arn}/*'
+              # per-principal-isolation R39: stop sessions on this
+              # deployment's runtimes only (shared and plane runtimes are all
+              # named <project>_<env>_*; the wildcard covers their endpoints).
               - Effect: Allow
                 Action:
                   - bedrock-agentcore:StopRuntimeSession
-                Resource: '*'
+                Resource: !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/${ProjectName}_${Environment}_*'
+              # R39: read-only lookup of the plane-mapping parameters written
+              # by the plane stacks. Never PutParameter: a request-time role
+              # must not be able to redirect a user to another runtime.
+              - !If
+                - IsolationOn
+                - Sid: ReadPlaneMappings
+                  Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${Environment}/planes/*'
+                - !Ref AWS::NoValue
+              # Its own log group only (/aws/lambda/<function name>).
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-workspace-registry'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-${Environment}-workspace-registry:*'
 
   WorkspaceRegistryFunction:
     Type: AWS::Lambda::Function
@@ -562,6 +598,13 @@ Resources:
           # trap rather than a visible bug.
           DEFAULT_HARNESS: opencode
           DEFAULT_STORAGE: s3
+          # per-principal-isolation R36/R39: absent with isolation off, so the
+          # registry keeps today's owner derivation (R9).
+          ISOLATION_ENABLED: !If [IsolationOn, 'true', !Ref AWS::NoValue]
+          PLANE_PARAMETER_PREFIX: !If
+            - IsolationOn
+            - !Sub '/${ProjectName}/${Environment}/planes/'
+            - !Ref AWS::NoValue
       Code:
         S3Bucket: !Ref CheckpointBucket
         S3Key: !Ref WorkspaceRegistryPackageKey
@@ -988,11 +1031,17 @@ Resources:
   TaskWatchdogSchedulePermission:
     Type: AWS::Lambda::Permission
     Condition: TaskWatchdogEnabled
+    # The rule has an explicit Name, so its ARN is built here instead of
+    # !GetAtt TaskWatchdogSchedule.Arn: on rules created by the legacy
+    # AWS::Events::Rule handler (physical ID = name) the current handler fails
+    # the attribute lookup with "Provided Arn is not in correct format"
+    # (seen 2026-09-30 on a stack update).
+    DependsOn: TaskWatchdogSchedule
     Properties:
       Action: lambda:InvokeFunction
       FunctionName: !Ref TaskWatchdogFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt TaskWatchdogSchedule.Arn
+      SourceArn: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${ProjectName}-${Environment}-task-watchdog-schedule'
 
   AgentRuntimeRole:
     Type: AWS::IAM::Role
@@ -1027,186 +1076,200 @@ Resources:
                 aws:SourceAccount: !Ref AWS::AccountId
               ArnLike:
                 aws:SourceArn: !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*'
-      Policies:
-        - PolicyName: !Sub '${ProjectName}-${Environment}-agentcore-policy'
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              # --- Pull the runtime image from ECR ---
-              - Sid: EcrAuth
-                Effect: Allow
-                Action:
-                  - ecr:GetAuthorizationToken
-                Resource: '*'
-              - Sid: EcrPull
-                Effect: Allow
-                Action:
-                  - ecr:BatchGetImage
-                  - ecr:GetDownloadUrlForLayer
-                Resource:
-                  - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-${Environment}'
-              # --- CloudWatch logs (AgentCore runtime log groups) ---
-              - Sid: LogsCreate
-                Effect: Allow
-                Action:
-                  - logs:DescribeLogStreams
-                  - logs:CreateLogGroup
-                Resource:
-                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*'
-              - Sid: LogsDescribe
-                Effect: Allow
-                Action:
-                  - logs:DescribeLogGroups
-                Resource:
-                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
-              - Sid: LogsWrite
-                Effect: Allow
-                Action:
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource:
-                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*'
-              # --- Observability (AgentCore emits metrics in this namespace) ---
-              - Sid: CloudWatchMetrics
-                Effect: Allow
-                Action: cloudwatch:PutMetricData
-                Resource: '*'
-                Condition:
-                  StringEquals:
-                    cloudwatch:namespace: bedrock-agentcore
-              # --- Bedrock model invocation. Runtime capability tuning
-              #     (spec R6/R7): three exclusive shapes, selected with
-              #     Fn::If so the rendered policy is byte-identical to the
-              #     pre-tuning one at defaults.
-              #     (a) Broad grant (access on, allow-list empty): all
-              #         inference profiles and foundation models, in any
-              #         region — cross-region profiles such as eu.*/us.*/
-              #         global.* route to underlying foundation-model ARNs
-              #         in destination regions, so granting both resource
-              #         types with a region wildcard avoids per-model/
-              #         per-region IAM maintenance as models are added.
-              #     (b) Allow-listed (access on, allow-list set): each
-              #         comma-separated entry is inserted verbatim into
-              #         BOTH ARN forms — entries may carry IAM wildcards
-              #         ('*anthropic.claude-sonnet*' = every Sonnet version,
-              #         every regional profile prefix, both planes). A
-              #         misspelled entry silently matches nothing; IAM
-              #         denies at runtime (spec R12). MainInferenceProfileId/
-              #         SmallInferenceProfileId remain informational defaults
-              #         (docs/mcp-and-bedrock.md, seeded OpenCode config) but never scope
-              #         these grants.
-              #     (c) Access off: no classic-plane statement at all.
-              - !If
-                - RuntimeBedrockBroadGrant
-                - Sid: BedrockInferenceProfiles
-                  Effect: Allow
-                  Action:
-                    - bedrock:InvokeModel
-                    - bedrock:InvokeModelWithResponseStream
-                  Resource:
-                    - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
-                    - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:application-inference-profile/*'
-                    - 'arn:aws:bedrock:*::foundation-model/*'
-                - !Ref AWS::NoValue
-              - !If
-                - RuntimeBedrockAllowlistGrant
-                - Sid: BedrockInferenceProfilesAllowlisted
-                  Effect: Allow
-                  Action:
-                    - bedrock:InvokeModel
-                    - bedrock:InvokeModelWithResponseStream
-                  # Per-entry prefixing with Fn::Join (per-entry ARN prefix must
-                  # be a literal — Join rejects intrinsic delimiters) forces a
-                  # wildcarded ACCOUNT segment on the inference-profile form;
-                  # harmless: Bedrock model invocation cannot cross accounts.
-                  # The entries interpolate into the prefix-bearing string per
-                  # form, then Fn::Split cuts it back into individual ARNs.
-                  Resource: !Split
-                    - ','
-                    - !Join
-                      - ','
-                      - - !Join
-                          - ''
-                          - - 'arn:aws:bedrock:*:*:inference-profile/'
-                            - !Join
-                              - ',arn:aws:bedrock:*:*:inference-profile/'
-                              - !Split [',', !Ref RuntimeBedrockModelAllowlist]
+
+  # per-principal-isolation R18: the base execution policy is a customer
+  # managed policy so the shared role and every plane execution role
+  # (infra/user_plane.yaml) attach the SAME document, defined only here.
+  # Same statements as the former inline policy; a managed policy holds at
+  # most 6,144 characters (residual risk X9; deploy.sh checks the Bedrock
+  # allow-list and the escape hatch against it before deploying).
+  AgentRuntimeBasePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-agentcore-policy'
+      Description: !Sub 'SCH base execution policy shared by the ${ProjectName}/${Environment} runtime roles'
+      Roles:
+        - !Ref AgentRuntimeRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # --- Pull the runtime image from ECR ---
+          - Sid: EcrAuth
+            Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+            Resource: '*'
+          - Sid: EcrPull
+            Effect: Allow
+            Action:
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Resource:
+              - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-${Environment}'
+          # --- CloudWatch logs (AgentCore runtime log groups) ---
+          - Sid: LogsCreate
+            Effect: Allow
+            Action:
+              - logs:DescribeLogStreams
+              - logs:CreateLogGroup
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*'
+          - Sid: LogsDescribe
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+          - Sid: LogsWrite
+            Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*'
+          # --- Observability (AgentCore emits metrics in this namespace) ---
+          - Sid: CloudWatchMetrics
+            Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: '*'
+            Condition:
+              StringEquals:
+                cloudwatch:namespace: bedrock-agentcore
+          # --- Bedrock model invocation. Runtime capability tuning
+          #     (spec R6/R7): three exclusive shapes, selected with
+          #     Fn::If so the rendered policy is byte-identical to the
+          #     pre-tuning one at defaults.
+          #     (a) Broad grant (access on, allow-list empty): all
+          #         inference profiles and foundation models, in any
+          #         region — cross-region profiles such as eu.*/us.*/
+          #         global.* route to underlying foundation-model ARNs
+          #         in destination regions, so granting both resource
+          #         types with a region wildcard avoids per-model/
+          #         per-region IAM maintenance as models are added.
+          #     (b) Allow-listed (access on, allow-list set): each
+          #         comma-separated entry is inserted verbatim into
+          #         BOTH ARN forms — entries may carry IAM wildcards
+          #         ('*anthropic.claude-sonnet*' = every Sonnet version,
+          #         every regional profile prefix, both planes). A
+          #         misspelled entry silently matches nothing; IAM
+          #         denies at runtime (spec R12). MainInferenceProfileId/
+          #         SmallInferenceProfileId remain informational defaults
+          #         (docs/mcp-and-bedrock.md, seeded OpenCode config) but never scope
+          #         these grants.
+          #     (c) Access off: no classic-plane statement at all.
+          - !If
+            - RuntimeBedrockBroadGrant
+            - Sid: BedrockInferenceProfiles
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource:
+                - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
+                - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:application-inference-profile/*'
+                - 'arn:aws:bedrock:*::foundation-model/*'
+            - !Ref AWS::NoValue
+          - !If
+            - RuntimeBedrockAllowlistGrant
+            - Sid: BedrockInferenceProfilesAllowlisted
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              # Per-entry prefixing with Fn::Join (per-entry ARN prefix must
+              # be a literal — Join rejects intrinsic delimiters) forces a
+              # wildcarded ACCOUNT segment on the inference-profile form;
+              # harmless: Bedrock model invocation cannot cross accounts.
+              # The entries interpolate into the prefix-bearing string per
+              # form, then Fn::Split cuts it back into individual ARNs.
+              Resource: !Split
+                - ','
+                - !Join
+                  - ','
+                  - - !Join
+                      - ''
+                      - - 'arn:aws:bedrock:*:*:inference-profile/'
                         - !Join
-                          - ''
-                          - - 'arn:aws:bedrock:*::foundation-model/'
-                            - !Join
-                              - ',arn:aws:bedrock:*::foundation-model/'
-                              - !Split [',', !Ref RuntimeBedrockModelAllowlist]
-                - !Ref AWS::NoValue
-              # --- Bedrock "Mantle" OpenAI-compatible inference plane
-              #     (bedrock-mantle.<region>.api.aws): REQUIRED for OpenAI-family
-              #     models (e.g. GPT-5.5) selected in OpenCode. These models are
-              #     NOT served by the classic bedrock-runtime (InvokeModel/
-              #     InvokeModelWithResponseStream) plane above — they route
-              #     through a Mantle "project" resource authorized by the
-              #     distinct bedrock-mantle:* action namespace. Without this,
-              #     GPT-5.5 fails with AccessDenied on
-              #     bedrock-mantle:CreateInference (project/default) while
-              #     Claude/etc. on the classic plane keep working. Scoped to the
-              #     default project in the deploy region (least privilege).
-              #     Runtime capability tuning (spec R7/R8): granted only when
-              #     RuntimeBedrockAccess='true' AND (allow-list empty OR it
-              #     contains an OpenAI-family entry — condition
-              #     RuntimeBedrockMantleGrant; the marker heuristic lives in
-              #     deploy.sh, see the Conditions section). With access 'false'
-              #     this statement is absent whatever the allow-list says.
-              - !If
-                - RuntimeBedrockMantleGrant
-                - Sid: BedrockMantleInference
-                  Effect: Allow
-                  Action:
-                    - bedrock-mantle:CreateInference
-                    - bedrock-mantle:GetInference
-                    - bedrock-mantle:CancelInference
-                    - bedrock-mantle:DeleteInference
-                    - bedrock-mantle:ListModels
-                    - bedrock-mantle:GetModel
-                  Resource:
-                    - !Sub 'arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/default'
-                - !Ref AWS::NoValue
-              # --- L2 checkpoint durability (design D6): write/read scoped to
-              #     the checkpoints/* prefix of the dedicated bucket only —
-              #     the single exception to the "no mutation" principle
-              #     (proposal), accepted because it is the agent's own backup
-              #     space. No s3:DeleteObject: retention is delegated to the
-              #     bucket's lifecycle policy so neither a compromised agent
-              #     nor an errant aws-api command can destroy checkpoints
-              #     (versioning preserves prior overwrites regardless).
-              - Sid: CheckpointBucketReadWrite
-                Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:GetObject
-                  - s3:AbortMultipartUpload
-                  - s3:PutObjectTagging
-                Resource:
-                  - !Sub '${CheckpointBucket.Arn}/checkpoints/*'
-                  - !Sub '${CheckpointBucket.Arn}/checkpoint-generations/*'
-                  - !Sub '${CheckpointBucket.Arn}/workspace-writers/*'
-              - Sid: CheckpointBucketList
-                Effect: Allow
-                Action:
-                  - s3:ListBucket
-                Resource:
-                  - !GetAtt CheckpointBucket.Arn
-                Condition:
-                  StringLike:
-                    s3:prefix:
-                      - 'checkpoints/*'
-                      - 'checkpoint-generations/*'
-                      - 'workspace-writers/*'
+                          - ',arn:aws:bedrock:*:*:inference-profile/'
+                          - !Split [',', !Ref RuntimeBedrockModelAllowlist]
+                    - !Join
+                      - ''
+                      - - 'arn:aws:bedrock:*::foundation-model/'
+                        - !Join
+                          - ',arn:aws:bedrock:*::foundation-model/'
+                          - !Split [',', !Ref RuntimeBedrockModelAllowlist]
+            - !Ref AWS::NoValue
+          # --- Bedrock "Mantle" OpenAI-compatible inference plane
+          #     (bedrock-mantle.<region>.api.aws): REQUIRED for OpenAI-family
+          #     models (e.g. GPT-5.5) selected in OpenCode. These models are
+          #     NOT served by the classic bedrock-runtime (InvokeModel/
+          #     InvokeModelWithResponseStream) plane above — they route
+          #     through a Mantle "project" resource authorized by the
+          #     distinct bedrock-mantle:* action namespace. Without this,
+          #     GPT-5.5 fails with AccessDenied on
+          #     bedrock-mantle:CreateInference (project/default) while
+          #     Claude/etc. on the classic plane keep working. Scoped to the
+          #     default project in the deploy region (least privilege).
+          #     Runtime capability tuning (spec R7/R8): granted only when
+          #     RuntimeBedrockAccess='true' AND (allow-list empty OR it
+          #     contains an OpenAI-family entry — condition
+          #     RuntimeBedrockMantleGrant; the marker heuristic lives in
+          #     deploy.sh, see the Conditions section). With access 'false'
+          #     this statement is absent whatever the allow-list says.
+          - !If
+            - RuntimeBedrockMantleGrant
+            - Sid: BedrockMantleInference
+              Effect: Allow
+              Action:
+                - bedrock-mantle:CreateInference
+                - bedrock-mantle:GetInference
+                - bedrock-mantle:CancelInference
+                - bedrock-mantle:DeleteInference
+                - bedrock-mantle:ListModels
+                - bedrock-mantle:GetModel
+              Resource:
+                - !Sub 'arn:aws:bedrock-mantle:${AWS::Region}:${AWS::AccountId}:project/default'
+            - !Ref AWS::NoValue
+          # --- L2 checkpoint durability (design D6): write/read scoped to
+          #     the checkpoints/* prefix of the dedicated bucket only —
+          #     the single exception to the "no mutation" principle
+          #     (proposal), accepted because it is the agent's own backup
+          #     space. No s3:DeleteObject: retention is delegated to the
+          #     bucket's lifecycle policy so neither a compromised agent
+          #     nor an errant aws-api command can destroy checkpoints
+          #     (versioning preserves prior overwrites regardless).
+          - Sid: CheckpointBucketReadWrite
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:AbortMultipartUpload
+              - s3:PutObjectTagging
+            Resource:
+              - !Sub '${CheckpointBucket.Arn}/checkpoints/*'
+              - !Sub '${CheckpointBucket.Arn}/checkpoint-generations/*'
+              - !Sub '${CheckpointBucket.Arn}/workspace-writers/*'
+          - Sid: CheckpointBucketList
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !GetAtt CheckpointBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - 'checkpoints/*'
+                  - 'checkpoint-generations/*'
+                  - 'workspace-writers/*'
 
   # =========================================================================
   # Runtime capability tuning (docs/specs/security/runtime-capability-tuning.md)
   # -------------------------------------------------------------------------
-  # One dedicated conditional policy per enabled capability (spec R3), on the
-  # same pattern as the Telegram/image-rebuild session policies: with the
-  # capability off the resource does not exist and the role is unchanged.
+  # One dedicated conditional customer managed policy per enabled capability
+  # (spec R3), shared with the plane execution roles (per-principal-isolation
+  # R18): with the capability off the resource does not exist and the role is
+  # unchanged. New logical IDs (…ManagedPolicy) because CloudFormation cannot
+  # change the type of an existing logical resource (AWS::IAM::Policy before).
   # Service API actions on Resource '*' (spec R4) — these services do not
   # support resource-level permissions. When RuntimeDataBucketArn is set,
   # every enabled capability policy additionally carries the async S3 legs
@@ -1214,11 +1277,11 @@ Resources:
   # and textract/ only. All action sets verified against the AWS service
   # authorization reference (2026-08-29).
   # =========================================================================
-  RuntimeTranscribeCapabilityPolicy:
-    Type: AWS::IAM::Policy
+  RuntimeTranscribeCapabilityManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
     Condition: RuntimeCapTranscribeOn
     Properties:
-      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-transcribe'
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-transcribe'
       Roles:
         - !Ref AgentRuntimeRole
       PolicyDocument:
@@ -1253,11 +1316,11 @@ Resources:
                 - !Sub '${RuntimeDataBucketArn}/textract/*'
             - !Ref AWS::NoValue
 
-  RuntimeTextractCapabilityPolicy:
-    Type: AWS::IAM::Policy
+  RuntimeTextractCapabilityManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
     Condition: RuntimeCapTextractOn
     Properties:
-      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-textract'
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-textract'
       Roles:
         - !Ref AgentRuntimeRole
       PolicyDocument:
@@ -1293,11 +1356,11 @@ Resources:
                 - !Sub '${RuntimeDataBucketArn}/textract/*'
             - !Ref AWS::NoValue
 
-  RuntimeRekognitionCapabilityPolicy:
-    Type: AWS::IAM::Policy
+  RuntimeRekognitionCapabilityManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
     Condition: RuntimeCapRekognitionOn
     Properties:
-      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-rekognition'
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-rekognition'
       Roles:
         - !Ref AgentRuntimeRole
       PolicyDocument:
@@ -1337,11 +1400,11 @@ Resources:
                 - !Sub '${RuntimeDataBucketArn}/textract/*'
             - !Ref AWS::NoValue
 
-  RuntimePollyCapabilityPolicy:
-    Type: AWS::IAM::Policy
+  RuntimePollyCapabilityManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
     Condition: RuntimeCapPollyOn
     Properties:
-      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-polly'
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-polly'
       Roles:
         - !Ref AgentRuntimeRole
       PolicyDocument:
@@ -1370,11 +1433,11 @@ Resources:
                 - !Sub '${RuntimeDataBucketArn}/textract/*'
             - !Ref AWS::NoValue
 
-  RuntimeComprehendCapabilityPolicy:
-    Type: AWS::IAM::Policy
+  RuntimeComprehendCapabilityManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
     Condition: RuntimeCapComprehendOn
     Properties:
-      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-comprehend'
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-runtime-cap-comprehend'
       Roles:
         - !Ref AgentRuntimeRole
       PolicyDocument:
@@ -1412,14 +1475,15 @@ Resources:
                 - !Sub '${RuntimeDataBucketArn}/textract/*'
             - !Ref AWS::NoValue
 
-  # Escape hatch (spec R10): ONE extra operator-owned policy, on top of all
+  # Escape hatch (spec R10): ONE extra operator-owned customer managed policy
+  # (shared with the plane roles, per-principal-isolation R18), on top of all
   # other tuning. CloudFormation validates the JSON syntax; no semantic
   # validation is performed — this is a trust decision made at deploy time.
-  RuntimeExtraPolicy:
-    Type: AWS::IAM::Policy
+  RuntimeExtraManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
     Condition: RuntimeExtraPolicySet
     Properties:
-      PolicyName: !Sub '${ProjectName}-${Environment}-runtime-extra-policy'
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-runtime-extra-policy'
       Roles:
         - !Ref AgentRuntimeRole
       PolicyDocument: !Ref RuntimeExtraPolicyJson
@@ -1595,14 +1659,15 @@ Resources:
           Value: CloudFormation
 
   # The three (and only three) extra capabilities the SESSION gets. Kept in a
-  # separate conditional policy instead of Fn::If inside the role's inline
-  # policy so that with the feature disabled the existing policy document is
-  # untouched and trivially diffable (design D6).
-  ImageRebuildSessionPolicy:
-    Type: AWS::IAM::Policy
+  # separate conditional policy instead of Fn::If inside the base policy so
+  # that with the feature disabled the existing policy document is untouched
+  # and trivially diffable (design D6). A customer managed policy, shared with
+  # the plane execution roles (per-principal-isolation R18, risk X5).
+  ImageRebuildSessionManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
     Condition: SessionImageRebuildEnabled
     Properties:
-      PolicyName: !Sub '${ProjectName}-${Environment}-image-rebuild-session-policy'
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-image-rebuild-session-policy'
       Roles:
         - !Ref AgentRuntimeRole
       PolicyDocument:
@@ -1734,6 +1799,157 @@ Resources:
         Project: !Ref ProjectName
         ManagedBy: CloudFormation
 
+  # =========================================================================
+  # Per-principal isolation (docs/specs/security/per-principal-isolation.md)
+  # -------------------------------------------------------------------------
+  # Everything below exists only with IsolationOn. The planes themselves
+  # (user runtime, locks, execution/access roles, boundary, mapping
+  # parameter) are one stack per principal (infra/user_plane.yaml); this
+  # stack holds what is shared and constant in the number of principals.
+  # =========================================================================
+
+  # R24: one constant bucket policy. <plane roles> = role/<p>-<e>-o-*; the
+  # owner segment of a plane role comes from its role tag sch-owner (plane
+  # trusts never allow sts:TagSession, R25, so no session tag overrides it).
+  # A plane role without the tag matches no NotResource entry and no prefix:
+  # denied (fail closed). Deleted with the stack (the bucket is retained), so
+  # `sch destroy` can purge the bucket after deleting this stack.
+  CheckpointBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: IsolationOn
+    Properties:
+      Bucket: !Ref CheckpointBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyOwnerTreesToOthers
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub '${CheckpointBucket.Arn}/checkpoints/o.*'
+              - !Sub '${CheckpointBucket.Arn}/checkpoint-generations/o.*'
+              - !Sub '${CheckpointBucket.Arn}/workspace-writers/o.*'
+              - !Sub '${CheckpointBucket.Arn}/builds/o.*'
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-o-*'
+                  - !GetAtt WorkspaceRegistryRole.Arn
+                  - !If [TaskWatchdogEnabled, !GetAtt TaskWatchdogRole.Arn, !Ref AWS::NoValue]
+                  - !If [SessionImageRebuildEnabled, !GetAtt ImageRebuildRole.Arn, !Ref AWS::NoValue]
+          - Sid: DenyForeignObjectsToPlaneRoles
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            NotResource:
+              - !GetAtt CheckpointBucket.Arn
+              - !Sub '${CheckpointBucket.Arn}/checkpoints/o.${!aws:PrincipalTag/sch-owner}/*'
+              - !Sub '${CheckpointBucket.Arn}/checkpoint-generations/o.${!aws:PrincipalTag/sch-owner}/*'
+              - !Sub '${CheckpointBucket.Arn}/workspace-writers/o.${!aws:PrincipalTag/sch-owner}/*'
+              - !Sub '${CheckpointBucket.Arn}/builds/o.${!aws:PrincipalTag/sch-owner}/*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-o-*'
+          # s3:ListBucketMultipartUploads does not support s3:prefix (Access
+          # Analyzer ERROR), hence only the two listing actions here.
+          - Sid: DenyForeignListingToPlaneRoles
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - s3:ListBucket
+              - s3:ListBucketVersions
+            Resource: !GetAtt CheckpointBucket.Arn
+            Condition:
+              ArnLike:
+                aws:PrincipalArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-o-*'
+              StringNotLike:
+                s3:prefix:
+                  - 'checkpoints/o.${aws:PrincipalTag/sch-owner}/*'
+                  - 'checkpoint-generations/o.${aws:PrincipalTag/sch-owner}/*'
+                  - 'workspace-writers/o.${aws:PrincipalTag/sch-owner}/*'
+                  - 'builds/o.${aws:PrincipalTag/sch-owner}/*'
+
+  # R17: with isolation on, nobody uses the shared runtime: every data-plane
+  # action is denied to everyone, StopRuntimeSession to everyone but the
+  # registry role. Deny-only, so no principal ARN has to exist. The runtime
+  # and its DEFAULT endpoint policies are both evaluated, hence two locks.
+  SharedRuntimeLock:
+    Type: AWS::BedrockAgentCore::ResourcePolicy
+    Condition: IsolationOn
+    Properties:
+      ResourceArn: !GetAtt AgentRuntime.AgentRuntimeArn
+      Policy: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "DenySharedRuntimeDataPlane",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": [
+                  "bedrock-agentcore:InvokeAgentRuntime",
+                  "bedrock-agentcore:InvokeAgentRuntimeForUser",
+                  "bedrock-agentcore:InvokeAgentRuntimeCommand",
+                  "bedrock-agentcore:InvokeAgentRuntimeCommandShell",
+                  "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                  "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStreamForUser",
+                  "bedrock-agentcore:GetAgentCard"
+                ],
+                "Resource": "${Target}"
+              },
+              {
+                "Sid": "DenySharedRuntimeStop",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": "bedrock-agentcore:StopRuntimeSession",
+                "Resource": "${Target}",
+                "Condition": {"ArnNotEquals": {"aws:PrincipalArn": "${RegistryRoleArn}"}}
+              }
+            ]
+          }
+        - Target: !GetAtt AgentRuntime.AgentRuntimeArn
+          RegistryRoleArn: !GetAtt WorkspaceRegistryRole.Arn
+
+  SharedRuntimeEndpointLock:
+    Type: AWS::BedrockAgentCore::ResourcePolicy
+    Condition: IsolationOn
+    Properties:
+      ResourceArn: !Sub '${AgentRuntime.AgentRuntimeArn}/runtime-endpoint/DEFAULT'
+      Policy: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "DenySharedRuntimeDataPlane",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": [
+                  "bedrock-agentcore:InvokeAgentRuntime",
+                  "bedrock-agentcore:InvokeAgentRuntimeForUser",
+                  "bedrock-agentcore:InvokeAgentRuntimeCommand",
+                  "bedrock-agentcore:InvokeAgentRuntimeCommandShell",
+                  "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                  "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStreamForUser",
+                  "bedrock-agentcore:GetAgentCard"
+                ],
+                "Resource": "${Target}"
+              },
+              {
+                "Sid": "DenySharedRuntimeStop",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": "bedrock-agentcore:StopRuntimeSession",
+                "Resource": "${Target}",
+                "Condition": {"ArnNotEquals": {"aws:PrincipalArn": "${RegistryRoleArn}"}}
+              }
+            ]
+          }
+        - Target: !Sub '${AgentRuntime.AgentRuntimeArn}/runtime-endpoint/DEFAULT'
+          RegistryRoleArn: !GetAtt WorkspaceRegistryRole.Arn
+
 Outputs:
   RuntimeArn:
     Description: ARN of the AgentCore Runtime
@@ -1799,3 +2015,25 @@ Outputs:
     Condition: TaskWatchdogEnabled
     Description: Lambda reconciling orphaned running task statuses (its log group is /aws/lambda/<name>)
     Value: !Ref TaskWatchdogFunction
+  # per-principal-isolation R18: the customer managed policies every plane
+  # execution role attaches, comma-separated, in a fixed order (base first).
+  # Empty strings instead of AWS::NoValue keep Fn::Join well-defined.
+  SharedRuntimePolicyArns:
+    Description: Customer managed policies shared by the runtime role and every plane execution role
+    Value: !Join
+      - ''
+      - - !Ref AgentRuntimeBasePolicy
+        - !If [RuntimeCapTranscribeOn, !Sub ',${RuntimeTranscribeCapabilityManagedPolicy}', '']
+        - !If [RuntimeCapTextractOn, !Sub ',${RuntimeTextractCapabilityManagedPolicy}', '']
+        - !If [RuntimeCapRekognitionOn, !Sub ',${RuntimeRekognitionCapabilityManagedPolicy}', '']
+        - !If [RuntimeCapPollyOn, !Sub ',${RuntimePollyCapabilityManagedPolicy}', '']
+        - !If [RuntimeCapComprehendOn, !Sub ',${RuntimeComprehendCapabilityManagedPolicy}', '']
+        - !If [RuntimeExtraPolicySet, !Sub ',${RuntimeExtraManagedPolicy}', '']
+        - !If [SessionImageRebuildEnabled, !Sub ',${ImageRebuildSessionManagedPolicy}', '']
+  WorkspaceRegistryRoleArn:
+    Condition: WorkspaceRegistryEnabled
+    Description: Registry Lambda role, the only principal allowed to stop sessions on a plane runtime
+    Value: !GetAtt WorkspaceRegistryRole.Arn
+  IsolationStatus:
+    Description: Whether per-principal isolation is on for this deployment
+    Value: !If [IsolationOn, 'true', 'false']

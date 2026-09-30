@@ -77,6 +77,15 @@ PROJECT="${SCH_IMAGE_REBUILD_PROJECT:-}"
 BUCKET="${SCH_CHECKPOINT_BUCKET:-}"
 [ -n "${BUCKET}" ] || die "SCH_CHECKPOINT_BUCKET is not set: cannot upload the build source"
 
+# Per-principal isolation (spec per-principal-isolation R33): a user runtime
+# carries its owner prefix in the environment, and its role may write build
+# sources only under builds/<owner prefix>/. A malformed value is a deployment
+# defect: fail before any AWS call rather than upload to a shared key.
+OWNER_PREFIX="${SCH_OWNER_PREFIX:-}"
+if [ -n "${OWNER_PREFIX}" ] && ! [[ "${OWNER_PREFIX}" =~ ^o\.[0-9a-f]{16}$ ]]; then
+    die "invalid SCH_OWNER_PREFIX in the runtime environment (expected o.<16 hex>)"
+fi
+
 command -v aws >/dev/null 2>&1 || die "the AWS CLI is not available in this image"
 command -v zip >/dev/null 2>&1 || die "'zip' is not available in this image"
 
@@ -109,7 +118,11 @@ except Exception:
 }
 
 SCOPE="$(scope)"
-SOURCE_KEY="builds/${SCOPE}/source.zip"
+if [ -n "${OWNER_PREFIX}" ]; then
+    SOURCE_KEY="builds/${OWNER_PREFIX}/${SCOPE}/source.zip"
+else
+    SOURCE_KEY="builds/${SCOPE}/source.zip"
+fi
 TMP_DIR="$(mktemp -d -t sch-build-image.XXXXXX)"
 ZIP_PATH="${TMP_DIR}/source.zip"
 

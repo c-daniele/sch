@@ -16,19 +16,20 @@ In scope:
 
 Out of scope:
 
+- Access control between principals. This spec separates names and prefixes; it is not a data-plane boundary: on the shared runtime, the execution role reads every prefix, and a principal that can invoke the runtime and learns a session ID can join it. The per-principal boundary is [per-principal-isolation](per-principal-isolation.md) (Proposed, TASK-20).
 - Registry API and CLI behavior (see [iam-workspace-registry](iam-workspace-registry.md))
 - Storage backend selection and operational roots (see [selectable-workspace-storage](selectable-workspace-storage.md))
 
 ## Requirements
 
 - **R1.** For registry-enabled commands, the client SHALL send the registry-provided owner-scoped workspace identity to the runtime in place of the user-visible logical workspace name. The identity SHALL be safe for runtime marker and checkpoint S3 key paths: alphanumeric or `-`/`_` only, starting alphanumeric, at most 128 characters. The client SHALL reject a registry response whose identity violates this pattern.
-- **R2.** The identity SHALL be deterministic per owner and logical workspace: the registry SHALL return the same identity whenever the same owner resolves the same logical workspace record, from any client machine. The implemented derivation is `ws-` + lowercased base32 of `sha256(ownerId + "\0" + logicalWorkspace)`, truncated to 40 characters, where `ownerId` is the hashed caller ARN defined in [iam-workspace-control-api](iam-workspace-control-api.md) (R2).
+- **R2.** The identity SHALL be deterministic per owner and logical workspace: the registry SHALL return the same identity whenever the same owner resolves the same logical workspace record, from any client machine. The implemented derivation is `ws-` + lowercased base32 of `sha256(ownerId + "\0" + logicalWorkspace)`, truncated to 40 characters, where `ownerId` is the hashed caller ARN defined in [iam-workspace-control-api](iam-workspace-control-api.md) (R2). With isolation on, `ownerId` is the hash of the bound identity instead ([per-principal-isolation](per-principal-isolation.md) R7).
 - **R3.** The system SHALL NOT automatically map a registry-created owner-scoped workspace identity to a legacy checkpoint prefix derived only from its logical workspace name. When an owner creates a registry-enabled workspace with the name of a legacy local workspace, the runtime SHALL use the owner-scoped checkpoint prefix and SHALL NOT restore the legacy prefix implicitly.
-- **R4.** Owner-scoped deletion SHALL purge and verify absent all SCH-controlled S3 versions under exactly the identity-derived prefixes `checkpoints/{identity}/`, `checkpoint-generations/{identity}/`, and `workspace-writers/{identity}.json` (deletion state machine: [iam-workspace-registry](iam-workspace-registry.md), R7–R8).
+- **R4.** Owner-scoped deletion SHALL purge and verify absent all SCH-controlled S3 versions under exactly the identity-derived prefixes `checkpoints/{identity}/`, `checkpoint-generations/{identity}/`, and `workspace-writers/{identity}.json` (deletion state machine: [iam-workspace-registry](iam-workspace-registry.md), R7–R8). With isolation on, each prefix carries the owner segment `o.<ownerKey>/` after its top-level folder: the runtime writes that layout and the registry purges it, together with the workspace's build sources `builds/o.<ownerKey>/{identity}/` ([per-principal-isolation](per-principal-isolation.md) R26, R38).
 
 ## Behavior
 
-- Two principals each create a workspace named `my-workspace`: their runtime markers and checkpoint object prefixes are distinct (`checkpoints/<identity-a>/...` vs `checkpoints/<identity-b>/...`), and neither sees the other's checkpoints, history, or writer claim.
+- Two principals each create a workspace named `my-workspace`: their runtime markers and checkpoint object prefixes are distinct (`checkpoints/<identity-a>/...` vs `checkpoints/<identity-b>/...`), and the SCH commands of one never read the other's checkpoints, history, or writer claim. The prefixes are not an access-control boundary (see Scope).
 - An owner resolving a previously created workspace from a different client machine (fresh local index) gets the same workspace identity as prior registry-enabled operations used.
 - Deleting a workspace removes only the S3 objects under that identity's three prefixes; the same logical name owned by another principal keeps its record, session, and prefixes unchanged.
 
@@ -40,6 +41,7 @@ Out of scope:
 
 ## Cross-references
 
+- [per-principal-isolation](per-principal-isolation.md) — the opt-in access-control boundary and the owner-segment layout
 - [iam-workspace-control-api](iam-workspace-control-api.md) — caller identity and owner-key hashing
 - [iam-workspace-registry](iam-workspace-registry.md) — resolution and deletion flows that carry the identity
 - [workspace-registry](workspace-registry.md) — implemented identity computation and purge

@@ -11,9 +11,25 @@ useDefault = true
 description = "Test fixtures and documented placeholders"
 paths = [
   '''cli/tests/test_userenv\.py''',
+  '''cli/tests/test_isolation_cli\.py''',
+  '''cli/tests/test_verify_support\.py''',
+  '''cli/tests/test_destroy\.py''',
   '''image/app/test_provider_api_keys\.py''',
   '''image/app/test_user_provider_keys\.py''',
   '''image/app/test_github_access\.py''',
+  '''image/app/test_memory_footprint\.py''',
+  '''image/app/test_owner_prefix\.py''',
+  '''image/app/test_repo_bootstrap\.py''',
+  '''image/app/test_sch_build_image\.py''',
+  '''infra/simulate_isolation\.py''',
+  '''infra/validate_isolation_policies\.py''',
+  '''infra/test_isolation_.*\.py''',
+  '''infra/test_workspace_registry_isolation\.py''',
+  '''infra/test_task_watchdog_handler\.py''',
+  '''infra/test_deploy_image_pin\.py''',
+  '''\.backlog/tasks/.*''',
+  '''\.backlog/docs/journal/.*''',
+  '''docs/history/.*''',
   '''tunnel/package-lock\.json''',
 ]
 regexes = [
@@ -26,4 +42,11 @@ regexes = [
   # Plumbing and secrecy assertions only; never real credentials.
   '''sk-verify-[A-Za-z0-9]+''',
   '''sk-or-v1-verify-[A-Za-z0-9]+''',
+  # Synthetic per-principal owner keys used by isolation tests and simulator.
+  # Sequential / repeated hex only; never real credentials.
+  '''0123456789abcdef''',
+  '''fedcba9876543210''',
+  '''1111111111111111''',
+  '''3f9c0e2a7b1d4c65''',
+  '''a04be91c22d7f310''',
 ]

@@ -17,7 +17,17 @@ ENVIRONMENT="${SCH_ENV:-dev}"
 STACK="${PROJECT}-${ENVIRONMENT}-runtime"
 REPOSITORY="${PROJECT}-${ENVIRONMENT}"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-ARN="$(aws cloudformation describe-stacks --stack-name "${STACK}" --region "${REGION}" --query "Stacks[0].Outputs[?OutputKey=='RuntimeArn'].OutputValue" --output text)"
+# Registry and isolation stacks (TASK-20.5): plane runtime instead of the
+# shared one; `sch` mirrors registry sessions into the local index read below.
+# shellcheck source=lib/verify-target.sh
+. "${SCRIPT_DIR}/lib/verify-target.sh"
+sch_target_init
+if sch_target_isolated; then
+    # Isolation on: the caller's plane runtime, never the shared one (R40).
+    ARN="$(sch_target_runtime_arn)"
+else
+    ARN="$(aws cloudformation describe-stacks --stack-name "${STACK}" --region "${REGION}" --query "Stacks[0].Outputs[?OutputKey=='RuntimeArn'].OutputValue" --output text)"
+fi
 SID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("runtimeSessionId", ""))' "${XDG_CONFIG_HOME:-$HOME/.config}/sch/workspaces/${WS}")"
 
 PASS=0
@@ -91,6 +101,23 @@ if printf '%s' "${s3_result}" | grep -q 'AccessDenied'; then
     ok "S3 writes outside builds/ and checkpoints/ are denied"
 else
     bad "out-of-scope S3 write was not denied"
+fi
+
+if sch_target_isolated; then
+    # per-principal-isolation R33/R24: build sources live under the owner
+    # segment, and another owner's segment is not writable from this plane.
+    owner_builds="$(remote 'aws s3 ls "s3://${SCH_CHECKPOINT_BUCKET}/builds/${SCH_OWNER_PREFIX}/" --recursive 2>&1 || true')"
+    if printf '%s' "${owner_builds}" | grep -q 'source.zip'; then
+        ok "build sources are uploaded under builds/<owner prefix>/"
+    else
+        bad "no build source found under builds/<owner prefix>/"
+    fi
+    foreign_build="$(remote 'aws s3api put-object --bucket "${SCH_CHECKPOINT_BUCKET}" --key builds/o.0000000000000000/verify/source.zip --body /mnt/workspace/repo/image/Dockerfile 2>&1 || true')"
+    if printf '%s' "${foreign_build}" | grep -q 'AccessDenied'; then
+        ok "writes into another owner's builds/ segment are denied"
+    else
+        bad "a write into another owner's builds/ segment was not denied"
+    fi
 fi
 
 echo

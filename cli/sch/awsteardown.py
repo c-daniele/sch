@@ -76,6 +76,59 @@ def repository_exists(name, region):
     return rc == 0
 
 
+def plane_stacks(project, env, region):
+    """The isolation plane stacks of one deployment, as a sorted name list.
+
+    Per-principal isolation (docs/specs/security/per-principal-isolation.md
+    R12, R48): a plane stack is named `<project>-<env>-plane-<owner key>` AND
+    carries the tag `sch:deployment=<project>-<env>`; both must match, so a
+    look-alike stack of another deployment is never touched. A listing
+    failure raises: deleting the runtime stack while planes still reference
+    its policies would leave them broken.
+    """
+    prefix = "{}-{}-plane-".format(project, env)
+    deployment = "{}-{}".format(project, env)
+    rc, out, err = _aws([
+        "cloudformation", "list-stacks", "--region", region, "--output", "json",
+        "--query",
+        "StackSummaries[?StackStatus!='DELETE_COMPLETE' && "
+        "starts_with(StackName, '{}')].StackName".format(prefix),
+    ])
+    if rc != 0:
+        raise TeardownError("could not list the plane stacks: {}".format(err or rc))
+    try:
+        names = json.loads(out) if out else []
+    except ValueError:
+        raise TeardownError("could not parse the stack list")
+    planes = []
+    for name in sorted(set(names or [])):
+        rc, out, _ = _aws([
+            "cloudformation", "describe-stacks", "--stack-name", name,
+            "--region", region, "--output", "json", "--query", "Stacks[0].Tags",
+        ])
+        if rc != 0:
+            continue
+        try:
+            tags = {t.get("Key"): t.get("Value") for t in (json.loads(out) or [])}
+        except (ValueError, AttributeError):
+            continue
+        if tags.get("sch:deployment") == deployment:
+            planes.append(name)
+    return planes
+
+
+def delete_bucket_policy(name, region):
+    """Best effort: drop a bucket policy before a purge.
+
+    With isolation on, the checkpoint bucket policy denies the owner trees to
+    every non-SCH principal, the teardown principal included. It normally
+    disappears with the runtime stack; this covers a stack deleted by hand or
+    a policy left behind.
+    """
+    rc, _, _ = _aws(["s3api", "delete-bucket-policy", "--bucket", name, "--region", region])
+    return rc == 0
+
+
 def stack_delete_failure_reason(name, region):
     """The resource and message behind a DELETE_FAILED, or "".
 
@@ -155,10 +208,16 @@ def purge_repository_images(name, region):
     return len(image_ids)
 
 
-def delete_bucket(name, region, max_rounds=100):
-    """Empty (all versions and delete markers) and delete a bucket."""
+def delete_bucket(name, region, max_rounds=100, drop_policy=False):
+    """Empty (all versions and delete markers) and delete a bucket.
+
+    Every version goes, so both checkpoint layouts (flat and owner-segmented
+    `o.<key>/` trees) are purged alike.
+    """
     if not bucket_exists(name, region):
         return "already absent"
+    if drop_policy:
+        delete_bucket_policy(name, region)
     for _ in range(max_rounds):
         rc, out, _ = _aws([
             "s3api", "list-object-versions", "--bucket", name, "--region", region,

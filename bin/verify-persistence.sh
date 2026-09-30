@@ -30,6 +30,11 @@ PHASE="${2:-full}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCH="${SCRIPT_DIR}/sch"
 SCH_REGION="${SCH_REGION:-eu-west-1}"
+# Registry and isolation stacks (TASK-20.5): plane runtime, registry session
+# and workspace identity. No-op on registry-off stacks.
+# shellcheck source=lib/verify-target.sh
+. "${SCRIPT_DIR}/lib/verify-target.sh"
+sch_target_init
 REQUESTED_STORAGE="${SCH_VERIFY_STORAGE:-s3}"
 STATE_FILE="${TMPDIR:-/tmp}/sch-verify-${WS}.state"
 
@@ -43,6 +48,8 @@ bad()  { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 # result in a remote shell, so the command is wrapped as sh -c "'...'" and must
 # not contain single quotes.
 runtime_arn() {
+    # Isolation on: the caller's plane runtime, never the shared one (R40).
+    if sch_target_isolated; then sch_target_runtime_arn; return; fi
     aws cloudformation describe-stacks \
         --stack-name "${SCH_PROJECT:-sch}-${SCH_ENV:-dev}-runtime" \
         --region "${SCH_REGION}" \
@@ -70,8 +77,8 @@ wait_ready() { # [storage-hint: fresh|resumed]
     # workspace (the invoke itself triggers provisioning/resume). The hint
     # tells the shim how long to wait for restored content.
     local hint="${1:-}"
-    local payload="{\"action\": \"info\", \"workspace\": \"${WS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}"
-    [ -n "${hint}" ] && payload="{\"action\": \"info\", \"storage\": \"${hint}\", \"workspace\": \"${WS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}"
+    local payload="{\"action\": \"info\", \"workspace\": \"${RUNTIME_WS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}"
+    [ -n "${hint}" ] && payload="{\"action\": \"info\", \"storage\": \"${hint}\", \"workspace\": \"${RUNTIME_WS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}"
     echo "-- waiting for microVM boot + storage restore (hint: ${hint:-none}, max 360s)"
     local out="${TMPDIR:-/tmp}/sch-info-$$.json"
     for _ in $(seq 1 72); do
@@ -99,6 +106,12 @@ wait_ready() { # [storage-hint: fresh|resumed]
 
 ARN=$(runtime_arn) || { echo "cannot resolve runtime ARN"; exit 1; }
 # Same workspace -> session mapping used by sch (create it if new).
+# Registry on: resolve through the registry first; `sch` mirrors the record
+# into the local index read below, and payloads name the workspace identity.
+RUNTIME_WS="${WS}"
+if sch_target_workspace "${WS}" "opencode" "${REQUESTED_STORAGE}"; then
+    RUNTIME_WS="${SCH_TARGET_WS}"
+fi
 WS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/sch/workspaces/${WS}"
 if [ ! -f "${WS_FILE}" ]; then
     mkdir -p "$(dirname "${WS_FILE}")"
@@ -149,7 +162,7 @@ do_setup() {
     # backgrounding the same command, or enabling only one MCP server, both
     # complete in seconds. Forcing stdin to /dev/null avoids the hang. Does
     # NOT affect the interactive TUI path (`sch shell` uses a real `--it` pty).
-    remote_stdout "cd ${REPO_DIR} && opencode run --title sch-verify-${magic} \"Reply with exactly: ${magic}\" < /dev/null 2>&1 | tail -3"
+    remote_stdout "cd ${REPO_DIR} && opencode run --standalone --title sch-verify-${magic} \"Reply with exactly: ${magic}\" < /dev/null 2>&1 | tail -3"
 
     echo "-- recording session list"
     remote_stdout "cd ${REPO_DIR} && opencode session list 2>/dev/null | head -20"

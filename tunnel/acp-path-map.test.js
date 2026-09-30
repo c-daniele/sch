@@ -2,7 +2,9 @@
 // translation (sch-acp-editor-integration task 3.1; spec acp-file-locality
 // "Path translation in ACP messages"). Fixtures mirror REAL messages
 // captured from `opencode acp` 1.18.3 and `claude-agent-acp` 0.59.0 during
-// the OQ-ADAPTER-FS probe (see design.md Open Questions).
+// the OQ-ADAPTER-FS probe (see design.md Open Questions); `opencode acp`
+// 2.0.18 still speaks ACP protocolVersion 1 with the same method names
+// (initialize handshake re-verified for TASK-7).
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';

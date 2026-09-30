@@ -15,6 +15,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 
+from .. import plane as plane_mod
 from .. import sync as sync_mod, workspace, workspace_registry
 
 _ROW_FORMAT = "{:<20} {:<12} {:<9} {:<55} {}"
@@ -156,9 +157,15 @@ class RemoteCheckError(RuntimeError):
 
 
 def _s3(cfg, args):
+    # per-principal-isolation R40: with isolation on, the owner's objects are
+    # read through the plane's access role ({} with isolation off).
+    try:
+        options = plane_mod.s3_run_options(cfg)
+    except plane_mod.PlaneError as exc:
+        raise RemoteCheckError(str(exc)) from exc
     try:
         return subprocess.run(["aws"] + args + ["--region", cfg.region],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, **options)
     except OSError as exc:
         raise RemoteCheckError("cannot execute AWS CLI") from exc
 
@@ -167,9 +174,10 @@ def _list_writer_identities(cfg, bucket):
     """Identities with an S3 writer claim (``workspace-writers/<id>.json``)."""
     identities = set()
     token = None
+    root = plane_mod.tree_prefix(cfg, "workspace-writers")
     while True:
         args = ["s3api", "list-objects-v2", "--bucket", bucket,
-                "--prefix", "workspace-writers/", "--output", "json"]
+                "--prefix", root, "--output", "json"]
         if token:
             args += ["--continuation-token", token]
         result = _s3(cfg, args)
@@ -184,8 +192,8 @@ def _list_writer_identities(cfg, bucket):
             raise RemoteCheckError("invalid S3 writer listing")
         for item in contents:
             key = item.get("Key", "") if isinstance(item, dict) else ""
-            if key.startswith("workspace-writers/") and key.endswith(".json"):
-                identity = key[len("workspace-writers/"):-len(".json")]
+            if key.startswith(root) and key.endswith(".json"):
+                identity = key[len(root):-len(".json")]
                 if identity and "/" not in identity:
                     identities.add(identity)
         if not data.get("IsTruncated"):
@@ -199,9 +207,10 @@ def _list_checkpoint_identities(cfg, bucket):
     """Identities with an S3 checkpoint prefix (``checkpoints/<id>/``)."""
     identities = set()
     token = None
+    root = plane_mod.tree_prefix(cfg, "checkpoints")
     while True:
         args = ["s3api", "list-objects-v2", "--bucket", bucket,
-                "--prefix", "checkpoints/", "--delimiter", "/",
+                "--prefix", root, "--delimiter", "/",
                 "--output", "json"]
         if token:
             args += ["--continuation-token", token]
@@ -217,9 +226,11 @@ def _list_checkpoint_identities(cfg, bucket):
             raise RemoteCheckError("invalid S3 checkpoint listing")
         for entry in prefixes:
             prefix = entry.get("Prefix", "") if isinstance(entry, dict) else ""
-            if prefix.startswith("checkpoints/") and prefix.endswith("/"):
-                identity = prefix[len("checkpoints/"):-1]
-                if identity and "/" not in identity:
+            if prefix.startswith(root) and prefix.endswith("/"):
+                identity = prefix[len(root):-1]
+                # Owner trees (o.<key>, isolation layout) are never
+                # registry-off workspaces: names cannot contain '.'.
+                if identity and "/" not in identity and "." not in identity:
                     identities.add(identity)
         if not data.get("IsTruncated"):
             return identities
@@ -230,7 +241,7 @@ def _list_checkpoint_identities(cfg, bucket):
 
 def _read_writer_claim(cfg, bucket, identity):
     """The parsed S3 writer claim for ``identity``, or ``None`` when absent."""
-    key = "workspace-writers/{}.json".format(identity)
+    key = "{}{}.json".format(plane_mod.tree_prefix(cfg, "workspace-writers"), identity)
     with tempfile.NamedTemporaryFile(prefix="sch-list-", suffix=".json",
                                      delete=False) as handle:
         tmp_path = handle.name

@@ -62,6 +62,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCH="${SCRIPT_DIR}/sch"
 SCH_REGION="${SCH_REGION:-eu-west-1}"
 REQUESTED_STORAGE="${SCH_VERIFY_STORAGE:-s3}"
+# Registry and isolation stacks (TASK-20.5): plane runtime, registry session
+# and workspace identity. No-op on registry-off stacks.
+# shellcheck source=lib/verify-target.sh
+. "${SCRIPT_DIR}/lib/verify-target.sh"
+sch_target_init
 
 PASS=0
 FAIL=0
@@ -69,6 +74,8 @@ ok()   { echo "PASS [harness=${HARNESS}]: $*"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL [harness=${HARNESS}]: $*"; FAIL=$((FAIL+1)); }
 
 runtime_arn() {
+    # Isolation on: the caller's plane runtime, never the shared one (R40).
+    if sch_target_isolated; then sch_target_runtime_arn; return; fi
     aws cloudformation describe-stacks \
         --stack-name "${SCH_PROJECT:-sch}-${SCH_ENV:-dev}-runtime" \
         --region "${SCH_REGION}" \
@@ -81,7 +88,7 @@ _invoke_info() {
         --cli-binary-format raw-in-base64-out \
         --agent-runtime-arn "${ARN}" \
         --runtime-session-id "${SID}" \
-        --payload "{\"action\": \"info\", \"workspace\": \"${WS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
+        --payload "{\"action\": \"info\", \"workspace\": \"${RUNTIME_WS}\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}}" \
         --region "${SCH_REGION}" \
         "${TMPDIR:-/tmp}/sch-info-$$.json" >/dev/null 2>&1 \
         && cat "${TMPDIR:-/tmp}/sch-info-$$.json"
@@ -150,6 +157,12 @@ wait_boot_ready() {
 }
 
 ARN=$(runtime_arn) || { echo "cannot resolve runtime ARN"; exit 1; }
+# Registry on: resolve through the registry first; `sch` mirrors the record
+# into the local index read below, and payloads name the workspace identity.
+RUNTIME_WS="${WS}"
+if sch_target_workspace "${WS}" "${HARNESS}" "${REQUESTED_STORAGE}"; then
+    RUNTIME_WS="${SCH_TARGET_WS}"
+fi
 WS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/sch/workspaces/${WS}"
 # Ensure the workspace index exists with the chosen harness. If absent, create
 # it via `sch shell` (which would exec agentcore) — instead, seed it directly
@@ -188,7 +201,7 @@ aws bedrock-agentcore invoke-agent-runtime \
     --cli-binary-format raw-in-base64-out \
     --agent-runtime-arn "${ARN}" \
     --runtime-session-id "${SID}" \
-    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${WS}\", \"harness\": \"${HARNESS}\"}" \
+    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"${HARNESS}\"}" \
     --region "${SCH_REGION}" \
     /dev/null >/dev/null 2>&1 || true
 wait_boot_ready 240
@@ -257,7 +270,7 @@ aws bedrock-agentcore invoke-agent-runtime \
     --cli-binary-format raw-in-base64-out \
     --agent-runtime-arn "${ARN}" \
     --runtime-session-id "${SID}" \
-    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${WS}\", \"harness\": \"${HARNESS}\"}" \
+    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"${HARNESS}\"}" \
     --region "${SCH_REGION}" \
     /dev/null >/dev/null 2>&1 || true
 wait_boot_ready 240
@@ -287,7 +300,7 @@ aws bedrock-agentcore invoke-agent-runtime \
     --cli-binary-format raw-in-base64-out \
     --agent-runtime-arn "${ARN}" \
     --runtime-session-id "${SID}" \
-    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${WS}\", \"harness\": \"${HARNESS}\"}" \
+    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"${HARNESS}\"}" \
     --region "${SCH_REGION}" \
     /dev/null >/dev/null 2>&1 || true
 wait_boot_ready 240
@@ -341,7 +354,7 @@ elif [ "${HARNESS}" = "pi" ]; then
         bad "Pi remote-interactive seed did not create a valid resumable session"
     fi
 else
-    remote_stdout "cd ${REPO_DIR} && SCH_HARNESS=opencode opencode run --title ${BRAINSTORM_MAGIC} \"Remember this keyword: ${BRAINSTORM_MAGIC}\" < /dev/null 2>&1 | tail -3"
+    remote_stdout "cd ${REPO_DIR} && SCH_HARNESS=opencode opencode run --standalone --title ${BRAINSTORM_MAGIC} \"Remember this keyword: ${BRAINSTORM_MAGIC}\" < /dev/null 2>&1 | tail -3"
 fi
 "${SCH}" stop "${WS}" >/dev/null 2>&1 || true
 sleep 15
@@ -349,7 +362,7 @@ aws bedrock-agentcore invoke-agent-runtime \
     --cli-binary-format raw-in-base64-out \
     --agent-runtime-arn "${ARN}" \
     --runtime-session-id "${SID}" \
-    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${WS}\", \"harness\": \"${HARNESS}\"}" \
+    --payload "{\"action\": \"noop\", \"storage\": \"resumed\", \"storage_backend\": \"${STORAGE}\", \"session_epoch\": ${SESSION_EPOCH}, \"workspace\": \"${RUNTIME_WS}\", \"harness\": \"${HARNESS}\"}" \
     --region "${SCH_REGION}" \
     /dev/null >/dev/null 2>&1 || true
 wait_boot_ready 240

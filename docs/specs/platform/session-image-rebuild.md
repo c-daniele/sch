@@ -28,7 +28,7 @@ Out of scope:
 
 **R5.** Publishing an image from a session MUST NOT modify the runtime, the stack, or active sessions. Promoting an image remains an explicit action external to the session; on success the command SHALL state that the image is not in use and that promotion requires an explicit update that resets the session storage.
 
-**R6.** Build sources SHALL reside under a prefix distinct from the checkpoints (`builds/*`), have configurable retention (set by [runtime-provisioning](runtime-provisioning.md) R14), and use keys that avoid collisions between concurrent sessions: two sessions rebuilding simultaneously SHALL each use their own source, without content from the other worktree.
+**R6.** Build sources SHALL reside under a prefix distinct from the checkpoints (`builds/*`), have configurable retention (set by [runtime-provisioning](runtime-provisioning.md) R14), and use keys that avoid collisions between concurrent sessions: two sessions rebuilding simultaneously SHALL each use their own source, without content from the other worktree. The key is `builds/<scope>/source.zip`; on a per-principal plane runtime it is `builds/<ownerPrefix>/<scope>/source.zip`, and a malformed `SCH_OWNER_PREFIX` fails the command before any AWS call ([per-principal-isolation](../security/per-principal-isolation.md) R33).
 
 **R7.** The rebuild command SHALL read the build project and bucket from environment variables injected by the runtime, MUST NOT contain hardcoded AWS identifiers, and SHALL fail immediately (non-zero exit, explicit message, no AWS calls) when that configuration is absent — i.e. when the capability is not enabled.
 

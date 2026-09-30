@@ -114,7 +114,7 @@ default**: a legacy index still reconciles to `opencode`.
 
 | harness   | headless argv (built by the shim)                                                                                  | session-resume flag  | auto-approval flag (argv-only)   |
 | --------- | ------------------------------------------------------------------------------------------------------------------ | -------------------- | -------------------------------- |
-| opencode  | `opencode run [--session <id>] [--model <id>] [--variant <v>] --agent remote-auto --auto <prompt>`                           | `--session <id>`     | `--auto`                         |
+| opencode  | `opencode run --standalone [--session <id>] [--model <id>[#<variant>]] [--agent remote-auto] --auto -- <prompt>`    | `--session <id>`     | `--auto`                         |
 | claude    | `claude -p [--resume <id>] --agent remote-auto --dangerously-skip-permissions <prompt>`                            | `--resume <id>`      | `--dangerously-skip-permissions` |
 | pi        | `pi -p [--session <path>] [--provider amazon-bedrock --model <id>] --append-system-prompt <role file> <prompt>`     | `--session <path>`   | **none — by design**             |
 
@@ -153,16 +153,21 @@ default**: a legacy index still reconciles to `opencode`.
 `sch task <ws> --continue "..."` resumes the **latest session of the
 workspace's persisted harness**:
 
-- **opencode**: queries the `session` table in `opencode.db` for the row
-  with the latest `time_updated` in the worktree's `directory`, then passes
-  `--session <id>` to `opencode run`. Without an explicit `--model`, the
-  resumed session's own stored model and reasoning-effort variant are
-  forwarded as `--model <id>`/`--variant <v>`, so a headless `--continue`
-  keeps the model and effort selected in the TUI (a model-less prompt would
-  otherwise resolve to the `remote-auto` agent's configured model and
-  default effort). An explicit `--model` wins (dropping the stored effort);
-  an explicit `--variant` wins over the stored effort. An unreadable session
-  row degrades to the harness default.
+- **opencode**: queries the `session_v2` table in `opencode.db` (OpenCode 2
+  schema) for the top-level row (no `parent_id`) with the latest
+  `time_updated` in the worktree's `directory`, then passes `--session <id>`
+  to `opencode run`. Without an explicit `--model`, the resumed session's own
+  stored model and reasoning-effort variant are forwarded as one
+  `--model provider/model#variant` reference (OpenCode 2 has no separate
+  `--variant` flag), so a headless `--continue` keeps the model and effort
+  selected in the TUI (a model-less prompt would otherwise resolve to the
+  `remote-auto` agent's configured model and default effort). An explicit
+  `--model` wins (dropping the stored effort); an explicit `--variant` wins
+  over the stored effort. An unreadable session row degrades to the harness
+  default. Provider availability for that forwarding counts the seeded
+  config, the `credential` table of `opencode.db` (where OpenCode 2 keeps
+  `auth login`/`/connect` credentials), staged provider keys and
+  `amazon-bedrock`.
 - **claude**: `ls -t $CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/*.jsonl | head -1`,
   basename-strip the `.jsonl` to get the resume handle, then pass
   `--resume <id>` to `claude -p`. `<encoded-cwd>` is Claude's path encoding
@@ -235,7 +240,8 @@ All Claude Code model aliases are pinned to Bedrock inference profiles
 Any other profile in the account can be selected with
 `/model <inference-profile-id>` (on Bedrock the string is passed through
 unchecked). NOTE: the `/model` picker lineup is baked per Claude Code
-binary version; the image pins `CLAUDE_CODE_VERSION=2.1.210`;
+binary version; the image pins `CLAUDE_CODE_VERSION` (see the version table
+in the [runtime-image spec](specs/platform/runtime-image.md));
 keeping the picker current over time means bumping that pin. The execution
 role's Bedrock grant already covers all inference profiles and foundation
 models, so no new `bedrock:InvokeModel` grant is needed.
@@ -267,8 +273,9 @@ provider has configured auth** → otherwise *the first entry of its own
 hardcoded `defaultModelPerProvider` table that happens to be authenticated* →
 otherwise the first available model at all.
 
-Measured on the pinned version (0.84.2) inside a real SCH microVM, with an empty
-`PI_CODING_AGENT_DIR` and no flags:
+Measured on 0.84.2 (the pin at measurement time; the current 0.87.1 pin
+re-verified the CLI flags and session layout unchanged) inside a real SCH
+microVM, with an empty `PI_CODING_AGENT_DIR` and no flags:
 
 - `pi auth check --provider amazon-bedrock` → `ready`, because the execution
   role's IMDSv2 credentials satisfy Bedrock through the existing

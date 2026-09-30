@@ -16,7 +16,9 @@
 #      (8b) baked Claude and OpenCode OpenSpec templates (12 commands and 12
 #      skills per harness, including every non-core workflow)
 #      and NOTHING pre-baked into ~/.claude (would break the L2 restore)
-#   9. seeded opencode.json contains provider.amazon-bedrock (region),
+#   9. seeded opencode.json contains providers.amazon-bedrock (native V2
+#      shape: settings.region, no V1 `provider` key, explicit Claude
+#      maxTokens for the default model, TASK-9),
 #      default_agent=remote-interactive (sch-remote-agents) and
 #      mcp.aws-docs / mcp.aws-mcp (enabled, aws-mcp read-only) +
 #      mcp.context7 (DISABLED by default, sch-context7-builtin);
@@ -104,7 +106,8 @@ echo "${INFO}" | grep -q '"status": *"ok"' && { echo "PASS: info invocation"; PA
 
 echo "== 4. opencode pin =="
 PINNED=$(docker exec "${CONTAINER}" printenv OPENCODE_VERSION)
-INSTALLED=$(docker exec "${CONTAINER}" opencode --version | tr -d '[:space:]')
+# OpenCode 2 prints `opencode v2.0.18`; compare the bare version with the pin.
+INSTALLED=$(docker exec "${CONTAINER}" opencode --version | sed -E 's/^opencode[[:space:]]+v?//' | tr -d '[:space:]')
 echo "pinned=${PINNED} installed=${INSTALLED}"
 [ "${INSTALLED}" = "${PINNED}" ] && { echo "PASS: opencode version matches pin"; PASS=$((PASS+1)); } \
     || { echo "FAIL: opencode ${INSTALLED} != pin ${PINNED}"; FAIL=$((FAIL+1)); }
@@ -122,7 +125,8 @@ echo "== 5. XDG env =="
 check "XDG_DATA_HOME"   docker exec "${CONTAINER}" sh -c '[ "$XDG_DATA_HOME" = "/mnt/workspace/state/data" ]'
 check "XDG_CONFIG_HOME" docker exec "${CONTAINER}" sh -c '[ "$XDG_CONFIG_HOME" = "/mnt/workspace/state/config" ]'
 check "OPENCODE_DB on local disk" docker exec "${CONTAINER}" sh -c '[ "$OPENCODE_DB" = "/home/sch/.opencode/opencode.db" ]'
-check "opencode db path honors OPENCODE_DB" docker exec "${CONTAINER}" sh -c '[ "$(opencode db path 2>/dev/null)" = "/home/sch/.opencode/opencode.db" ]'
+# OpenCode 2: `debug paths db` (1.x had `db path`). Does not start a server.
+check "opencode debug paths db honors OPENCODE_DB" docker exec "${CONTAINER}" sh -c '[ "$(opencode debug paths db 2>/dev/null)" = "/home/sch/.opencode/opencode.db" ]'
 check "git safe.directory configured" docker exec "${CONTAINER}" sh -c 'git config --system --get-all safe.directory | grep -q /mnt/workspace/repo'
 check "non-root user"   docker exec "${CONTAINER}" sh -c '[ "$(id -u)" = "1000" ]'
 # add-user-provider-keys (design D3): the provider-key staging dir must exist,
@@ -253,7 +257,7 @@ check "complete OpenCode workflow template set baked" docker exec "${CONTAINER}"
 # seeds the Claude artifacts.
 check "no templates in ~/.claude (not baked, not seeded on harness=opencode)" docker exec "${CONTAINER}" sh -c '[ ! -e /home/sch/.claude/commands ] && [ ! -e /home/sch/.claude/skills ]'
 
-echo "== 9. seeded config: provider.amazon-bedrock + mcp.aws-docs/aws-mcp + mcp.context7(disabled) + agents (sch-remote-agents) =="
+echo "== 9. seeded config: providers.amazon-bedrock + mcp.aws-docs/aws-mcp + mcp.context7(disabled) + agents (sch-remote-agents) =="
 # Fresh workspace, isolated from the idempotency test above (section 6 wrote
 # a custom, non-schema config into ${VOLUME} on purpose).
 docker rm -f "${SEED_CONTAINER}" >/dev/null 2>&1 || true
@@ -274,9 +278,14 @@ for _ in $(seq 1 30); do
 done
 CFG=$(docker exec "${SEED_CONTAINER}" cat /mnt/workspace/state/config/opencode/opencode.json 2>/dev/null)
 echo "seeded config: ${CFG}"
-echo "${CFG}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["provider"]["amazon-bedrock"]["options"]["region"]' 2>/dev/null \
-    && { echo "PASS: provider.amazon-bedrock.options.region present"; PASS=$((PASS+1)); } \
-    || { echo "FAIL: provider.amazon-bedrock.options.region missing"; FAIL=$((FAIL+1)); }
+echo "${CFG}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["providers"]["amazon-bedrock"]["settings"]["region"]; assert "provider" not in d' 2>/dev/null \
+    && { echo "PASS: providers.amazon-bedrock.settings.region present, no V1 provider key"; PASS=$((PASS+1)); } \
+    || { echo "FAIL: providers.amazon-bedrock.settings.region missing or V1 provider key present"; FAIL=$((FAIL+1)); }
+# TASK-9: OpenCode 2 sends no Bedrock output cap unless configured, so the
+# seeded default model must carry an explicit inferenceConfig.maxTokens.
+echo "${CFG}" | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["model"].split("/",1)[1]; v=d["providers"]["amazon-bedrock"]["models"][m]["body"]["inferenceConfig"]["maxTokens"]; assert isinstance(v,int) and v>4096' 2>/dev/null \
+    && { echo "PASS: default model has an explicit Bedrock maxTokens"; PASS=$((PASS+1)); } \
+    || { echo "FAIL: default model lacks an explicit Bedrock maxTokens"; FAIL=$((FAIL+1)); }
 echo "${CFG}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["mcp"]["aws-docs"]["enabled"] is True' 2>/dev/null \
     && { echo "PASS: mcp.aws-docs enabled"; PASS=$((PASS+1)); } \
     || { echo "FAIL: mcp.aws-docs missing/disabled"; FAIL=$((FAIL+1)); }

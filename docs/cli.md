@@ -247,6 +247,14 @@ Sync limitations:
   not supplied.
 - Clone a repo on first start: set `SCH_REPO_URL` (and `SCH_REPO_TOKEN`)
   among the session env vars — HTTPS only; robust credential handling is out of scope.
+  The token is used for the clone only: it is not saved in the workspace, and
+  `origin` points at the token-free URL, so later `git fetch`/`git push` need
+  their own credentials, or go through `sch fetch` with local credentials
+  ([Security posture](security.md#what-never-enters-the-sandbox)).
+  **Earlier images saved the token** in `/mnt/workspace/repo/.git/config`, and
+  therefore in every checkpoint. The next boot on a current image removes it
+  from `origin`, but checkpoints taken before that still contain it: revoke
+  and rotate any token used with `SCH_REPO_TOKEN` on an earlier image.
 - When done: `sch stop <ws>` (or let the idle timeout expire).
 - `sch reset-session <ws>` is mainly a testing/ops tool: it does not touch any
   checkpoint data, only the workspace→sessionId mapping (and preserves the

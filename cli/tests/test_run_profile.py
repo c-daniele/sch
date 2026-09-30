@@ -37,12 +37,14 @@ class RunProfileTests(unittest.TestCase):
         self.profile = self.root / "sch-run-profile.sh"
         self.profile.write_text(source)
 
+        self.env_file = self.root / "env"
         for harness_name in ("opencode", "claude", "pi"):
             harness = self.bin_dir / harness_name
             harness.write_text(
                 "#!/bin/bash\n"
                 ': > "${SCH_TEST_ARGV}"\n'
                 'for arg in "$@"; do printf "%s\\n" "$arg" >> "${SCH_TEST_ARGV}"; done\n'
+                'printf "%s" "${OPENCODE_CONFIG_CONTENT-<unset>}" > "${SCH_TEST_ENV}"\n'
                 'if [ -e "${SCH_TEST_MARKER}" ]; then\n'
                 '    printf present > "${SCH_TEST_MARKER_STATE}"\n'
                 'else\n'
@@ -62,6 +64,7 @@ class RunProfileTests(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if not k.startswith("SCH_")}
         env["PATH"] = str(self.bin_dir) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
         env["SCH_TEST_ARGV"] = str(self.argv_file)
+        env["SCH_TEST_ENV"] = str(self.env_file)
         env["SCH_TEST_MARKER"] = str(self.marker)
         env["SCH_TEST_MARKER_STATE"] = str(self.marker_state_file)
         env.update(extra_env or {})
@@ -85,20 +88,36 @@ class RunProfileTests(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertFalse(self.marker.exists())
 
-    def test_model_is_passed_as_exact_two_element_argv_for_each_harness(self):
-        cases = (
-            ("opencode", "provider/model-id"),
-            ("claude", "eu.anthropic.claude-haiku-4-5-20251001-v1:0"),
-        )
-        for harness, model in cases:
-            with self.subTest(harness=harness):
-                self.argv_file.unlink(missing_ok=True)
-                self.marker_state_file.unlink(missing_ok=True)
-                self.run_profile({"harness": harness, "model": model, "epoch": time.time()})
+    def test_claude_model_is_passed_as_exact_two_element_argv(self):
+        model = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+        self.run_profile({"harness": "claude", "model": model, "epoch": time.time()})
 
-                self.assertEqual(self.argv_file.read_text().splitlines(), ["--model", model])
-                self.assertEqual(self.marker_state_file.read_text(), "absent")
-                self.assertFalse(self.continued_file.exists())
+        self.assertEqual(self.argv_file.read_text().splitlines(), ["--model", model])
+        self.assertEqual(self.marker_state_file.read_text(), "absent")
+        self.assertFalse(self.continued_file.exists())
+
+    def test_opencode_model_rides_config_content_env_not_argv(self):
+        # OpenCode 2: the root TUI has no --model flag; the model is merged
+        # through OPENCODE_CONFIG_CONTENT for this process only, and the TUI
+        # runs --standalone (private embedded server).
+        self.run_profile({"harness": "opencode", "model": "provider/model-id", "epoch": time.time()})
+
+        self.assertEqual(self.argv_file.read_text().splitlines(), ["--standalone"])
+        self.assertEqual(json.loads(self.env_file.read_text()), {"model": "provider/model-id"})
+        self.assertEqual(self.marker_state_file.read_text(), "absent")
+        self.assertFalse(self.continued_file.exists())
+
+    def test_opencode_session_resume_keeps_standalone_and_session_flags(self):
+        self.run_profile({
+            "harness": "opencode", "model": "provider/model-id",
+            "session_id": "ses_abc", "epoch": time.time(),
+        })
+
+        self.assertEqual(
+            self.argv_file.read_text().splitlines(),
+            ["--standalone", "--session", "ses_abc"],
+        )
+        self.assertEqual(json.loads(self.env_file.read_text()), {"model": "provider/model-id"})
 
     def test_pi_receives_provider_model_and_interactive_role(self):
         model = "eu.anthropic.claude-sonnet-4-6"
@@ -125,7 +144,8 @@ class RunProfileTests(unittest.TestCase):
     def test_absent_model_executes_bare_harness(self):
         self.run_profile({"harness": "opencode", "epoch": time.time()})
 
-        self.assertEqual(self.argv_file.read_text(), "")
+        self.assertEqual(self.argv_file.read_text().splitlines(), ["--standalone"])
+        self.assertEqual(self.env_file.read_text(), "<unset>")
         self.assertEqual(self.marker_state_file.read_text(), "absent")
         self.assertFalse(self.continued_file.exists())
 

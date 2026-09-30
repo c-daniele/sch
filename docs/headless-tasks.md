@@ -58,14 +58,15 @@ explicit model instead of the harness's default:
   the requested model (native harness support); `sch` does not compare it
   against the model of previous tasks. Without `--model`, an opencode
   `--continue` keeps the model and reasoning effort (e.g. `high`) selected
-  in the TUI: the shim forwards the resumed session's stored model as
-  `--model` and its stored effort as `--variant`. An explicit `--model`
+  in the TUI: the shim forwards the resumed session's stored model and
+  effort as one `--model provider/model#variant` reference (OpenCode 2 has
+  no separate `--variant` flag). An explicit `--model`
   overrides the model and drops the stored effort; an explicit `--variant`
   overrides just the effort.
 - **Reasoning effort (`sch task --variant <name>`, opencode only)**:
   per-invocation like `--model` (nothing persisted; validated for syntax
   only; echoed in the ack and recorded in task status when requested).
-  Refused on non-opencode harnesses and on `sch run` (the pinned opencode
+  Refused on non-opencode harnesses and on `sch run` (the opencode
   TUI has no `--variant` flag — pick the effort in the TUI model picker
   instead).
 - **Interaction with `--`**: everything after `--` is prompt text, so the

@@ -92,6 +92,7 @@ non-default region or environment still needs `sch deploy -r <region>`
 | Telegram notifications, and remote interaction | Off: no notifications, no inbound channel, no webhook | [docs/telegram-setup.md](telegram-setup.md) |
 | Runtime IAM posture (capability tuning) | Every Bedrock model invokable, `ReadOnlyAccess` attached, no other AI service reachable | [docs/runtime-capability-tuning.md](runtime-capability-tuning.md) |
 | IAM workspace registry (owner-scoped names) | Off: workspace-to-session mappings stay local to each client | [IAM Workspace Registry](workspaces.md#iam-workspace-registry) |
+| Per-principal isolation (one locked runtime per listed user) | Off: one shared runtime and one execution role for every user of the stack | [Per-principal isolation](workspaces.md#per-principal-isolation) |
 | Image rebuild from inside a session | Off: the runtime execution role gets no CodeBuild permission | [Image Rebuild from a Session](image-rebuild.md#image-rebuild-from-a-session-codebuild) |
 
 Turning something on later is never a dead end, but two of them are not free:
@@ -143,3 +144,62 @@ and an omitted switch is deployed as *off*.
   `-l` — `infra/deploy.sh` automatically selects the local `corporate-ca`
   image base there. Remote (CodeBuild) builds never receive or process these
   certificates and ignore them.
+
+### Caller permissions on an isolated stack
+
+With [per-principal isolation](workspaces.md#per-principal-isolation) on,
+each listed user's identity policy needs, for its own plane only (derived from
+what `sch` calls; the owner key is printed by the deploy and by `sch info`):
+
+- `execute-api:Invoke` on the `WorkspaceRegistryInvokeArn` output;
+- the AgentCore data plane on its own plane runtime and its endpoint
+  (`arn:aws:bedrock-agentcore:<region>:<account-id>:runtime/<project>_<env>_o_<owner key>-*`):
+  `bedrock-agentcore:InvokeAgentRuntime`, `InvokeAgentRuntimeCommandShell`
+  (`sch shell`, `sch run`), `InvokeAgentRuntimeWithWebSocketStream` (`sch
+  attach`, `web`, `acp`, `--sync`), `StopRuntimeSession`, and
+  `InvokeAgentRuntimeCommand` for the non-interactive `agentcore exec` of the
+  `bin/verify-*.sh` scripts, plus
+  `bedrock-agentcore:GetAgentRuntime` on the same runtime (the runtime-version
+  check);
+- `sts:AssumeRole` on its access role
+  `arn:aws:iam::<account-id>:role/<project>-<env>-o-<owner key>-access`;
+- `cloudformation:DescribeStacks` on the runtime stack.
+
+As one identity policy for the listed user whose owner key is
+`044f48490641a561` on project `sch`, environment `dev` (replace the region,
+account ID, API ID and owner key; the runtime ARN keeps its `-*` suffix because
+the runtime ID is assigned at deploy time). This shape was confirmed live on
+2026-09-30 as the only SCH grant of a listed user: `sch task`, `sch status`
+(access role) and `sch delete` all worked with it:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": "execute-api:Invoke",
+     "Resource": "arn:aws:execute-api:eu-west-1:<account-id>:<api-id>/v1/*/*"},
+    {"Effect": "Allow",
+     "Action": ["bedrock-agentcore:InvokeAgentRuntime",
+                "bedrock-agentcore:InvokeAgentRuntimeCommand",
+                "bedrock-agentcore:InvokeAgentRuntimeCommandShell",
+                "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+                "bedrock-agentcore:StopRuntimeSession",
+                "bedrock-agentcore:GetAgentRuntime"],
+     "Resource": ["arn:aws:bedrock-agentcore:eu-west-1:<account-id>:runtime/sch_dev_o_044f48490641a561-*",
+                  "arn:aws:bedrock-agentcore:eu-west-1:<account-id>:runtime/sch_dev_o_044f48490641a561-*/runtime-endpoint/DEFAULT"]},
+    {"Effect": "Allow", "Action": "sts:AssumeRole",
+     "Resource": "arn:aws:iam::<account-id>:role/sch-dev-o-044f48490641a561-access"},
+    {"Effect": "Allow", "Action": "cloudformation:DescribeStacks",
+     "Resource": "arn:aws:cloudformation:eu-west-1:<account-id>:stack/sch-dev-runtime/*"}
+  ]
+}
+```
+
+Broader grants (for example `bedrock-agentcore:*` on `*`) do not reach another
+user's plane: the plane's resource policy denies everyone but its owner, and
+the checkpoint bucket policy denies owner trees to everyone but that owner's
+roles. They do not protect against principals that can change IAM, AgentCore
+runtimes or resource policies, the bucket policy, SCH Lambdas, CloudFormation
+stacks or the plane parameters: those principals administer the boundary
+([Security posture](security.md#isolation-between-users)). Do not give listed
+users such rights.

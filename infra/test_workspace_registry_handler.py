@@ -43,6 +43,18 @@ class IdentityTests(unittest.TestCase):
         }
         self.assertEqual(handler._record(record)["storage"], "session")
 
+    def test_epoch_read_back_from_dynamodb_as_decimal_is_accepted(self):
+        # The boto3 resource returns DynamoDB numbers as Decimal.
+        from decimal import Decimal
+        record = {
+            "logicalWorkspace": "ws", "runtimeSessionId": "sid", "harness": "opencode",
+            "workspaceIdentity": "ws-safe", "storage": "s3", "sessionEpoch": Decimal(3),
+        }
+        self.assertEqual(handler._record(record)["sessionEpoch"], 3)
+        json.dumps(handler._record(record))
+        with self.assertRaises(ValueError):
+            handler._epoch_value({"sessionEpoch": Decimal("1.5")})
+
     def test_new_record_persists_storage(self):
         record = handler._new_record("owner", "ws", "claude", "s3")
         self.assertEqual(record["storage"], "s3")

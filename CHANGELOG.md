@@ -92,4 +92,24 @@ minor versions).
 - Test hygiene: the run-profile tests no longer inherit `SCH_*` variables
   from the host; the infra suite's dependencies are declared.
 
+### Security
+
+- A first-boot clone with `SCH_REPO_URL` and `SCH_REPO_TOKEN` no longer saves
+  the token in the workspace: earlier images wrote it into the `origin` URL of
+  `/mnt/workspace/repo/.git/config`, readable by the agent and copied into
+  every checkpoint, and put it on the `git clone` command line. The token now
+  reaches git through a credential helper, `origin` is token-free, and a
+  workspace cloned by an earlier image has the credential removed from
+  `origin` at its next boot. Checkpoints taken before the fix still hold the
+  token: rotate it.
+- Opt-in per-principal workspace isolation (`ISOLATED_PRINCIPALS`, needs the
+  workspace registry): the deploy gives each listed IAM user, IAM Identity
+  Center user or role its own plane stack (a runtime locked to its owner, an
+  execution role confined to the owner's storage, a read-only access role),
+  adds a checkpoint bucket policy and locks the shared runtime. The registry
+  maps callers by bound identity and refuses unlisted callers with the entry
+  to add; `sch` uses the caller's plane with no fallback to the shared
+  runtime. Checked by tests, IAM Access Analyzer, the policy simulator and
+  the live two-principal check `bin/verify-isolation.sh` (IAM users). Task prompts are no longer written to the runtime logs.
+
 [Unreleased]: https://github.com/c-daniele/sch/commits/main

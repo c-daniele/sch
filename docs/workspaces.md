@@ -54,10 +54,120 @@ installing Python dependencies.
 - This is intentional logical isolation and discovery UX, not a data-plane
   security boundary. A principal that independently has AgentCore permissions
   and learns another session ID can still invoke it directly.
+  Opt-in [per-principal isolation](#per-principal-isolation) closes this gap.
 - Existing local workspaces are not imported automatically. Enable registry
   mode to create a new owner-scoped record and checkpoint namespace; retain
   legacy mode to access legacy session mappings and checkpoint prefixes. No
   import command is included in this change.
+
+### Per-principal isolation
+
+**Problem.** Without isolation every workspace runs on one shared AgentCore
+runtime. AgentCore authorizes an invocation on the runtime, not on the
+session, so user B, allowed to invoke that runtime, can join user A's session
+once B knows its ID (`aws bedrock-agentcore invoke-agent-runtime
+--agent-runtime-arn <shared> --runtime-session-id <A's id>` returns A's
+microVM). The shared execution role can also read every user's checkpoints,
+so B's agent can read A's code.
+
+**What isolation changes.** The operator lists the SCH users at deploy time
+(`ISOLATED_PRINCIPALS`, see [Deploying: per-principal
+isolation](deploy.md#per-principal-isolation-isolated_principals)). Each listed
+principal gets its own *plane*: a runtime whose resource policy refuses
+everyone but its owner, an execution role confined to the owner's storage,
+and a read-only *access role* the owner's `sch` uses to read its own
+checkpoints. A bucket policy keeps every other principal, and every other
+plane, out of the owner's objects. Nothing is created at request time.
+Normative behavior: [`per-principal-isolation.md`](specs/security/per-principal-isolation.md).
+
+**Status.** Implemented and checked by unit tests, IAM Access Analyzer and the
+IAM policy simulator (reports:
+[Access Analyzer](history/isolation-evidence-access-analyzer.md),
+[simulator](history/isolation-evidence-simulator.md)). The simulator evaluates
+the runtime and endpoint policies one at a time and cannot model how AgentCore
+evaluates them together; only a live run of `bin/verify-isolation.sh` with two
+principals covers that; it passed on 2026-09-29 with two IAM users (37 checks).
+Run it on your stack (below) before you rely on the boundary.
+
+**For users of an isolated stack:**
+
+- Set `SCH_WORKSPACE_REGISTRY_URL` as for any registry stack. Nothing else
+  changes on the client: every command asks the registry, which returns the
+  caller's plane, and `sch` uses that runtime and the access role by itself.
+  `sch info` prints an extra `isolation : on (...)` line with the owner prefix
+  and access role:
+
+  ```text
+  region      : eu-west-1
+  runtime ARN : arn:aws:bedrock-agentcore:eu-west-1:<account-id>:runtime/sch_dev_o_044f48490641a561-t1bfqJ9GaA
+  isolation   : on (owner prefix o.044f48490641a561, access role arn:aws:iam::<account-id>:role/sch-dev-o-044f48490641a561-access)
+  ```
+- Every SCH user, the operator included, must be listed: the shared runtime
+  refuses every caller, and local index mode (no registry URL) does not work
+  on such a stack. An unlisted caller gets HTTP 403 with the entry to add, for
+  example `add user:carol to ISOLATED_PRINCIPALS and redeploy`.
+- The owner is the bound identity, not the session: a new CLI session of the
+  same IAM user or the same role entry is the same owner; two Identity Center
+  users of one permission set are two owners; an IAM user deleted and
+  re-created with the same name is a new owner with an empty namespace; every
+  session of a `role:` entry is one owner.
+- Storage moves under an owner segment (`checkpoints/o.<owner key>/<workspace
+  identity>/…`, the same for generations, writer claims and build sources).
+- **No migration.** With isolation on, every owner starts with an empty
+  namespace. Workspaces created before isolation stay untouched in the
+  registry table and the bucket but are not listed or reachable through the
+  isolated registry; turning isolation off again makes them reachable as
+  before. Finish, fetch or push what you need before the switch.
+- Telegram is not available on an isolated stack (the deploy refuses the
+  combination).
+- The caller permissions each listed user needs are listed in
+  [Getting started](getting-started.md#caller-permissions-on-an-isolated-stack).
+
+**Checking a stack.** `bin/verify-isolation.sh` runs the live two-principal
+check from the operator's machine: it needs AWS CLI profiles for two listed
+principals (A, B), one unlisted principal (C) and optionally a listed
+Identity Center user. It creates one test workspace per listed principal,
+proves that B, C and the optional user cannot invoke or stop A's session even
+with A's runtime ARN and session ID, cannot read A's checkpoints with their own
+credentials, their own access role or A's access role, and that A's agent
+cannot read B's owner tree, the registry table, B's plane parameter or B's
+runtime configuration; A's and B's own workflow (`sch task`, `status`, `list`,
+`list --remote-check`, the dashboard data path) must keep working. It deletes
+its test workspaces at the end and masks account IDs in its output
+(`--help` for the options). The other `bin/verify-*.sh` scripts run on an
+isolated stack as a listed user; the Telegram checks print `SKIP` there.
+
+Trimmed output of the run that verified the feature (2026-09-29, profiles
+`alice` and `bob` listed, `carol` not):
+
+```text
+$ bin/verify-isolation.sh --profile-a alice --profile-b bob --profile-c carol
+== 1. unlisted caller ==
+PASS: C is refused by the registry with the entry to add: add user:carol to ISOLATED_PRINCIPALS
+== 3. joining A's session with its runtime ARN and session ID ==
+PASS: A invokes its own session (positive control)
+PASS: B invokes A's session: denied
+PASS: B stops A's session: denied
+PASS: B invokes the shared runtime: denied
+PASS: B opens a command on A's session (agentcore exec): denied
+== 4. reading A's checkpoint objects as another principal ==
+PASS: B reads A's task status with its own credentials: denied
+PASS: B reads A's task status through B's access role: denied
+PASS: B assumes A's access role: denied
+== 5. reading other owners' data from inside A's microVM ==
+PASS: agent of A, read B's task status: denied
+PASS: agent of A, scan the registry table: denied
+PASS: agent of A, read B's plane parameter: denied
+# isolation result: 37 passed, 0 failed
+```
+
+B and C held `bedrock-agentcore:*` on `*` and read access to the whole
+checkpoint bucket during that run, so every denial came from the plane
+resource policies, the access-role trust and the bucket policy. A first
+attempt can end with `note: could not delete <workspace> of A`: the registry
+deletion timed out while the session's microVM was still being stopped and
+the script retries; if the note remains, run `sch delete <workspace> --yes`
+as that principal (TASK-24).
 
 ### Rollback / teardown
 
@@ -74,6 +184,11 @@ aws cloudformation delete-stack --stack-name sch-dev-bootstrap --region eu-west-
 > a workspace was checkpointed at least once, its data survives the runtime
 > stack's deletion in S3. Delete the checkpoint bucket separately (and only)
 > once you are certain none of its workspaces are needed anymore.
+
+With per-principal isolation on, delete the plane stacks
+(`<project>-<env>-plane-<owner key>`) before the runtime stack: they run on
+the runtime stack's managed policies and image. `sch destroy` does this in the
+right order.
 
 For a full reset that also removes the retained L2 bucket, all ECR images and
 every other resource of the deployment, use the guarded command (see
@@ -152,7 +267,7 @@ Key behaviors:
 - A **warning** is emitted if a TUI is still considered active on the same workspace (advisory flag set by `sch shell` / cleared by `sch stop`); the task still proceeds — the flag is best-effort.
 - Auto-approval of permissions is scoped **only** to the headless argv of the workspace's harness (`--auto` for opencode, `--dangerously-skip-permissions` for claude; `pi` needs no flag — it has no permission prompt at all, in either mode); the interactive TUI path is unchanged and still prompts per-permission on the two harnesses that have prompts.
 - Every terminal state (`succeeded`, `failed`, `timed-out`, `interrupted`) forces an L2 checkpoint before the shim returns to `Healthy`, so uncheckpointed work is not lost. For `harness=claude` this includes the Claude state replica (`state/claude`) and for `harness=pi` the Pi state replica (`state/pi`); each harness's artifact is skipped entirely on the other two.
-- `sch status` is **offline-first**: it reads the sibling `task-status.json` object on S3 using the operator's local AWS credentials. The persisted status includes the `harness` field (which harness ran the task). `--live` optionally merges live fields via `action: info` if the microVM happens to be up.
+- `sch status` is **offline-first**: it reads the sibling `task-status.json` object on S3 using the operator's local AWS credentials. The persisted status includes the `harness` field (which harness ran the task). `--live` optionally merges live fields via `action: info` if the microVM happens to be up. The live view adds an `env_rebuild` line with the outcome of the post-restore environment rebuild ([workspace-checkpointing](specs/workspace-lifecycle/workspace-checkpointing.md) R21).
 - An **external task watchdog** (Lambda, every 2 minutes, `ENABLE_TASK_WATCHDOG` on by default) is the only observer that survives the death of a microVM: a `running` record whose heartbeat is older than `TASK_WATCHDOG_STALE_SECONDS` (600) is reconciled to `interrupted` and notified on Telegram. With Telegram configured it also guarantees the terminal notification of every task: the shim records the notification as `pending` and marks it `delivered` once sent; a record still `pending` after `TASK_WATCHDOG_NOTIFY_AFTER_SECONDS` (300) is re-sent from outside the microVM (at-least-once; visible in `sch status --json` as `notification_status`/`notified_by`).
 - Verification: `./bin/verify-headless-tasks.sh <workspace> --harness <opencode|claude|pi>` covers submit → detached completion → offline status → checkpoint capture → concurrency rejection → orphan reconciliation → brainstorm handoff → application timeout, for a single harness; `./bin/verify-multi-harness.sh` runs the harness paths plus the multi-harness contract (mutual-exclusivity, upgrade-reconcile).
 

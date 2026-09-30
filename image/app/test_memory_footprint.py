@@ -2,8 +2,9 @@
 
 Covers: regenerable-dir exclusion from the repo fingerprint and the repo
 tarball, the Node heap / build-parallelism caps (defaults, precedence,
-escape hatches), loud OOM remediation on headless tasks, the post-restore
-project-env rebuild plan, and the same caps on the interactive wrapper path.
+escape hatches), loud OOM remediation on headless tasks, and the same caps
+on the interactive wrapper path. The post-restore project-env rebuild is
+covered by test_env_rebuild.py.
 """
 
 import importlib.util
@@ -262,89 +263,6 @@ class OomRemediationTests(unittest.TestCase):
         self.assertIsNone(main._oom_remediation("boom: something failed", 1))
         self.assertIsNone(main._oom_remediation("", 1))
         self.assertIsNone(main._oom_remediation(None, 0))
-
-
-class EnvRebuildPlanTests(unittest.TestCase):
-    def test_npm_ci_when_lockfile_present(self):
-        with tempfile.TemporaryDirectory() as td:
-            repo = Path(td)
-            (repo / "package.json").write_text("{}\n")
-            (repo / "package-lock.json").write_text("{}\n")
-            self.assertEqual(
-                main._project_env_plan(repo),
-                [("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"])],
-            )
-
-    def test_npm_skipped_when_env_present(self):
-        with tempfile.TemporaryDirectory() as td:
-            repo = Path(td)
-            (repo / "package.json").write_text("{}\n")
-            (repo / "node_modules").mkdir()
-            self.assertEqual(main._project_env_plan(repo), [])
-
-    def test_uv_sync_when_lockfile_present(self):
-        with tempfile.TemporaryDirectory() as td:
-            repo = Path(td)
-            (repo / "pyproject.toml").write_text("[project]\n")
-            (repo / "uv.lock").write_text("x\n")
-            self.assertEqual(main._project_env_plan(repo), [("uv-sync", ["uv", "sync"])])
-
-    def test_pip_when_only_requirements(self):
-        with tempfile.TemporaryDirectory() as td:
-            repo = Path(td)
-            (repo / "requirements.txt").write_text("requests\n")
-            plan = main._project_env_plan(repo)
-            self.assertEqual(len(plan), 1)
-            self.assertEqual(plan[0][0], "pip-install")
-
-    def test_disabled_short_circuits(self):
-        with tempfile.TemporaryDirectory() as td:
-            with (
-                patch.object(main, "REPO_DIR", Path(td)),
-                patch.dict(os.environ, {"SCH_REBUILD_ENV_ON_RESTORE": "0"}),
-            ):
-                self.assertEqual(main._maybe_rebuild_project_env(), "skipped-disabled")
-
-    def test_noop_when_nothing_missing(self):
-        with tempfile.TemporaryDirectory() as td:
-            with (
-                patch.object(main, "REPO_DIR", Path(td)),
-                patch.dict(os.environ, clean_env(), clear=True),
-            ):
-                self.assertEqual(main._maybe_rebuild_project_env(), "skipped-noop")
-
-    def test_missing_tool_is_unavailable_not_failure(self):
-        with tempfile.TemporaryDirectory() as td:
-            with (
-                patch.object(main, "REPO_DIR", Path(td)),
-                patch.object(
-                    main, "_project_env_plan",
-                    return_value=[("x", ["definitely-not-a-real-binary-xyz", "a"])],
-                ),
-                patch.dict(os.environ, clean_env(), clear=True),
-            ):
-                self.assertEqual(
-                    main._maybe_rebuild_project_env(), "skipped-unavailable"
-                )
-
-    def test_success_and_failure_statuses(self):
-        with tempfile.TemporaryDirectory() as td:
-            with (
-                patch.object(main, "REPO_DIR", Path(td)),
-                patch.object(
-                    main, "_project_env_plan", return_value=[("ok", ["true"])],
-                ),
-                patch.dict(os.environ, clean_env(), clear=True),
-            ):
-                self.assertEqual(main._maybe_rebuild_project_env(), "rebuilt")
-            with (
-                patch.object(main, "REPO_DIR", Path(td)),
-                patch.object(
-                    main, "_project_env_plan", return_value=[("bad", ["false"])],
-                ),
-                patch.dict(os.environ, clean_env(), clear=True),
-            ):
-                self.assertEqual(main._maybe_rebuild_project_env(), "rebuild-failed")
 
 
 class WrapperCapsTests(unittest.TestCase):

@@ -25,6 +25,10 @@ class ClaudeWorkspaceSeedTests(unittest.TestCase):
 
     def run_init(self):
         env = os.environ.copy()
+        # A repo URL in the ambient environment would make the script clone it
+        # into the temporary workspace, with SCH_REPO_TOKEN if set.
+        env.pop("SCH_REPO_URL", None)
+        env.pop("SCH_REPO_TOKEN", None)
         env.update(
             {
                 "SCH_HARNESS": "claude",

@@ -23,6 +23,7 @@ The OpenCode TUI is launched by the user inside the interactive shell
 
 import atexit
 import asyncio
+import base64
 import calendar
 import contextlib
 import hashlib
@@ -30,6 +31,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import shutil
 import sqlite3
@@ -156,6 +158,12 @@ SUPPORTED_STORAGE_BACKENDS = ("s3", "session")
 # Fix: every pass backs up into a FRESH temp file (equivalent to the
 # always-working first pass) and atomically renames it over DB_BACKUP_PATH.
 OPENCODE_DB_LOCAL = Path(os.environ.get("OPENCODE_DB", "/home/sch/.opencode/opencode.db"))
+# OpenCode 2 schema (TASK-7): sessions live in `session_v2` (columns SCH reads:
+# id, directory, parent_id, model JSON {id, providerID, variant}, time_updated)
+# and provider credentials in `credential` (integration_id = provider id). The
+# 1.x `session` table and `auth.json` are not read: fresh installation.
+OPENCODE_SESSION_TABLE = "session_v2"
+OPENCODE_CREDENTIAL_TABLE = "credential"
 DB_BACKUP_PATH = Path(
     os.environ.get(
         "SCH_DB_BACKUP_PATH", str(STATE_DIR / "data" / "opencode" / "opencode.db.backup")
@@ -241,10 +249,10 @@ GIT_CREDENTIALS_FILE = Path(
 # (see the `@app.websocket` handler below), and this same shim process pumps
 # bytes directly via asyncio. No shared budget with `sch shell`/`sch open`/
 # `sch run` (D9 resolved by removal of the shared-channel dependency).
-# Fixed local port `opencode web` listens on inside the microVM for `sch
+# Fixed local port `opencode serve` listens on inside the microVM for `sch
 # attach` and `sch web`. Fixed (not random) so `serve-ensure` can probe
-# liveness without an extra discovery round-trip; matches OpenCode's own
-# documented example port for `opencode attach <url>` (opencode --help).
+# liveness without an extra discovery round-trip; 4096 is OpenCode's own
+# documented example port for `opencode --server <url>`.
 OPENCODE_SERVE_PORT = int(os.environ.get("SCH_OPENCODE_SERVE_PORT", "4096"))
 # Orphan timeout for the websocket tunnel handler: if the local bridge dies
 # without sending a clean close frame, tear down the target after this many
@@ -302,7 +310,69 @@ WORKSPACE_FROM_SESSION_ID_RE = re.compile(
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 WORKSPACE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+# --- Per-principal isolation: owner prefix (spec per-principal-isolation R26-R34)
+# A user runtime of an isolation plane carries SCH_OWNER_PREFIX=o.<16 hex> in
+# its deploy-time environment. It is the ONLY source of the owner segment that
+# every SCH object key of this runtime lives under (R29): never an invoke
+# payload, never a marker file (a checkpoint restored from S3 could carry one).
+# Unset (or empty) means isolation is off and every key keeps its historical
+# shape byte for byte (R34). A set-but-invalid value is a deployment defect:
+# every invocation then fails before any S3 access or workspace write.
+OWNER_PREFIX_RE = re.compile(r"^o\.[0-9a-f]{16}$")
+# With isolation on, workspace identities come only from the registry
+# (`ws-` + 40 lowercase base32 characters, owner-scoped-workspace-storage R2);
+# a plane has no use for logical names or session-id derived names.
+REGISTRY_WORKSPACE_IDENTITY_RE = re.compile(r"^ws-[a-z2-7]{40}$")
+
+
+def _load_owner_prefix(raw) -> tuple:
+    """``(prefix, error)`` for the raw ``SCH_OWNER_PREFIX`` value.
+
+    ``(None, None)`` when unset or empty (isolation off), ``(prefix, None)``
+    when valid, ``(None, message)`` when set but malformed."""
+    if raw is None or not raw.strip():
+        return None, None
+    value = raw.strip()
+    if not OWNER_PREFIX_RE.fullmatch(value):
+        return None, "invalid SCH_OWNER_PREFIX in the runtime environment (expected o.<16 hex>)"
+    return value, None
+
+
+OWNER_PREFIX, OWNER_PREFIX_ERROR = _load_owner_prefix(os.environ.get("SCH_OWNER_PREFIX"))
+
+
+def _owner_segment() -> str:
+    """``"o.<k>/"`` with isolation on, ``""`` otherwise (read at call time so
+    tests can switch layouts)."""
+    return f"{OWNER_PREFIX}/" if OWNER_PREFIX else ""
+
+
+def _owner_rejection(payload: dict, action: str) -> dict | None:
+    """R29/R30 gate, evaluated before any other effect of an invocation.
+
+    Returns the error response, or None when the invocation may proceed."""
+    if OWNER_PREFIX_ERROR:
+        return {"status": "error", "action": action, "error": OWNER_PREFIX_ERROR}
+    claimed = payload.get("owner_prefix")
+    if claimed is None:
+        return None
+    if claimed != OWNER_PREFIX:
+        return {
+            "status": "rejected", "action": action,
+            "error": "owner_prefix in the payload does not match this runtime's owner",
+        }
+    return None
+
+
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
+# Action names the invoke entrypoint understands (used to keep unrecognized
+# values, which may be prompt text, out of the logs: R32).
+INVOKE_ACTIONS = frozenset({
+    "noop", "info", "ping", "warmup", "checkpoint", "task", "mark-interactive",
+    "command-shell-presence", "prepare-run", "serve-ensure", "git-seed",
+    "git-snapshot", "session-import",
+})
 
 # --- CommandShell client presence --------------------------------------------
 # Presence is intentionally ephemeral and separate from _INTERACTIVE_ACTIVE:
@@ -510,7 +580,7 @@ NOTIFICATION_FIELDS = (NOTIFICATION_STATUS_FIELD, "notified_utc", "notified_by")
 # letting an unexpectedly verbose task create an oversized status object.
 TASK_OUTPUT_MAX_CHARS = 12000
 # Per-invocation auto-approval flag(s) for `opencode run` headless (OQ3).
-# The pinned opencode-ai (OPENCODE_VERSION in image/Dockerfile) uses `--auto`
+# The pinned OpenCode (OPENCODE_VERSION in image/Dockerfile) uses `--auto`
 # for auto-approving permissions that are not explicitly denied. This is
 # scoped to the argv of the headless run only; the TUI path is unchanged.
 _TASK_AUTO_APPROVE_FLAGS = [
@@ -525,9 +595,10 @@ _TASK_AUTO_APPROVE_FLAGS = [
 # image/opencode-templates/agents/remote-auto.md). Argv-only, same scoping
 # rationale as the auto-approve flag above: the TUI path keeps the seeded
 # `default_agent` (remote-interactive). Override with SCH_TASK_AGENT; set it
-# to the empty string to fall back to OpenCode's default agent. Unknown agent
-# names are safe: `opencode run --agent <missing>` warns and falls back to
-# the default agent instead of failing.
+# to the empty string to fall back to OpenCode's default agent. OpenCode 2
+# hard-errors on an unknown agent (`Agent not found`), so the argv builder
+# passes `--agent` only when the seeded agent file is on disk and otherwise
+# degrades to the default agent (see _opencode_agent_available).
 _TASK_AGENT = os.environ.get("SCH_TASK_AGENT", "remote-auto").strip()
 
 # Single in-process task slot per workspace (design D2/D3).
@@ -553,7 +624,7 @@ _TASK_STATUS: dict = {"state": "none"}
 _INTERACTIVE_ACTIVE: bool = False
 
 # --- Remote UI tunnel (sch-remote-ui-tunnel, design D5) -------------------------
-# Supervised `opencode web` process for `sch attach` and `sch web`. Started lazily on the
+# Supervised `opencode serve` process for `sch attach` and `sch web`. Started lazily on the
 # first `serve-ensure` action, restarted on crash by the supervisor thread.
 # Single instance per microVM (one workspace = one microVM = at most one
 # opencode harness process), so no per-shellId dimension here (unlike a
@@ -568,6 +639,42 @@ _SERVE_STATE: dict = {
     "restart_count": 0,
     "supervisor_started": False,
 }
+
+# OpenCode 2 `serve` requires HTTP basic auth (`opencode:<password>`) on every
+# `/api/*` route and on the web UI. The supervisor pins the password through
+# OPENCODE_SERVER_PASSWORD so it survives a backend restart, and persists it
+# 0600 on LOCAL disk next to opencode.db (never on the checkpointed mount, never
+# in a log): every in-VM client — the Telegram injector below, `sch attach`'s
+# `opencode --server`, `sch web`'s browser — reads it from here through the
+# `serve-ensure` response. Regenerating it is as simple as deleting the file
+# (next `serve-ensure` mints a new one and restarts nothing: the running
+# backend keeps the old password until its next restart — documented).
+OPENCODE_SERVE_PASSWORD_FILE = Path(
+    os.environ.get("SCH_OPENCODE_SERVE_PASSWORD_FILE", "/home/sch/.opencode/serve.password")
+)
+OPENCODE_SERVE_USER = "opencode"
+
+
+def _opencode_serve_password() -> str:
+    """Return the pinned serve password, minting it on first use."""
+    try:
+        existing = OPENCODE_SERVE_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("cannot read %s: %s", OPENCODE_SERVE_PASSWORD_FILE, exc)
+    password = secrets.token_urlsafe(32)
+    try:
+        OPENCODE_SERVE_PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = OPENCODE_SERVE_PASSWORD_FILE.with_suffix(".tmp")
+        tmp.write_text(password, encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, OPENCODE_SERVE_PASSWORD_FILE)
+    except OSError as exc:
+        logger.warning("cannot persist %s: %s", OPENCODE_SERVE_PASSWORD_FILE, exc)
+    return password
 
 
 def _utcnow() -> str:
@@ -998,8 +1105,16 @@ def _derive_workspace_from_session_id(session_id) -> str | None:
     return m.group("ws") if m else None
 
 
+def _workspace_identity_allowed(name: str) -> bool:
+    if not WORKSPACE_IDENTITY_RE.fullmatch(name):
+        return False
+    if OWNER_PREFIX and not REGISTRY_WORKSPACE_IDENTITY_RE.fullmatch(name):
+        return False
+    return True
+
+
 def _set_workspace_name(name: str | None) -> None:
-    if name and not WORKSPACE_IDENTITY_RE.fullmatch(name):
+    if name and not _workspace_identity_allowed(name):
         logger.warning("ignoring unsafe workspace identity")
         return
     if name and _WORKSPACE_NAME["value"] is None:
@@ -1015,7 +1130,10 @@ def _resolve_workspace_name() -> str | None:
     if _WORKSPACE_NAME["value"]:
         return _WORKSPACE_NAME["value"]
     marker_ws = _read_marker().get("workspace")
-    if marker_ws:
+    if marker_ws and (
+        not OWNER_PREFIX
+        or (isinstance(marker_ws, str) and _workspace_identity_allowed(marker_ws))
+    ):
         _WORKSPACE_NAME["value"] = marker_ws
         return marker_ws
     return None
@@ -1159,7 +1277,7 @@ def _child_env_with_provider_keys(env: dict = None) -> dict:
     """A child-process environment carrying exactly the staged key set.
 
     Used for every process this shim spawns that may talk to a provider
-    (headless tasks, the `opencode web`/serve supervisor, init-workspace.sh).
+    (headless tasks, the `opencode serve` supervisor, init-workspace.sh).
     The names are POPPED first: the set is authoritative, so a key removed
     by the user must disappear from the child's environment even if this shim
     process (or a previous deployment's container ENV) still had it — that is
@@ -1581,7 +1699,7 @@ def _backup_db_durable() -> dict:
             manifest = {key: value for key, value in previous.items() if key != "_etag"}
             artifacts = dict(manifest.get("artifacts") or {})
             generation = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
-            artifact_key = f"checkpoint-generations/{workspace}/{generation}/opencode.db.backup"
+            artifact_key = _generation_key(workspace, generation, "opencode.db.backup")
             if not _upload_file_key(DB_BACKUP_PATH, artifact_key):
                 return {"status": "error", "db_backup": "db-upload"}
             artifacts["opencode.db.backup"] = artifact_key
@@ -1940,8 +2058,19 @@ def _s3():
     return _s3_client
 
 
+# Every SCH object key of the shim is built by one of these three helpers so the
+# owner segment (per-principal-isolation R26) cannot be forgotten at a call
+# site. With isolation off the keys are byte-identical to the historical ones.
 def _s3_key(workspace: str, name: str) -> str:
-    return f"checkpoints/{workspace}/{name}"
+    return f"checkpoints/{_owner_segment()}{workspace}/{name}"
+
+
+def _generation_key(workspace: str, generation: str, name: str) -> str:
+    return f"checkpoint-generations/{_owner_segment()}{workspace}/{generation}/{name}"
+
+
+def _writer_claim_key(workspace: str) -> str:
+    return f"workspace-writers/{_owner_segment()}{workspace}.json"
 
 
 def _error_code(exc: Exception) -> str:
@@ -1992,7 +2121,7 @@ def _fence_json_object(key: str, defaults: dict) -> None:
 def _claim_writer(workspace: str) -> None:
     if not CHECKPOINT_BUCKET or _WRITER_CLAIMED["workspace"] == workspace:
         return
-    key = f"workspace-writers/{workspace}.json"
+    key = _writer_claim_key(workspace)
     with _WRITER_CLAIM_LOCK:
         if _WRITER_CLAIMED["workspace"] == workspace:
             return
@@ -2052,7 +2181,7 @@ def _claim_writer(workspace: str) -> None:
 def _assert_writer_claim(workspace: str, claim_if_needed: bool = True) -> None:
     if claim_if_needed:
         _claim_writer(workspace)
-    key = f"workspace-writers/{workspace}.json"
+    key = _writer_claim_key(workspace)
     try:
         obj = _s3().get_object(Bucket=CHECKPOINT_BUCKET, Key=key)
         claim = json.loads(obj["Body"].read().decode())
@@ -2365,8 +2494,7 @@ def _telegram_interaction_gate() -> bool:
 
 
 def _seeded_opencode_model() -> tuple | None:
-    """(providerID, modelID) from the seeded opencode config, for the
-    injection fallback when the serve API requires an explicit model."""
+    """(providerID, modelID) from the seeded opencode config."""
     try:
         config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
         model = config.get("model") or ""
@@ -2385,7 +2513,9 @@ def _opencode_resume_model(session_id: str | None) -> str | None:
         return None
     try:
         with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
-            row = conn.execute("SELECT model FROM session WHERE id = ?", (session_id,)).fetchone()
+            row = conn.execute(
+                f"SELECT model FROM {OPENCODE_SESSION_TABLE} WHERE id = ?", (session_id,)
+            ).fetchone()
         session_model = json.loads(row[0]) if row and row[0] else {}
         provider = session_model.get("providerID") or ""
         if provider and provider not in _opencode_available_providers():
@@ -2415,63 +2545,26 @@ _STAGED_KEY_PROVIDERS = {
 
 
 def _opencode_available_providers() -> set:
-    """Provider IDs opencode can serve through config, auth, keys, or IAM."""
+    """Provider IDs opencode can serve through config, stored credentials,
+    staged keys, or IAM."""
     try:
         config = json.loads(OPENCODE_CONFIG_FILE.read_text(encoding="utf-8"))
-        configured = set((config.get("provider") or {}).keys())
+        # OpenCode 2 accepts both the V1 `provider` map and the native V2
+        # `providers` map (the seed uses the V2 one, TASK-9).
+        configured = set()
+        for key in ("provider", "providers"):
+            section = config.get(key)
+            if isinstance(section, dict):
+                configured.update(section.keys())
     except Exception:  # noqa: BLE001
         configured = set()
 
-    # OpenCode stores `/connect` and `auth login` credentials under its XDG
-    # data directory, keyed by provider ID. Validate the pinned version's
-    # credential shapes without retaining or logging any credential values.
-    try:
-        auth = json.loads(OPENCODE_AUTH_FILE.read_text(encoding="utf-8"))
-        if isinstance(auth, dict):
-            for provider, credential in auth.items():
-                if not isinstance(provider, str) or not MODEL_ID_RE.fullmatch(provider):
-                    continue
-                if not isinstance(credential, dict):
-                    continue
-                auth_type = credential.get("type")
-                valid = False
-                if auth_type == "oauth":
-                    expires = credential.get("expires")
-                    valid = (
-                        isinstance(credential.get("refresh"), str)
-                        and isinstance(credential.get("access"), str)
-                        and isinstance(expires, int)
-                        and not isinstance(expires, bool)
-                        and expires >= 0
-                        and all(
-                            name not in credential or isinstance(credential[name], str)
-                            for name in ("accountId", "enterpriseUrl")
-                        )
-                    )
-                elif auth_type == "api":
-                    metadata = credential.get("metadata")
-                    valid = (
-                        isinstance(credential.get("key"), str)
-                        and (
-                            "metadata" not in credential
-                            or (
-                                isinstance(metadata, dict)
-                                and all(
-                                    isinstance(key, str) and isinstance(value, str)
-                                    for key, value in metadata.items()
-                                )
-                            )
-                        )
-                    )
-                elif auth_type == "wellknown":
-                    valid = (
-                        isinstance(credential.get("key"), str)
-                        and isinstance(credential.get("token"), str)
-                    )
-                if valid:
-                    configured.add(provider)
-    except Exception:  # noqa: BLE001
-        pass
+    # OpenCode 2 keeps `/connect` and `auth login` credentials in the SQLite
+    # `credential` table, one row per stored credential with `integration_id`
+    # = the provider ID (1.x kept them in $XDG_DATA_HOME/opencode/auth.json,
+    # which 2.x imports once and then ignores). Only the provider IDs are read;
+    # credential values are never retained or logged.
+    configured.update(_opencode_stored_credential_providers())
 
     staged = _read_staged_provider_keys()
     for key, providers in _STAGED_KEY_PROVIDERS.items():
@@ -2479,6 +2572,24 @@ def _opencode_available_providers() -> set:
             configured.update(providers)
     configured.add("amazon-bedrock")
     return configured
+
+
+def _opencode_stored_credential_providers() -> set:
+    if not OPENCODE_DB_LOCAL.exists():
+        return set()
+    providers: set = set()
+    try:
+        with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
+            rows = conn.execute(
+                f"SELECT integration_id FROM {OPENCODE_CREDENTIAL_TABLE} "
+                "WHERE integration_id IS NOT NULL AND value IS NOT NULL AND value != ''"
+            ).fetchall()
+        for (provider,) in rows:
+            if isinstance(provider, str) and MODEL_ID_RE.fullmatch(provider):
+                providers.add(provider)
+    except Exception:  # noqa: BLE001
+        pass
+    return providers
 
 
 def _opencode_session_model_variant(session_id: str | None) -> tuple[str | None, str | None]:
@@ -2496,7 +2607,9 @@ def _opencode_session_model_variant(session_id: str | None) -> tuple[str | None,
         return None, None
     try:
         with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
-            row = conn.execute("SELECT model FROM session WHERE id = ?", (session_id,)).fetchone()
+            row = conn.execute(
+                f"SELECT model FROM {OPENCODE_SESSION_TABLE} WHERE id = ?", (session_id,)
+            ).fetchone()
         session_model = json.loads(row[0]) if row and row[0] else {}
         if not isinstance(session_model, dict):
             return None, None
@@ -2543,11 +2656,19 @@ def _opencode_continue_model(session_id: str | None) -> tuple[str | None, str | 
 
 
 def _opencode_api(method: str, path: str, payload: dict = None, timeout: float = 10.0):
+    """Call the supervised OpenCode 2 backend. Paths are given WITHOUT the
+    `/api` prefix (added here); every route needs basic auth `opencode:<pw>`."""
     port = _SERVE_STATE.get("port") or OPENCODE_SERVE_PORT
-    url = f"http://127.0.0.1:{port}{path}"
+    url = f"http://127.0.0.1:{port}/api{path}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    token = base64.b64encode(
+        f"{OPENCODE_SERVE_USER}:{_opencode_serve_password()}".encode("utf-8")
+    ).decode("ascii")
     request = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method=method
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "Authorization": f"Basic {token}"},
+        method=method,
     )
     with urllib.request.urlopen(request, timeout=timeout) as resp:
         body = resp.read().decode("utf-8")
@@ -2555,21 +2676,22 @@ def _opencode_api(method: str, path: str, payload: dict = None, timeout: float =
 
 
 def _opencode_inject_text(text: str) -> dict:
-    """Inject ``text`` as a user message into the most recent session of the
-    supervised ``opencode web`` backend (design D5 case 2 / task 4.1).
+    """Inject ``text`` as a user message into the most recent top-level session
+    of the supervised ``opencode serve`` backend (design D5 case 2 / task 4.1).
 
-    Returns {ok, session_id?, title?, error?}. The message POST runs the
-    whole turn server-side, so it is fired on a worker thread: we wait a
-    short beat to catch immediate errors (bad session, schema rejection).
-    The turn-end milestone is the only success response sent to Telegram."""
+    Returns {ok, session_id?, title?, error?}. OpenCode 2's
+    ``POST /api/session/{id}/prompt`` enqueues the message (delivery "steer")
+    and returns immediately; the turn runs server-side and its end is the only
+    success milestone Telegram gets (session.idle via the seeded plugin)."""
     if not _serve_is_alive():
         return {"ok": False, "error": "backend opencode non attivo"}
     try:
-        sessions = _opencode_api("GET", "/session") or []
+        listing = _opencode_api("GET", "/session") or {}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"lista sessioni non disponibile ({exc})"}
+    sessions = listing.get("data") if isinstance(listing, dict) else listing
     candidates = [
-        s for s in sessions
+        s for s in (sessions or [])
         if isinstance(s, dict) and s.get("id") and not s.get("parentID")
     ]
     if not candidates:
@@ -2579,55 +2701,14 @@ def _opencode_inject_text(text: str) -> dict:
     )
     target = candidates[0]
     session_id = target["id"]
-
-    outcome: dict = {}
-
-    def _post() -> None:
-        # Preference order (verified against the opencode server API):
-        # /prompt_async (204, does not wait for the turn) then /message
-        # (synchronous, waits for the whole turn); each optionally retried
-        # with the seeded model when the server rejects a model-less body.
-        base = {"parts": [{"type": "text", "text": text}]}
-        model = _seeded_opencode_model()
-        attempts = [("/prompt_async", base, 15.0)]
-        if model:
-            attempts.append((
-                "/prompt_async",
-                dict(base, model={"providerID": model[0], "modelID": model[1]}),
-                15.0,
-            ))
-        attempts.append(("/message", base, 1800.0))
-        if model:
-            attempts.append((
-                "/message",
-                dict(base, model={"providerID": model[0], "modelID": model[1]}),
-                1800.0,
-            ))
-        last_error = None
-        for suffix, payload, timeout in attempts:
-            try:
-                _opencode_api(
-                    "POST", f"/session/{session_id}{suffix}", payload, timeout=timeout
-                )
-                outcome["done"] = True
-                return
-            except urllib.error.HTTPError as exc:
-                last_error = f"HTTP {exc.code}"
-                if exc.code in (400, 404, 422):
-                    continue  # older/newer API shape: try the next form
-                break
-            except Exception as exc:  # noqa: BLE001
-                last_error = str(exc)
-                break
-        outcome["error"] = last_error or "iniezione fallita"
-
-    worker = threading.Thread(
-        target=_post, name="sch-telegram-inject", daemon=True
-    )
-    worker.start()
-    worker.join(2.5)
-    if outcome.get("error"):
-        return {"ok": False, "error": outcome["error"], "session_id": session_id}
+    try:
+        _opencode_api(
+            "POST", f"/session/{session_id}/prompt", {"text": text}, timeout=15.0
+        )
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "error": f"HTTP {exc.code}", "session_id": session_id}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "session_id": session_id}
     return {
         "ok": True,
         "session_id": session_id,
@@ -2910,6 +2991,16 @@ def _do_checkpoint(force: bool) -> dict:
     action / `sch stop`, which also forces a manifest write even with no
     detected changes so the final timestamp is certain). Serialized against
     the periodic loop and other concurrent forced calls via _CHECKPOINT_LOCK."""
+    if OWNER_PREFIX and not _WORKSPACE_READY.is_set():
+        # R31: before the bootstrap restore completes a checkpoint would write
+        # the DB backup and harness replicas into the workspace root (and
+        # publish a manifest of a not-yet-restored workspace). Nothing can
+        # have changed yet, so there is nothing to save.
+        CHECKPOINT_STATE["last_result"] = "skipped-not-ready"
+        return {
+            "status": "skipped-not-ready", "db_backup": "skipped-not-ready",
+            "manifest_written": False,
+        }
     with _CHECKPOINT_LOCK:
         result: dict = {"db_backup": _backup_db_once()}
         workspace = _resolve_workspace_name()
@@ -2977,7 +3068,7 @@ def _do_checkpoint(force: bool) -> dict:
         def upload_artifact(path: Path, name: str) -> bool:
             if not s3_backend:
                 return _upload_file(path, workspace, name)
-            key = f"checkpoint-generations/{workspace}/{generation}/{name}"
+            key = _generation_key(workspace, generation, name)
             if not _upload_file_key(path, key):
                 return False
             artifacts[name] = key
@@ -3180,6 +3271,15 @@ def _validate_manifest(manifest: dict, storage_backend: str) -> dict:
             for name in required
         ):
             raise ManifestReadError("manifest is missing required artifact references")
+        if OWNER_PREFIX:
+            # Defense in depth for R28: with isolation on, a manifest may only
+            # point into this owner's trees (the bucket policy denies the rest).
+            owned = (f"checkpoints/{OWNER_PREFIX}/", f"checkpoint-generations/{OWNER_PREFIX}/")
+            if any(
+                not isinstance(key, str) or not key.startswith(owned)
+                for key in artifacts.values()
+            ):
+                raise ManifestReadError("manifest references artifacts outside the owner prefix")
     return manifest
 
 
@@ -3203,72 +3303,301 @@ def _download_manifest(workspace: str) -> dict | None:
         raise ManifestReadError(f"manifest download failed: {exc}") from exc
 
 
-def _project_env_plan(repo_dir: Path) -> list:
-    """Which regenerable project envs need rebuilding (TASK-1.3).
+NODE_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json")
+# Files a rebuild tool could create or rewrite at the repo root. Their bytes
+# are snapshotted before the rebuild and put back afterwards (TASK-21), so a
+# tool that misbehaves never changes a lockfile or a manifest.
+ENV_REBUILD_PROTECTED_FILES = (
+    "package.json", *NODE_LOCKFILES, "yarn.lock", "pnpm-lock.yaml",
+    "pyproject.toml", "uv.lock", "requirements.txt",
+)
+# Variables that could point a rebuild step at an interpreter or environment
+# other than the project-local one (the shim's own python3.11, its user site,
+# or a foreign venv).
+ENV_REBUILD_SCRUBBED_VARS = (
+    "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_SYSTEM_PYTHON",
+    "PIP_USER", "PIP_TARGET", "PIP_PREFIX", "PYTHONUSERBASE", "PYTHONHOME",
+    "CONDA_PREFIX",
+)
+ENV_REBUILD_STEP_TIMEOUT = 600
+# Last post-restore rebuild outcome, surfaced by the info action
+# (checkpoint.env_rebuild) and `sch status --live`.
+ENV_REBUILD_STATE: dict = {"status": "not-run"}
 
-    Returns [(label, argv)] for envs whose manifest exists but whose
-    directory is absent — the exact state an L2 restore produces now that
-    node_modules/.venv no longer ride the repo tarball. Labels are stable
-    strings consumed by _maybe_rebuild_project_env and tests.
+
+def _project_env_plan(repo_dir: Path) -> list:
+    """Which regenerable project envs need rebuilding (TASK-1.3, TASK-21).
+
+    Returns one step dict per env whose manifest exists but whose directory
+    is absent (the exact state an L2 restore produces, since node_modules and
+    .venv never ride the repo tarball):
+
+        {"env": "node"|"python", "label": str, "commands": [argv, ...],
+         "skip": None | reason}
+
+    Only lockfile-driven, non-mutating commands are planned. A project
+    without a lockfile is skipped with a reason instead of resolved afresh:
+    `npm install` and `uv sync` would write a new lockfile into the repo and
+    pick versions nobody pinned. Python never installs into the shim's own
+    interpreter: every Python step targets the project-local `.venv`.
     """
     plan: list = []
     if (repo_dir / "package.json").is_file() and not (repo_dir / "node_modules").is_dir():
-        if (repo_dir / "package-lock.json").is_file():
-            plan.append(("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"]))
+        if any((repo_dir / name).is_file() for name in NODE_LOCKFILES):
+            plan.append({
+                "env": "node", "label": "npm-ci", "skip": None,
+                "commands": [["npm", "ci", "--no-audit", "--no-fund"]],
+            })
         else:
-            plan.append(("npm-install", ["npm", "install", "--no-audit", "--no-fund"]))
+            plan.append({
+                "env": "node", "label": "npm-ci", "commands": [],
+                "skip": "no-lockfile: package.json without package-lock.json "
+                        "(npm install would write one)",
+            })
     if not (repo_dir / ".venv").is_dir():
-        if (repo_dir / "uv.lock").is_file() or (repo_dir / "pyproject.toml").is_file():
-            plan.append(("uv-sync", ["uv", "sync"]))
+        venv_python = str(repo_dir / ".venv" / "bin" / "python")
+        if (repo_dir / "uv.lock").is_file() and (repo_dir / "pyproject.toml").is_file():
+            plan.append({
+                "env": "python", "label": "uv-sync-frozen", "skip": None,
+                "commands": [["uv", "sync", "--frozen"]],
+            })
         elif (repo_dir / "requirements.txt").is_file():
-            plan.append((
-                "pip-install",
-                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-            ))
+            plan.append({
+                "env": "python", "label": "uv-pip-requirements", "skip": None,
+                "commands": [
+                    ["uv", "venv", "--quiet", ".venv"],
+                    ["uv", "pip", "install", "--python", venv_python,
+                     "-r", "requirements.txt"],
+                ],
+            })
+        elif (repo_dir / "pyproject.toml").is_file():
+            plan.append({
+                "env": "python", "label": "uv-sync-frozen", "commands": [],
+                "skip": "no-lockfile: pyproject.toml without uv.lock "
+                        "(uv sync would write one)",
+            })
     return plan
 
 
+def _env_rebuild_child_env() -> dict:
+    env = _apply_memory_caps(_child_env_with_provider_keys())
+    for name in ENV_REBUILD_SCRUBBED_VARS:
+        env.pop(name, None)
+    return env
+
+
+def _git_worktree_status(repo_dir: Path) -> dict | None:
+    """{path: porcelain XY code} for the worktree, or None when the repo is
+    not a git worktree or git is unavailable. Ignored files (the excluded env
+    dirs) never appear, so the rebuilt envs do not count as changes."""
+    if shutil.which("git") is None or not (repo_dir / ".git").exists():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-c", f"safe.directory={repo_dir}", "status",
+             "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"],
+            cwd=str(repo_dir), capture_output=True, timeout=60,
+        )
+    except Exception:  # noqa: BLE001 — observation only
+        return None
+    if proc.returncode != 0:
+        return None
+    status: dict = {}
+    for entry in proc.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        if len(entry) > 3:
+            rel = entry[3:]
+            # Paths under an excluded env dir (e.g. a node_modules that is not
+            # gitignored) are the rebuild's output, never checkpointed state.
+            if REPO_CHECKPOINT_EXCLUDE_NAMES.intersection(rel.rstrip("/").split("/")):
+                continue
+            status[rel] = entry[:2]
+    return status
+
+
+def _snapshot_protected_files(repo_dir: Path) -> dict:
+    snap: dict = {}
+    for name in ENV_REBUILD_PROTECTED_FILES:
+        path = repo_dir / name
+        try:
+            snap[name] = path.read_bytes() if path.is_file() else None
+        except OSError:
+            snap[name] = None
+    return snap
+
+
+def _restore_worktree_after_rebuild(
+    repo_dir: Path, protected: dict, git_before: dict | None,
+) -> str:
+    """Undo any repo change a rebuild step made (TASK-21, defense in depth:
+    the planned commands are already non-mutating). Returns the worktree
+    verdict: unchanged | restored | changed | not-a-git-repo."""
+    restored = False
+    for name, content in protected.items():
+        path = repo_dir / name
+        try:
+            if content is None:
+                if path.is_file():
+                    path.unlink()
+                    restored = True
+                    logger.warning("env rebuild: removed stray %s", name)
+            elif not path.is_file() or path.read_bytes() != content:
+                path.write_bytes(content)
+                restored = True
+                logger.warning("env rebuild: restored rewritten %s", name)
+        except OSError as exc:
+            logger.warning("env rebuild: cannot restore %s: %s", name, exc)
+    if git_before is None:
+        return "restored" if restored else "not-a-git-repo"
+    git_after = _git_worktree_status(repo_dir)
+    if git_after is None:
+        return "changed"
+    for rel, code in git_after.items():
+        if git_before.get(rel) == code:
+            continue
+        path = repo_dir / rel
+        try:
+            if code == "??" and rel not in git_before:
+                path.unlink()
+                parent = path.parent
+                while parent != repo_dir and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+                restored = True
+                logger.warning("env rebuild: removed stray untracked %s", rel)
+            elif rel not in git_before:
+                # Clean before the rebuild: the index holds the checkpointed
+                # content, so checking it out is an exact revert.
+                subprocess.run(
+                    ["git", "-c", f"safe.directory={repo_dir}", "checkout",
+                     "--", rel],
+                    cwd=str(repo_dir), capture_output=True, timeout=60, check=True,
+                )
+                restored = True
+                logger.warning("env rebuild: reverted tracked %s", rel)
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            logger.warning("env rebuild: cannot revert %s: %s", rel, exc)
+    final = _git_worktree_status(repo_dir)
+    if final != git_before:
+        logger.warning(
+            "env rebuild: worktree differs from checkpoint state: %s",
+            sorted(set((final or {}).items()) ^ set(git_before.items())),
+        )
+        return "changed"
+    return "restored" if restored else "unchanged"
+
+
+def _env_rebuild_status(steps: list) -> str:
+    results = [step["result"] for step in steps]
+    if all(r == "ok" for r in results):
+        return "rebuilt"
+    if any(r == "ok" for r in results):
+        return "rebuilt-partial"
+    if any(r == "failed" for r in results):
+        return "rebuild-failed"
+    if all(r == "unavailable" for r in results):
+        return "skipped-unavailable"
+    if all(r == "skipped" and (s.get("reason") or "").startswith("no-lockfile")
+           for r, s in zip(results, steps)):
+        return "skipped-no-lockfile"
+    return "skipped"
+
+
+def _env_rebuild_summary(steps: list) -> str:
+    parts = []
+    for step in steps:
+        text = f"{step['env']} {step['label']} {step['result']}"
+        if step.get("reason"):
+            text += f" ({step['reason']})"
+        parts.append(text)
+    return "; ".join(parts)
+
+
+def _record_env_rebuild(status: str, steps: list | None = None,
+                        worktree: str | None = None) -> str:
+    steps = steps or []
+    ENV_REBUILD_STATE.clear()
+    ENV_REBUILD_STATE.update({
+        "status": status,
+        "steps": steps,
+        "summary": _env_rebuild_summary(steps),
+        "worktree": worktree,
+        "finished_utc": _utcnow(),
+    })
+    return status
+
+
+def _run_env_rebuild_step(step: dict, env: dict) -> None:
+    """Run one planned step in place, recording result and reason."""
+    if step.get("skip"):
+        step["result"], step["reason"] = "skipped", step["skip"]
+        logger.info("env rebuild %s skipped: %s", step["label"], step["skip"])
+        return
+    for argv in step["commands"]:
+        if shutil.which(argv[0]) is None:
+            step["result"], step["reason"] = "unavailable", f"{argv[0]} not on PATH"
+            logger.warning("env rebuild: %s unavailable, skipping (%s)", argv[0], step["label"])
+            return
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(REPO_DIR), env=env,
+                capture_output=True, text=True, timeout=ENV_REBUILD_STEP_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            step["result"], step["reason"] = "failed", str(exc)[:300]
+            logger.warning("env rebuild %s failed: %s", step["label"], exc)
+            return
+        if proc.returncode != 0:
+            tail = ((proc.stderr or "")[-2000:] or f"exit {proc.returncode}").strip()
+            step["result"] = "failed"
+            step["reason"] = f"{argv[0]} exit {proc.returncode}"
+            logger.warning("env rebuild %s failed: %s", step["label"], tail)
+            return
+    step["result"], step["reason"] = "ok", None
+    logger.info("env rebuild %s succeeded", step["label"])
+
+
 def _maybe_rebuild_project_env() -> str:
-    """Best-effort rebuild of the excluded project env after an L2 restore
-    (TASK-1.3). Never fail-closed: every failure mode returns a
+    """Best-effort rebuild of the excluded project envs after an L2 restore
+    (TASK-1.3, TASK-21). Never fail-closed: every failure mode returns a
     skipped-*/rebuild-failed status and logs loudly, so boot always proceeds.
+
+    Lockfile-only and repo-neutral: the planned commands never write into
+    the repository, and a guard restores anything a step changed anyway, so
+    `git status` after the rebuild equals the checkpointed state. Optional
+    extras and custom install commands are not reproduced.
 
     Runs under the TASK-1.2 caps (a restore-time `npm ci` is itself a
     transient spike candidate) with a bounded timeout per step.
     """
     if os.environ.get("SCH_REBUILD_ENV_ON_RESTORE", REBUILD_ENV_ON_RESTORE_DEFAULT) == "0":
-        return "skipped-disabled"
-    plan = _project_env_plan(REPO_DIR)
-    if not plan:
-        return "skipped-noop"
-    env = _apply_memory_caps(_child_env_with_provider_keys())
-    outcomes: list = []
-    for label, argv in plan:
-        if shutil.which(argv[0]) is None:
-            logger.warning("env rebuild: %s unavailable, skipping (%s)", argv[0], label)
-            outcomes.append(f"{label}:unavailable")
-            continue
-        try:
-            proc = subprocess.run(
-                argv, cwd=str(REPO_DIR), env=env,
-                capture_output=True, text=True, timeout=600,
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort by contract
-            logger.warning("env rebuild %s failed: %s", label, exc)
-            outcomes.append(f"{label}:failed")
-            continue
-        if proc.returncode != 0:
-            tail = ((proc.stderr or "")[-2000:] or f"exit {proc.returncode}").strip()
-            logger.warning("env rebuild %s failed: %s", label, tail)
-            outcomes.append(f"{label}:failed")
-        else:
-            logger.info("env rebuild %s succeeded", label)
-            outcomes.append(f"{label}:ok")
-    if any(o.endswith(":ok") for o in outcomes):
-        return "rebuilt"
-    if all(o.endswith(":unavailable") for o in outcomes):
-        return "skipped-unavailable"
-    return "rebuild-failed"
+        return _record_env_rebuild("skipped-disabled")
+    try:
+        plan = _project_env_plan(REPO_DIR)
+        if not plan:
+            return _record_env_rebuild("skipped-noop")
+        protected = _snapshot_protected_files(REPO_DIR)
+        git_before = _git_worktree_status(REPO_DIR)
+        env = _env_rebuild_child_env()
+        steps = []
+        for planned in plan:
+            step = {"env": planned["env"], "label": planned["label"]}
+            run = dict(planned)
+            _run_env_rebuild_step(run, env)
+            step["result"], step["reason"] = run["result"], run.get("reason")
+            steps.append(step)
+        worktree = _restore_worktree_after_rebuild(REPO_DIR, protected, git_before)
+        status = _env_rebuild_status(steps)
+        logger.info(
+            "env rebuild: %s (%s; worktree=%s)",
+            status, _env_rebuild_summary(steps), worktree,
+        )
+        return _record_env_rebuild(status, steps, worktree)
+    except Exception as exc:  # noqa: BLE001 — never fail the restore
+        logger.warning("env rebuild aborted: %s", exc)
+        return _record_env_rebuild("rebuild-failed", [{
+            "env": "-", "label": "rebuild", "result": "failed",
+            "reason": str(exc)[:300],
+        }])
 
 
 def _restore_l2(workspace: str) -> dict:
@@ -3443,6 +3772,12 @@ def _bootstrap() -> None:
     """Full boot sequence, run in a background thread so /ping is served
     immediately while the (asynchronous) session-storage restore settles."""
     _remove_telegram_enabled_marker()
+    if OWNER_PREFIX_ERROR:
+        # R29: a malformed owner prefix never reaches S3 or the workspace.
+        BOOT_STATE["phase"] = "error"
+        BOOT_STATE["error"] = OWNER_PREFIX_ERROR
+        logger.error("bootstrap refused: %s", OWNER_PREFIX_ERROR)
+        return
     try:
         BOOT_STATE["phase"] = "waiting-storage-backend"
         backend_deadline = time.monotonic() + MOUNT_SETTLE_TIMEOUT
@@ -3608,6 +3943,9 @@ def _bootstrap() -> None:
         # than silently proceeding — matches D8's mutual-exclusivity intent
         # at the TUI level. Reached only after the seed (fresh init OR L2
         # restore, both covered by the verify loop above) is confirmed.
+        if OWNER_PREFIX:
+            # Deferred from invoke() while the restore was pending (R31).
+            _reconcile_github_access()
         ready_marker = _harness_ready_marker(_resolve_harness())
         if _resolve_storage_backend() == "session" and SESSION_RESTORE_MARKER.exists():
             raise RuntimeError("session restore promotion appeared before readiness")
@@ -3733,14 +4071,24 @@ def _run_init_workspace() -> dict:
 
 
 def _opencode_version() -> str:
+    """Installed OpenCode version as a bare `X.Y.Z`. OpenCode 2 prints
+    `opencode v2.0.18` (1.x printed the bare version); the prefix is stripped so
+    the value stays comparable with the Dockerfile pin and the laptop CLI's
+    version-parity check."""
     exe = shutil.which("opencode")
     if not exe:
         return "not-installed"
     try:
         out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
-        return out.stdout.strip() or out.stderr.strip() or "unknown"
+        raw = out.stdout.strip() or out.stderr.strip() or "unknown"
+        return _normalize_opencode_version(raw)
     except Exception as exc:  # noqa: BLE001
         return f"error: {exc}"
+
+
+def _normalize_opencode_version(raw: str) -> str:
+    match = re.search(r"\bv?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b", raw or "")
+    return match.group(1) if match else (raw or "unknown").strip()
 
 
 def _claude_version() -> str:
@@ -3793,22 +4141,20 @@ def _workspace_info() -> dict:
 
 
 def _resolve_latest_opencode_session() -> str | None:
-    """Return the latest OpenCode session associated with this worktree."""
+    """Return the latest top-level OpenCode session associated with this
+    worktree. OpenCode 2 stores sessions in the `session_v2` table (the 1.x
+    `session` table is not read: fresh installation, TASK-7); child sessions
+    (subagents, `parent_id` set) are never resumed."""
     if not OPENCODE_DB_LOCAL.exists():
         return None
     try:
         conn = sqlite3.connect(str(OPENCODE_DB_LOCAL))
         try:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(session)")}
-            if "directory" in columns:
-                rows = conn.execute(
-                    "SELECT id FROM session WHERE directory = ? "
-                    "ORDER BY time_updated DESC LIMIT 1", (str(REPO_DIR),),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT id FROM session ORDER BY time_updated DESC LIMIT 1"
-                ).fetchall()
+            rows = conn.execute(
+                f"SELECT id FROM {OPENCODE_SESSION_TABLE} "
+                "WHERE directory = ? AND parent_id IS NULL "
+                "ORDER BY time_updated DESC LIMIT 1", (str(REPO_DIR),),
+            ).fetchall()
             return rows[0][0] if rows else None
         finally:
             conn.close()
@@ -4534,7 +4880,7 @@ def _handle_session_import(payload: dict) -> dict:  # noqa: ARG001
         try:
             with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
                 reimported = conn.execute(
-                    "SELECT 1 FROM session WHERE id = ?", (session_id,)
+                    f"SELECT 1 FROM {OPENCODE_SESSION_TABLE} WHERE id = ?", (session_id,)
                 ).fetchone() is not None
         except sqlite3.Error:
             pass
@@ -4545,32 +4891,36 @@ def _handle_session_import(payload: dict) -> dict:  # noqa: ARG001
     # Same child-environment discipline as the task/serve spawns: this runs the
     # real `opencode` binary through the dispatcher, so it gets the staged key
     # set (import itself needs no provider, but no shim-spawned harness process
-    # is left with a stale key set).
+    # is left with a stale key set). OpenCode 2: `session import` (1.x had a
+    # top-level `import`), `--standalone` so no background service is spawned,
+    # `--directory` binds the session to the worktree explicitly.
     env = _child_env_with_provider_keys()
     env["SCH_HARNESS"] = "opencode"
     try:
         proc = subprocess.run(
-            [exe, "import", str(staged)], cwd=str(REPO_DIR), env=env,
-            capture_output=True, text=True, timeout=600,
+            [exe, "session", "import", "--standalone", "--directory", str(REPO_DIR), str(staged)],
+            cwd=str(REPO_DIR), env=env, capture_output=True, text=True, timeout=600,
         )
     except Exception as exc:  # noqa: BLE001
         return {"status": "error", "action": action, "opencodeVersion": version,
-                "error": f"opencode import failed: {exc}"}
+                "error": f"opencode session import failed: {exc}"}
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "unknown error").strip()[-4000:]
         return {"status": "error", "action": action, "opencodeVersion": version,
-                "error": f"opencode import failed: {detail}"}
+                "error": f"opencode session import failed: {detail}"}
     try:
         with sqlite3.connect(str(OPENCODE_DB_LOCAL)) as conn:
             row = conn.execute(
-                "SELECT time_updated FROM session WHERE id = ?", (session_id,)
+                f"SELECT time_updated FROM {OPENCODE_SESSION_TABLE} WHERE id = ?", (session_id,)
             ).fetchone()
             if row is None:
                 raise RuntimeError("imported session is absent from opencode.db")
             if _resolve_latest_opencode_session() != session_id:
-                maximum = conn.execute("SELECT COALESCE(MAX(time_updated), 0) FROM session").fetchone()[0]
+                maximum = conn.execute(
+                    f"SELECT COALESCE(MAX(time_updated), 0) FROM {OPENCODE_SESSION_TABLE}"
+                ).fetchone()[0]
                 conn.execute(
-                    "UPDATE session SET time_updated = ? WHERE id = ?",
+                    f"UPDATE {OPENCODE_SESSION_TABLE} SET time_updated = ? WHERE id = ?",
                     (max(int(time.time() * 1000), int(maximum) + 1), session_id),
                 )
                 conn.commit()
@@ -4790,7 +5140,9 @@ def _serve_is_alive() -> bool:
 
 
 def _serve_supervisor_loop() -> None:
-    """Background supervisor for the shared `opencode web` backend.
+    """Background supervisor for the shared `opencode serve` backend (OpenCode
+    2: the `serve` subcommand hosts both the HTTP API under `/api/*` and the web
+    UI on `/`, replacing 1.x's `opencode web`).
 
     Mirrors the Popen conventions of _run_task (process-group start,
     inherited+overridden env so harness-wrapper.sh dispatches to opencode
@@ -4801,6 +5153,8 @@ def _serve_supervisor_loop() -> None:
     workspace never gets a server started against an empty/default config.
     Never started eagerly at boot — only lazily, on the first `serve-ensure`
     action — so workspaces that never use `sch attach` or `sch web` pay no cost.
+    The basic-auth password is pinned through OPENCODE_SERVER_PASSWORD (see
+    _opencode_serve_password) so clients keep working across restarts.
     """
     while True:
         with _SERVE_LOCK:
@@ -4810,13 +5164,13 @@ def _serve_supervisor_loop() -> None:
             if not alive and ready:
                 if proc is not None:
                     logger.warning(
-                        "opencode web exited (code=%s); restarting (restart #%d)",
+                        "opencode serve exited (code=%s); restarting (restart #%d)",
                         proc.returncode, _SERVE_STATE["restart_count"] + 1,
                     )
                     _SERVE_STATE["restart_count"] += 1
                 opencode_exe = shutil.which("opencode") or "opencode"
                 argv = [
-                    opencode_exe, "web",
+                    opencode_exe, "serve",
                     "--hostname", "127.0.0.1",
                     "--port", str(OPENCODE_SERVE_PORT),
                 ]
@@ -4828,6 +5182,7 @@ def _serve_supervisor_loop() -> None:
                     # from its next restart — accepted, documented (design D4).
                     proc_env = _child_env_with_provider_keys()
                     proc_env["SCH_HARNESS"] = "opencode"
+                    proc_env["OPENCODE_SERVER_PASSWORD"] = _opencode_serve_password()
                     new_proc = subprocess.Popen(
                         argv,
                         stdin=subprocess.DEVNULL,
@@ -4842,10 +5197,10 @@ def _serve_supervisor_loop() -> None:
                     _SERVE_STATE["port"] = OPENCODE_SERVE_PORT
                     _SERVE_STATE["started_utc"] = _utcnow()
                     logger.info(
-                        "opencode web started: pid=%d port=%d", new_proc.pid, OPENCODE_SERVE_PORT,
+                        "opencode serve started: pid=%d port=%d", new_proc.pid, OPENCODE_SERVE_PORT,
                     )
                 except Exception as exc:  # noqa: BLE001 — supervisor must never die
-                    logger.error("failed to start opencode web: %s", exc, exc_info=True)
+                    logger.error("failed to start opencode serve: %s", exc, exc_info=True)
         time.sleep(3)
 
 
@@ -4919,23 +5274,60 @@ def _build_headless_argv(
             argv += ["--agent", _TASK_AGENT]
         argv += ["--dangerously-skip-permissions", prompt]
         return argv
-    # opencode (default)
+    # opencode (default) — OpenCode 2 `run` (TASK-7):
+    #   --standalone  embed a private server in this process (V1 semantics);
+    #                 without it 2.x would discover/start a per-user background
+    #                 service the shim does not supervise;
+    #   --model p/m#variant  the reasoning-effort variant rides the model
+    #                 reference (the 1.x `--variant` flag is gone); a variant
+    #                 with no model to attach to is dropped — the turn then runs
+    #                 with the model's default effort;
+    #   --agent       only when the seeded agent file exists: 2.x hard-errors on
+    #                 an unknown agent (1.x warned and fell back);
+    #   `--`          guards the prompt: 2.x boolean flags (`--auto`) consume a
+    #                 following boolean-literal token (`y`, `n`, `true`...) as
+    #                 their value, which would leave `run` with no message.
     opencode_exe = shutil.which("opencode") or "opencode"
-    argv = [opencode_exe, "run"]
+    argv = [opencode_exe, "run", "--standalone"]
     if session_id:
         argv += ["--session", session_id]
-    if model:
-        argv += ["--model", model]
-    if variant and MODEL_ID_RE.fullmatch(variant):
-        # Reasoning-effort variant (e.g. `high`): discrete pair like --model.
-        # A malformed value is dropped rather than failing the task — the turn
-        # then runs with the model's default effort.
-        argv += ["--variant", variant]
-    if _TASK_AGENT:
+    model_ref = _opencode_model_ref(model, variant)
+    if model_ref:
+        argv += ["--model", model_ref]
+    if _TASK_AGENT and _opencode_agent_available(_TASK_AGENT):
         argv += ["--agent", _TASK_AGENT]  # default "remote-auto" (sch-remote-agents)
     argv += _TASK_AUTO_APPROVE_FLAGS  # default ["--auto"]
-    argv += [prompt]
+    argv += ["--", prompt]
     return argv
+
+
+def _redact_argv(argv: list, prompt: str) -> list:
+    """The argv with every prompt element replaced by a length marker, for
+    logging only (per-principal-isolation R32: prompts stay out of the logs)."""
+    return [
+        f"<prompt: {len(prompt)} chars>" if prompt and arg == prompt else arg
+        for arg in argv
+    ]
+
+
+def _opencode_model_ref(model: str | None, variant: str | None) -> str | None:
+    """Compose OpenCode 2's `provider/model#variant` reference. A malformed
+    variant is dropped rather than failing the task."""
+    if not model:
+        return None
+    if variant and MODEL_ID_RE.fullmatch(variant) and "#" not in model:
+        return f"{model}#{variant}"
+    return model
+
+
+def _opencode_agent_available(agent: str) -> bool:
+    """True when the seeded agent definition `<XDG_CONFIG_HOME>/opencode/
+    agents/<agent>.md` (or the 1.x `agent/` spelling) is on disk."""
+    config_dir = OPENCODE_CONFIG_FILE.parent
+    return any(
+        (config_dir / folder / f"{agent}.md").is_file()
+        for folder in ("agents", "agent")
+    )
 
 
 def _resolve_latest_harness_session(harness: str) -> str | None:
@@ -5150,7 +5542,11 @@ def _run_task(
     stdout_data = ""
     stderr_data = ""
     try:
-        logger.info("task %s running (harness=%s): %s", task_id, harness, " ".join(argv))
+        # R32: never log the prompt itself, in any mode.
+        logger.info(
+            "task %s running (harness=%s): %s", task_id, harness,
+            " ".join(_redact_argv(argv, prompt)),
+        )
         # Run the harness in a new session/process-group so we can reliably
         # kill it and any child processes (npm/node/MCP servers) on timeout.
         # subprocess.run(timeout=...) only sends SIGTERM to the direct child
@@ -5734,6 +6130,21 @@ async def tunnel_websocket_handler(websocket, context):  # noqa: ARG001 — cont
             await websocket.close(code=1002)
         return
 
+    # Per-principal isolation (R29/R30): same gate as invoke(), first.
+    owner_rejection = _owner_rejection(first, "tunnel")
+    first_workspace = first.get("workspace")
+    if not owner_rejection and OWNER_PREFIX and first_workspace and not (
+        isinstance(first_workspace, str) and _workspace_identity_allowed(first_workspace)
+    ):
+        owner_rejection = {
+            "error": "workspace must be a registry workspace identity on an isolated runtime",
+        }
+    if owner_rejection:
+        with _suppress_close_errors():
+            await websocket.send_json({"type": "error", "message": owner_rejection["error"]})
+            await websocket.close(code=1008)
+        return
+
     if not _set_storage_backend(first.get("storage")):
         with _suppress_close_errors():
             await websocket.send_json({"type": "error", "message": "storage backend mismatch"})
@@ -5900,7 +6311,25 @@ def invoke(payload, context=None):
         payload = {}
 
     action = (payload.get("action") or payload.get("prompt") or "info").strip().lower()
-    logger.info("invocation action=%s", action)
+    # R32: a payload without `action` falls back to its `prompt`, so the raw
+    # value may be prompt text; only recognized action names reach the log.
+    if action in INVOKE_ACTIONS:
+        logger.info("invocation action=%s", action)
+    else:
+        logger.info("invocation action=<unrecognized: %d chars>", len(action))
+
+    # Per-principal isolation (R29/R30): before any other effect — no epoch,
+    # no staging, no S3 call, no workspace write.
+    owner_rejection = _owner_rejection(payload, action)
+    if owner_rejection:
+        return owner_rejection
+    workspace_hint = (payload.get("workspace") or "").strip()
+    if workspace_hint and OWNER_PREFIX and not _workspace_identity_allowed(workspace_hint):
+        # Isolation on: only registry identities name a workspace.
+        return {
+            "status": "rejected", "action": action,
+            "error": "workspace must be a registry workspace identity on an isolated runtime",
+        }
 
     storage_backend = (payload.get("storage_backend") or "").strip().lower()
     session_epoch = payload.get("session_epoch", 0)
@@ -5918,10 +6347,11 @@ def invoke(payload, context=None):
     # Workspace identity (design D2): explicit payload hint takes priority;
     # else derive from the runtimeSessionId prefix (sch-<ws>-<uuid>) when the
     # invocation context exposes it.
-    workspace_hint = (payload.get("workspace") or "").strip()
     if workspace_hint:
         _set_workspace_name(workspace_hint)
-    elif _WORKSPACE_NAME["value"] is None and context is not None:
+    elif _WORKSPACE_NAME["value"] is None and context is not None and not OWNER_PREFIX:
+        # The session-id fallback is off with isolation on: registry session
+        # IDs carry no workspace name.
         derived = _derive_workspace_from_session_id(getattr(context, "session_id", None))
         if derived:
             _set_workspace_name(derived)
@@ -5955,7 +6385,11 @@ def invoke(payload, context=None):
     # credential helper with the staged set on every invocation. No-op unless
     # the workspace is git-native; never fatal and never logs values — drift
     # degrades to the credential-less default.
-    _reconcile_github_access()
+    # With isolation on the reconciliation waits for the bootstrap (R31): it
+    # writes the repo's git config, and the L2 restore promotes only into an
+    # empty root. The bootstrap runs it once itself before readiness.
+    if not OWNER_PREFIX or _WORKSPACE_READY.is_set():
+        _reconcile_github_access()
 
     # Publish the backend last: the bootstrap thread uses this as the barrier
     # that workspace, harness, session id and epoch are all initialized.
@@ -5984,6 +6418,10 @@ def invoke(payload, context=None):
         # Synchronous, forced checkpoint (db -> mount, artefacts -> S3,
         # manifest always updated) — used by `sch stop` right before
         # StopRuntimeSession so no data from the last interval is lost.
+        if OWNER_PREFIX:
+            # R31: wait (bounded) for the bootstrap restore instead of
+            # writing into a root that is still being restored.
+            _WORKSPACE_READY.wait(FS_WORKSPACE_READY_TIMEOUT_S)
         result = _do_checkpoint(force=True)
         db_ok = result.get("db_backup") in ("ok", "no-local-db")
         l2_ok = result.get("status") == "ok" and result.get("manifest_written") is True
@@ -6142,6 +6580,10 @@ def invoke(payload, context=None):
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline and not _serve_is_alive():
             time.sleep(0.5)
+        # OpenCode 2 `serve` requires basic auth (user "opencode"); the pinned
+        # password travels to the caller inside the SigV4-authenticated invoke
+        # response only — `sch attach` hands it to the local TUI as
+        # OPENCODE_PASSWORD, `sch web` embeds it in the browser URL.
         return {
             "status": "ok" if _serve_is_alive() else "starting",
             "action": "serve-ensure",
@@ -6149,6 +6591,11 @@ def invoke(payload, context=None):
             "opencode_version": _opencode_version(),
             "workspace_ready": READY_MARKER.exists() and REPO_DIR.exists(),
             "capabilities": {"web": True},
+            "auth": {
+                "scheme": "basic",
+                "user": OPENCODE_SERVE_USER,
+                "password": _opencode_serve_password(),
+            },
         }
 
     if action == "task":
@@ -6237,6 +6684,10 @@ def invoke(payload, context=None):
                     "SCH_REBUILD_ENV_ON_RESTORE", REBUILD_ENV_ON_RESTORE_DEFAULT,
                 ) != "0",
             },
+            # TASK-21: last post-restore env rebuild — overall status, one
+            # entry per env with its result and reason, and the worktree
+            # verdict (unchanged/restored/changed/not-a-git-repo).
+            "env_rebuild": dict(ENV_REBUILD_STATE),
         }
         response["task"] = _task_info_field()
         # add-user-provider-keys: NAMES only, never values (spec:

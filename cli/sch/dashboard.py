@@ -11,6 +11,7 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Optional, Tuple
 
+from . import plane as plane_mod
 from .commands.list import read_workspace_records
 from .commands.status import read_offline_status
 from .config import checkpoint_bucket
@@ -54,15 +55,21 @@ def read_manifest_age(cfg, runtime_workspace, clock=time.time):
     """
     try:
         bucket = checkpoint_bucket(cfg)
+        # per-principal-isolation R26/R40: owner segment and access role,
+        # refreshed before expiry on every call (the refresh loop runs for
+        # as long as the dashboard is open).
+        key = plane_mod.checkpoint_key(cfg, runtime_workspace, "manifest.json")
+        options = plane_mod.s3_run_options(cfg)
         result = subprocess.run(
             [
                 "aws", "s3api", "head-object", "--bucket", bucket,
-                "--key", "checkpoints/{}/manifest.json".format(runtime_workspace),
+                "--key", key,
                 "--region", cfg.region,
                 "--query", "LastModified", "--output", "text",
             ],
             capture_output=True,
             text=True,
+            **options
         )
     except (OSError, ValueError, RuntimeError, SystemExit):
         return None

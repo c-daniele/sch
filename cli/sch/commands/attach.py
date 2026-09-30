@@ -5,7 +5,7 @@ for ``claude``). New workspaces therefore default to ``opencode``, regardless
 of ``SCH_DEFAULT_HARNESS``.
 """
 
-import subprocess
+import os
 import sys
 import time
 from pathlib import Path
@@ -13,6 +13,7 @@ from pathlib import Path
 from .. import deps, harness as harness_mod
 from .. import procs, repo, runtime, workspace
 from ..config import die, runtime_arn
+from ..deps import local_opencode_version
 
 _SERVE_ENSURE_ATTEMPTS = 5
 _SERVE_ENSURE_RETRY_DELAY_S = 2
@@ -157,11 +158,12 @@ def cmd_attach(cfg, args):
     if storage_error:
         die(storage_error)
 
-    # serve-ensure: ensure opencode serve is running remotely, get its port
-    # + installed version. Retry a few times — a cold/fresh workspace may
-    # report "starting" the first time.
+    # serve-ensure: ensure opencode serve is running remotely, get its port,
+    # installed version and basic-auth password (OpenCode 2). Retry a few
+    # times — a cold/fresh workspace may report "starting" the first time.
     remote_port = ""
     remote_opencode_version = ""
+    remote_password = ""
     serve_status = ""
     attempt = 0
     while attempt < _SERVE_ENSURE_ATTEMPTS:
@@ -178,6 +180,9 @@ def cmd_attach(cfg, args):
                 remote_opencode_version = str(
                     result.get("opencode_version", "") or ""
                 )
+                remote_password = str(
+                    ((result.get("auth") or {}).get("password") or "")
+                )
                 break
         else:
             serve_status = "invoke-failed"
@@ -191,13 +196,7 @@ def cmd_attach(cfg, args):
         )
 
     # Version-parity check between the local TUI and the remote server.
-    try:
-        version_result = subprocess.run(
-            ["opencode", "--version"], capture_output=True, text=True
-        )
-        local_version = version_result.stdout.strip() or "unknown"
-    except (OSError, FileNotFoundError):
-        local_version = "unknown"
+    local_version = local_opencode_version()
 
     if not force and local_version != remote_opencode_version:
         die(
@@ -220,6 +219,12 @@ def cmd_attach(cfg, args):
     )
     workspace.mark_status(cfg, ws, "attach-opened")
 
+    # The serve password travels to the bridge in the environment (never on
+    # the argv: it would show up in `ps`); attach.js hands it to the local
+    # TUI as OPENCODE_PASSWORD for `opencode --server <url>`.
+    bridge_env = dict(os.environ)
+    if remote_password:
+        bridge_env["SCH_OPENCODE_SERVER_PASSWORD"] = remote_password
     rc = procs.run_foreground(
         [
             "node",
@@ -238,7 +243,8 @@ def cmd_attach(cfg, args):
             str(session_epoch),
             "--remote-port",
             remote_port,
-        ]
+        ],
+        env=bridge_env,
     )
 
     runtime.invoke_best_effort(
