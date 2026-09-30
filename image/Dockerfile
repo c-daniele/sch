@@ -307,7 +307,7 @@ FROM ${RUNTIME_BASE} AS runtime
 # permission requests); 2.x is past it by construction, so the build asserts
 # the exact pin and the 2.x CLI surface SCH depends on instead of a floor.
 # npm package: `@opencode/cli` (the 1.x `opencode-ai` package stops at 1.18.x).
-ARG OPENCODE_VERSION=2.0.18
+ARG OPENCODE_VERSION=2.0.20
 # Claude Code (sch-multi-harness, design D10): pinned via npm-22, binary lands
 # at /usr/local/bin/claude. OQ-CLAUDE-VERSION (design Open Questions) calls for
 # a pinned @anthropic-ai/claude-code version that honors BOTH
@@ -316,7 +316,7 @@ ARG OPENCODE_VERSION=2.0.18
 # require a recent binary — bump the pin when the aliases move.
 # No `latest` tag (spec: runtime-image, "Claude Code installato a versione
 # pinnata").
-ARG CLAUDE_CODE_VERSION=2.1.282
+ARG CLAUDE_CODE_VERSION=2.1.285
 
 # Pi (add-pi-harness, design D10): third harness, pinned like everything else in
 # this image. 0.84.2 is the version whose behavior was verified empirically in a
@@ -327,7 +327,7 @@ ARG CLAUDE_CODE_VERSION=2.1.282
 # PRE-1.0: expect breaking changes between bumps, which is exactly why the
 # capability asserts below fail the BUILD (never degrade at runtime) and why the
 # session-layout resolver keeps a documented `-c` fallback.
-ARG PI_VERSION=0.87.1
+ARG PI_VERSION=0.99.1
 ARG SCH_IMAGE_VERSION=dev
 # v31: migrate-aws-api-to-managed-mcp — replaces the self-hosted
 # `awslabs.aws-api-mcp-server` (pinned 1.3.46, entering end-of-development

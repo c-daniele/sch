@@ -106,7 +106,7 @@ echo "${INFO}" | grep -q '"status": *"ok"' && { echo "PASS: info invocation"; PA
 
 echo "== 4. opencode pin =="
 PINNED=$(docker exec "${CONTAINER}" printenv OPENCODE_VERSION)
-# OpenCode 2 prints `opencode v2.0.18`; compare the bare version with the pin.
+# OpenCode 2 prints `opencode v2.0.20`; compare the bare version with the pin.
 INSTALLED=$(docker exec "${CONTAINER}" opencode --version | sed -E 's/^opencode[[:space:]]+v?//' | tr -d '[:space:]')
 echo "pinned=${PINNED} installed=${INSTALLED}"
 [ "${INSTALLED}" = "${PINNED}" ] && { echo "PASS: opencode version matches pin"; PASS=$((PASS+1)); } \
