@@ -4,6 +4,7 @@ title: Registry DELETE times out while AgentCore is still stopping the live micr
 status: To Do
 assignee: []
 created_date: '2026-09-29 09:05'
+updated_date: '2026-09-30 08:19'
 labels:
   - registry
   - reliability
@@ -38,3 +39,9 @@ Evidence: TASK-20 implementation notes (2026-09-29) and journal doc-21.
 - [ ] #2 The registry Lambda timeout and the client timeout are consistent (client waits longer than the Lambda) and documented in the spec iam-workspace-registry
 - [ ] #3 Unit tests cover a slow StopRuntimeSession in the handler and the timeout/202 paths in the CLI client; a live delete of a running workspace passes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-30: reproduced by the maintainer with the minimal caller policy: sch delete on a workspace whose task was still running failed with 'registry finalize failed: workspace registry request failed' (registry REPORT: Duration 10000 ms, Status: timeout); record left in deletionState=deleting; retry expected to complete in 1-2 s as on 2026-09-29.
+<!-- SECTION:NOTES:END -->

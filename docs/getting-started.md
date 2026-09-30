@@ -168,8 +168,9 @@ what `sch` calls; the owner key is printed by the deploy and by `sch info`):
 As one identity policy for the listed user whose owner key is
 `044f48490641a561` on project `sch`, environment `dev` (replace the region,
 account ID, API ID and owner key; the runtime ARN keeps its `-*` suffix because
-the runtime ID is assigned at deploy time). The live check of 2026-09-29 ran
-with broader grants; this minimal shape is derived from what `sch` calls:
+the runtime ID is assigned at deploy time). This shape was confirmed live on
+2026-09-30 as the only SCH grant of a listed user: `sch task`, `sch status`
+(access role) and `sch delete` all worked with it:
 
 ```json
 {
