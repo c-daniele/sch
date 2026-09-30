@@ -1031,11 +1031,17 @@ Resources:
   TaskWatchdogSchedulePermission:
     Type: AWS::Lambda::Permission
     Condition: TaskWatchdogEnabled
+    # The rule has an explicit Name, so its ARN is built here instead of
+    # !GetAtt TaskWatchdogSchedule.Arn: on rules created by the legacy
+    # AWS::Events::Rule handler (physical ID = name) the current handler fails
+    # the attribute lookup with "Provided Arn is not in correct format"
+    # (seen 2026-09-30 on a stack update).
+    DependsOn: TaskWatchdogSchedule
     Properties:
       Action: lambda:InvokeFunction
       FunctionName: !Ref TaskWatchdogFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt TaskWatchdogSchedule.Arn
+      SourceArn: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${ProjectName}-${Environment}-task-watchdog-schedule'
 
   AgentRuntimeRole:
     Type: AWS::IAM::Role
