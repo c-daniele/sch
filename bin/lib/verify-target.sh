@@ -34,6 +34,10 @@
 #   sch_target_skip_if_isolated <reason>
 #                                   prints SKIP and exits 0 when the runtime
 #                                   stack reports IsolationStatus=true
+#   sch_target_telegram_preflight   on an isolated stack: SKIP (exit 0) unless
+#                                   TELEGRAM_PRINCIPAL is exported, else a
+#                                   note that the caller must be that
+#                                   principal (per-principal-isolation R44)
 #
 # Call sch_target_init once at the top level of the script (not inside a
 # command substitution): the probe result lives in shell variables, and a
@@ -148,5 +152,20 @@ sch_target_skip_if_isolated() { # <reason>
     if [ "$(sch_target_stack_isolation)" = "true" ]; then
         echo "SKIP: $1"
         exit 0
+    fi
+}
+
+sch_target_telegram_preflight() {
+    # Telegram on an isolated stack is bound to the one listed principal of
+    # TELEGRAM_PRINCIPAL (per-principal-isolation R44). The binding is a
+    # plane-stack parameter a listed user cannot necessarily read, so the
+    # deploy variable is the signal: without it there is nothing this caller
+    # can check; with it the caller must be that principal.
+    if [ "$(sch_target_stack_isolation)" = "true" ]; then
+        if [ -z "${TELEGRAM_PRINCIPAL:-}" ]; then
+            echo "SKIP: isolated stack and TELEGRAM_PRINCIPAL not exported; Telegram is bound to one listed principal (per-principal-isolation R44): export TELEGRAM_PRINCIPAL and run this check as that principal"
+            exit 0
+        fi
+        echo "note: isolated stack; Telegram is bound to ${TELEGRAM_PRINCIPAL}, so this check passes only when run as that principal" >&2
     fi
 }

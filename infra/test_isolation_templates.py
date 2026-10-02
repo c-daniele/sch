@@ -1,6 +1,6 @@
 """Rendering tests of the isolation templates (TASK-20.3).
 
-Spec: docs/specs/security/per-principal-isolation.md R1, R10-R25, R39, X9;
+Spec: docs/specs/security/per-principal-isolation.md R1, R10-R25, R39, R44, X9;
 runtime-capability-tuning R1/I1 (effective-permission identity at defaults).
 
 These tests pin template SHAPES. They do not prove the policies work: that
@@ -127,14 +127,32 @@ class ManagedPolicyTest(unittest.TestCase):
     def test_shared_policies_are_managed_and_attached_to_the_shared_role(self):
         renderer = render_runtime(self.ALL_ON)
         managed = {k: v for k, v in renderer.resources().items() if v["Type"] == "AWS::IAM::ManagedPolicy"}
-        self.assertEqual(len(managed), 8)
+        self.assertEqual(len(managed), 9)
         for name, resource in managed.items():
             with self.subTest(policy=name):
                 self.assertEqual(resource["Properties"]["Roles"], ["sch-dev-BedrockAgentCore-role"])
                 self.assertRegex(resource["Properties"]["ManagedPolicyName"], r"^sch-dev-")
-        # The Telegram session policy stays inline on the shared role only.
-        self.assertEqual(renderer.resource("TelegramInteractionSessionPolicy")["Type"], "AWS::IAM::Policy")
         self.assertNotIn("Policies", renderer.resource("AgentRuntimeRole")["Properties"])
+        self.assertFalse([k for k, v in renderer.resources().items() if v["Type"] == "AWS::IAM::Policy"])
+
+    def test_telegram_policy_is_managed_and_exported_apart_from_the_shared_ones(self):
+        """R44: the Telegram-bound plane attaches it through its own output."""
+        renderer = render_runtime(self.ALL_ON)
+        policy = renderer.resource("TelegramInteractionSessionManagedPolicy")
+        self.assertEqual(policy["Type"], "AWS::IAM::ManagedPolicy")
+        self.assertEqual(policy["Properties"]["ManagedPolicyName"], "sch-dev-telegram-interaction-session-policy")
+        arn = f"arn:aws:iam::{FAKE_ACCOUNT}:policy/sch-dev-telegram-interaction-session-policy"
+        self.assertEqual(renderer.outputs()["TelegramInteractionPolicyArn"], arn)
+        self.assertNotIn(arn, renderer.outputs()["SharedRuntimePolicyArns"].split(","))
+        statements = {s["Sid"]: s for s in policy["Properties"]["PolicyDocument"]["Statement"]}
+        self.assertEqual(statements["ConsumeOwnCommands"]["Action"], ["dynamodb:Query", "dynamodb:DeleteItem"])
+        self.assertEqual(statements["PublishTopicRouting"]["Action"], ["dynamodb:PutItem"])
+        for overrides in ({}, {"TelegramBotToken": "t", "TelegramChatId": "1"},
+                          {"EnableTelegramInteraction": "true"}):
+            with self.subTest(overrides=overrides):
+                plain = render_runtime(overrides)
+                self.assertIsNone(plain.resource("TelegramInteractionSessionManagedPolicy"))
+                self.assertNotIn("TelegramInteractionPolicyArn", plain.outputs())
 
     def test_output_lists_every_shared_policy_but_telegram_in_order(self):
         renderer = render_runtime(self.ALL_ON)
@@ -378,6 +396,75 @@ class PlaneTemplateTest(unittest.TestCase):
         plain = self.plane().resource("UserRuntime")["Properties"]["EnvironmentVariables"]
         self.assertNotIn("SCH_IMAGE_DIGEST", plain)
         self.assertNotIn("SCH_IMAGE_REBUILD_PROJECT", plain)
+
+    TELEGRAM_SHARED = {"TelegramBotToken": "t0k", "TelegramChatId": "-100", "EnableWorkspaceRegistry": "true",
+                       "EnableTelegramInteraction": "true"}
+    TELEGRAM_POLICY = f"arn:aws:iam::{FAKE_ACCOUNT}:policy/sch-dev-telegram-interaction-session-policy"
+    TELEGRAM_BOUND = {"TelegramBinding": "true", "TelegramBotToken": "t0k", "TelegramChatId": "-100",
+                      "TelegramCommandsTable": "sch-dev-telegram-commands",
+                      "TelegramRoutingTable": "sch-dev-telegram-routing", "TelegramPolicyArn": TELEGRAM_POLICY}
+
+    def test_bound_plane_gets_the_shared_telegram_environment_policy_and_table_carve_out(self):
+        """R44: the one bound plane is the shared runtime's Telegram configuration plus the owner."""
+        shared = render_runtime(self.TELEGRAM_SHARED)
+        shared_env = shared.resource("AgentRuntime")["Properties"]["EnvironmentVariables"]
+        self.assertEqual(shared_env["SCH_TELEGRAM_COMMANDS_TABLE"], "sch-dev-telegram-commands")
+        plane = self.plane(**self.TELEGRAM_BOUND)
+        env = plane.resource("UserRuntime")["Properties"]["EnvironmentVariables"]
+        expected = {k: str(v) for k, v in shared_env.items()}
+        expected["SCH_OWNER_PREFIX"] = f"o.{OWNER_KEY}"
+        self.assertEqual({k: str(v) for k, v in env.items()}, expected)
+        role = plane.resource("ExecutionRole")["Properties"]
+        self.assertEqual(role["ManagedPolicyArns"], [
+            f"arn:aws:iam::{FAKE_ACCOUNT}:policy/sch-dev-agentcore-policy",
+            "arn:aws:iam::aws:policy/ReadOnlyAccess", self.TELEGRAM_POLICY])
+        role = self.plane(AwsApiRead="false", **self.TELEGRAM_BOUND).resource("ExecutionRole")["Properties"]
+        self.assertEqual(role["ManagedPolicyArns"],
+                         [f"arn:aws:iam::{FAKE_ACCOUNT}:policy/sch-dev-agentcore-policy", self.TELEGRAM_POLICY])
+        by_sid = {s["Sid"]: s for s in plane.resource("PlaneBoundary")["Properties"]["PolicyDocument"]["Statement"]}
+        self.assertEqual(by_sid["DenySchTables"]["Resource"], [
+            f"arn:aws:dynamodb:*:{FAKE_ACCOUNT}:table/sch-dev-workspace-registry",
+            f"arn:aws:dynamodb:*:{FAKE_ACCOUNT}:table/sch-dev-workspace-registry/*"])
+        self.assertEqual(by_sid["DenySchTables"]["Effect"], "Deny")
+        # Everything else of the plane is untouched by the binding.
+        for logical in ("RuntimeLock", "EndpointLock", "AccessRole", "PlaneParameter"):
+            self.assertEqual(plane.resource(logical), self.plane().resource(logical), logical)
+
+    def test_bound_plane_without_the_inbound_channel_keeps_every_table_denied(self):
+        notifications_only = {k: v for k, v in self.TELEGRAM_BOUND.items()
+                              if k in ("TelegramBinding", "TelegramBotToken", "TelegramChatId")}
+        plane = self.plane(**notifications_only)
+        env = plane.resource("UserRuntime")["Properties"]["EnvironmentVariables"]
+        self.assertEqual(env["SCH_TELEGRAM_BOT_TOKEN"], "t0k")
+        self.assertEqual(env["SCH_TELEGRAM_CHAT_ID"], "-100")
+        self.assertNotIn("SCH_TELEGRAM_COMMANDS_TABLE", env)
+        self.assertNotIn("SCH_TELEGRAM_ROUTING_TABLE", env)
+        self.assertEqual(plane.resource("ExecutionRole"), self.plane().resource("ExecutionRole"))
+        self.assertEqual(plane.resource("PlaneBoundary"), self.plane().resource("PlaneBoundary"))
+
+    def test_half_a_telegram_binding_is_inert(self):
+        """R44: no binding flag, or no credentials, leaves the R18/R21 plane."""
+        unbound = dict(self.TELEGRAM_BOUND, TelegramBinding="false")
+        no_token = dict(self.TELEGRAM_BOUND, TelegramBotToken="")
+        no_policy = dict(self.TELEGRAM_BOUND, TelegramPolicyArn="")
+        reference = self.plane()
+        for name, overrides in (("unbound", unbound), ("no_token", no_token)):
+            with self.subTest(case=name):
+                plane = self.plane(**overrides)
+                self.assertEqual(plane.resource("UserRuntime"), reference.resource("UserRuntime"))
+                self.assertEqual(plane.resource("ExecutionRole"), reference.resource("ExecutionRole"))
+                self.assertEqual(plane.resource("PlaneBoundary"), reference.resource("PlaneBoundary"))
+        plane = self.plane(**no_policy)
+        env = plane.resource("UserRuntime")["Properties"]["EnvironmentVariables"]
+        self.assertIn("SCH_TELEGRAM_BOT_TOKEN", env)
+        self.assertNotIn("SCH_TELEGRAM_COMMANDS_TABLE", env)
+        self.assertEqual(plane.resource("ExecutionRole"), reference.resource("ExecutionRole"))
+        self.assertEqual(plane.resource("PlaneBoundary"), reference.resource("PlaneBoundary"))
+        parameters = cfn_render.load(cfn_render.PLANE_TEMPLATE)["Parameters"]
+        self.assertTrue(parameters["TelegramBotToken"]["NoEcho"])
+        for name in ("TelegramBinding", "TelegramBotToken", "TelegramChatId", "TelegramCommandsTable",
+                     "TelegramRoutingTable", "TelegramPolicyArn"):
+            self.assertIn("Default", parameters[name], name)
 
     def test_runtime_configuration_matches_the_shared_runtime(self):
         shared = render_runtime({"ImageDigest": DIGEST}).resource("AgentRuntime")["Properties"]

@@ -132,8 +132,8 @@
 #   ISOLATED_PRINCIPALS=<comma list>           (default: empty = isolation off)
 #     Per-principal workspace isolation (docs/specs/security/per-principal-isolation.md).
 #     Entries: user:<iam-user>, sso:<permission-set>/<identity-center-username>,
-#     role:<role-name>. Requires ENABLE_WORKSPACE_REGISTRY=true and refuses the
-#     Telegram switches. Each entry is resolved with IAM reads (unknown or
+#     role:<role-name>. Requires ENABLE_WORKSPACE_REGISTRY=true; the Telegram
+#     switches need TELEGRAM_PRINCIPAL (below). Each entry is resolved with IAM reads (unknown or
 #     ambiguous entries fail before any stack changes; sso usernames cannot be
 #     verified and print a warning) and gets its own plane stack
 #     <project>-<env>-plane-<owner key> (infra/user_plane.yaml): a runtime
@@ -143,6 +143,15 @@
 #     is locked: every SCH user, the operator included, must be listed. The
 #     deploy checks the AgentCore runtime quota first (one runtime per entry).
 #     Needs python3.
+#   TELEGRAM_PRINCIPAL=<entry>                (default: empty)
+#     With ISOLATED_PRINCIPALS, the one listed entry whose plane gets the
+#     Telegram channel (per-principal-isolation R44): that plane's runtime
+#     receives SCH_TELEGRAM_BOT_TOKEN/SCH_TELEGRAM_CHAT_ID and, with
+#     ENABLE_TELEGRAM_INTERACTION, the table names and the Telegram policy on
+#     its execution role; no other plane receives any of them. Required when
+#     the Telegram switches are set with isolation on; refused without them,
+#     without isolation, or naming an entry that is not listed. Telegram stays
+#     a single-operator channel: its chat is the bound principal's.
 #   NOTE (add-user-provider-keys, BREAKING): the provider API keys are NO
 #     LONGER deploy variables. ANTHROPIC_API_KEY / OPENCODE_API_KEY /
 #     OPENROUTER_API_KEY / KILO_API_KEY left over in the operator's environment
@@ -236,6 +245,7 @@ RUNTIME_AWS_API_READ="${RUNTIME_AWS_API_READ:-true}"
 RUNTIME_DATA_BUCKET_ARN="${RUNTIME_DATA_BUCKET_ARN:-}"
 RUNTIME_EXTRA_POLICY_JSON="${RUNTIME_EXTRA_POLICY_JSON:-}"
 ISOLATED_PRINCIPALS="${ISOLATED_PRINCIPALS:-}"
+TELEGRAM_PRINCIPAL="${TELEGRAM_PRINCIPAL:-}"
 
 # Runtime capability tuning helpers (below; sourced verbatim by
 # infra/test_runtime_tuning.py): validate RUNTIME_CAPABILITIES and derive the
@@ -383,13 +393,22 @@ EOF
     done 3< "$1"
   }
   deploy_planes() { # <plan file>
-    local kind entry owner_kind key pattern stack status arn
+    local kind entry owner_kind key pattern stack status telegram arn
     local policies registry_role bucket rebuild_project
     local p_version p_digest p_idle p_lifetime p_pi p_heap p_jobs p_read
+    local tg_policy tg_commands tg_routing
+    local tg_binding tg_token tg_chat tg_cmd tg_route tg_pol
     policies="$(runtime_stack_value Outputs SharedRuntimePolicyArns)"
     registry_role="$(runtime_stack_value Outputs WorkspaceRegistryRoleArn)"
     bucket="$(runtime_stack_value Outputs CheckpointBucketName)"
     rebuild_project="$(runtime_stack_value Outputs ImageRebuildProjectName)"
+    # R44: the Telegram values go to the one bound plane only (empty
+    # elsewhere). The token comes from this process (the parameter is NoEcho,
+    # so the stack cannot hand it back); the table names and the policy ARN
+    # exist only with the inbound channel on.
+    tg_policy="$(runtime_stack_value Outputs TelegramInteractionPolicyArn)"
+    tg_commands="$(runtime_stack_value Outputs TelegramCommandsTableName)"
+    tg_routing="$(runtime_stack_value Outputs TelegramRoutingTableName)"
     p_version="$(runtime_stack_value Parameters ApplicationVersion)"
     p_digest="$(runtime_stack_value Parameters ImageDigest)"
     p_idle="$(runtime_stack_value Parameters IdleRuntimeSessionTimeoutSeconds)"
@@ -403,14 +422,26 @@ EOF
       PLANE_FAILURES=$((PLANE_FAILURES + 1))
       return 0
     fi
-    while IFS=$'\t' read -r -u 3 kind entry owner_kind key pattern stack status; do
+    while IFS=$'\t' read -r -u 3 kind entry owner_kind key pattern stack status telegram; do
       [ "${kind}" = "PLANE" ] || continue
       if [ "${status}" = "ROLLBACK_COMPLETE" ]; then
         # A failed creation cannot be updated; it holds no runtime.
         log "plane ${stack} is ROLLBACK_COMPLETE from an earlier failed creation: deleting it first"
         delete_plane_stack "${stack}" || true
       fi
-      log "deploying plane ${stack} (${entry})"
+      tg_binding=false tg_token="" tg_chat="" tg_cmd="" tg_route="" tg_pol=""
+      if [ "${telegram}" = "true" ]; then
+        tg_binding=true
+        tg_token="${TELEGRAM_BOT_TOKEN}"
+        tg_chat="${TELEGRAM_CHAT_ID}"
+        tg_cmd="${tg_commands}"
+        tg_route="${tg_routing}"
+        tg_pol="${tg_policy}"
+        TELEGRAM_BOUND_ENTRY="${entry}"
+        log "deploying plane ${stack} (${entry}, Telegram bound)"
+      else
+        log "deploying plane ${stack} (${entry})"
+      fi
       if aws cloudformation deploy \
           --template-file "${SCRIPT_DIR}/user_plane.yaml" \
           --stack-name "${stack}" \
@@ -433,6 +464,12 @@ EOF
               "AwsApiRead=${p_read:-${RUNTIME_AWS_API_READ}}" \
               "ImageRebuildProject=${rebuild_project}" \
               "RegistryRoleArn=${registry_role}" \
+              "TelegramBinding=${tg_binding}" \
+              "TelegramBotToken=${tg_token}" \
+              "TelegramChatId=${tg_chat}" \
+              "TelegramCommandsTable=${tg_cmd}" \
+              "TelegramRoutingTable=${tg_route}" \
+              "TelegramPolicyArn=${tg_pol}" \
           --tags "sch:deployment=${PROJECT_NAME}-${ENVIRONMENT}" "sch:owner-key=${key}" \
           --capabilities CAPABILITY_NAMED_IAM \
           --region "${REGION}" \
@@ -531,7 +568,8 @@ log() { echo "==> $*"; }
 
 # --- 0. Per-principal isolation preflight (per-principal-isolation R1-R7, X9) ------
 # Everything that can refuse the deploy runs here, before any stack changes:
-# the switch combination (registry required, Telegram refused), resolution
+# the switch combination (registry required, Telegram bound to one listed
+# principal through TELEGRAM_PRINCIPAL), resolution
 # of every ISOLATED_PRINCIPALS entry to its bound identity with IAM reads,
 # the AgentCore runtime quota, and the managed-policy size limit. The helper
 # also finds the plane stacks of this deployment, so a deploy with the list
@@ -547,6 +585,7 @@ run_isolation_helper() {
     ENABLE_WORKSPACE_REGISTRY="${ENABLE_WORKSPACE_REGISTRY}" \
     TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}" TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID}" \
     ENABLE_TELEGRAM_INTERACTION="${ENABLE_TELEGRAM_INTERACTION}" \
+    TELEGRAM_PRINCIPAL="${TELEGRAM_PRINCIPAL}" \
     RUNTIME_BEDROCK_MODEL_ALLOWLIST="${TUNING_ALLOWLIST}" \
     RUNTIME_EXTRA_POLICY_JSON="${RUNTIME_EXTRA_POLICY_JSON}" \
         python3 "${SCRIPT_DIR}/isolation_plan.py" "$@"
@@ -554,12 +593,16 @@ run_isolation_helper() {
 if command -v python3 >/dev/null 2>&1; then
     run_isolation_helper policy-size || exit 2
     if ! run_isolation_helper plan --out "${PLANE_PLAN}"; then
-        [ "${ISOLATION_ENABLED}" = "true" ] && exit 2
+        # A refused TELEGRAM_PRINCIPAL (set without isolation) is a verdict of
+        # the helper too, not a lookup failure to shrug off.
+        if [ "${ISOLATION_ENABLED}" = "true" ] || [ -n "${TELEGRAM_PRINCIPAL}" ]; then
+            exit 2
+        fi
         echo "deploy: WARNING — could not look for plane stacks of an earlier isolation deploy; continuing" >&2
         : > "${PLANE_PLAN}"
     fi
-elif [ "${ISOLATION_ENABLED}" = "true" ]; then
-    echo "deploy: python3 is required with ISOLATED_PRINCIPALS (entry resolution, owner keys)" >&2
+elif [ "${ISOLATION_ENABLED}" = "true" ] || [ -n "${TELEGRAM_PRINCIPAL}" ]; then
+    echo "deploy: python3 is required with ISOLATED_PRINCIPALS or TELEGRAM_PRINCIPAL (entry resolution, owner keys)" >&2
     exit 2
 fi
 if [ "${ISOLATION_ENABLED}" = "true" ]; then
@@ -825,6 +868,7 @@ fi
 # update, so a removed principal's runtime must be gone first (R12).
 PLANE_FAILURES=0
 PLANE_SUMMARY=()
+TELEGRAM_BOUND_ENTRY=""
 delete_orphan_planes "${PLANE_PLAN}"
 
 log "deploying AgentCore Runtime stack (${PROJECT_NAME}-${ENVIRONMENT}-runtime)"
@@ -943,6 +987,9 @@ if [ "${#PLANE_SUMMARY[@]}" -gt 0 ]; then
     for line in "${PLANE_SUMMARY[@]}"; do
         printf '  %s\n' "${line}"
     done
+    if [ -n "${TELEGRAM_BOUND_ENTRY}" ]; then
+        echo "Telegram is bound to ${TELEGRAM_BOUND_ENTRY} (per-principal-isolation R44); no other plane has the channel."
+    fi
 fi
 if [ "${ISOLATION_ENABLED}" = "true" ]; then
     # The shared runtime is locked (R17): a smoke test goes to a plane, run by

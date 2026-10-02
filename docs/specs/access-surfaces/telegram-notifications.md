@@ -49,7 +49,12 @@ same topic instead of creating a new one.
 **R3.** If the chat does not support Topics, the notifier MUST degrade to messages
 in the plain chat with a `[<workspace>]` textual prefix, without errors. If the
 persisted topic turns out to be deleted (the API rejects the `message_thread_id`),
-the notifier MUST create a new one and update the mapping.
+the notifier MUST create a new one and update the mapping. On an isolated stack the
+channel is bound to one owner ([per-principal-isolation](../security/per-principal-isolation.md)
+R44): the external watchdog MUST NOT apply the plain-chat fallback to an owner-tree
+workspace (`checkpoints/o.<k>/<ws>/`) that has no persisted mapping, because only the
+bound owner's notifier writes mappings and another owner's workspace must never
+surface in that chat.
 
 ### Headless task lifecycle notifications
 
@@ -136,7 +141,11 @@ a lost terminal notification is not. Milestones remain best-effort (R9).
 
 - Runtime started without `SCH_TELEGRAM_BOT_TOKEN`: no Telegram event, no
   Telegram-related log line, task/checkpoint flows identical to the pre-feature
-  behavior.
+  behavior. On an isolated stack every plane but the one `TELEGRAM_PRINCIPAL`
+  names starts this way.
+- Stale `running` task of an owner whose plane has no Telegram: the watchdog
+  reconciles it to `interrupted` and sends nothing; the same record on the bound
+  owner's plane is announced in its topic.
 - Runtime started with a valid token and chat id, headless task submitted: task
   notifications appear in the configured chat (in the workspace's topic when
   Topics are available).

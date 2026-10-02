@@ -83,8 +83,8 @@ gives every listed user a plane created at deploy time:
 - an execution role, the one the owner's agent runs with, confined by a
   permissions boundary and the checkpoint bucket policy to the owner's own
   objects: it cannot read other owners' checkpoints, the registry and Telegram
-  tables, SCH log groups, SCH runtime and Lambda configuration or the plane
-  parameters;
+  tables (the one Telegram-bound plane reaches the two Telegram tables), SCH
+  log groups, SCH runtime and Lambda configuration or the plane parameters;
 - a read-only access role that only the owner can assume, through which `sch`
   reads the owner's checkpoints; the bucket policy denies the owner trees to
   every other principal.
@@ -125,8 +125,15 @@ rebuild's CodeBuild logs. None of these is a secret or workspace content
 (residual risk X1). Set `RUNTIME_AWS_API_READ=false` to remove
 `ReadOnlyAccess` from every plane.
 
-**Telegram** is refused on an isolated stack: it is a single-operator feature
-of isolation-off stacks.
+**Telegram** stays a single-operator channel. On an isolated stack it binds to
+one listed principal (`TELEGRAM_PRINCIPAL`, [how to enable
+it](deploy.md#per-principal-isolation-isolated_principals)): only that
+principal's plane receives the bot token, the chat id and, with the inbound
+router, the table names and the Telegram policy; every other plane has none of
+them, and the task watchdog never announces another owner's workspace in that
+chat. The bound principal's agent can read the token, as the operator's agent
+does on an isolation-off stack (residual risk X10): the chat is that
+principal's, and everyone in it sees that principal's milestones and prompts.
 
 **Residual risks** (full list in the spec, X1–X9): the `ReadOnlyAccess` reads
 above; a short window at plane creation before the locks are attached, while
@@ -136,7 +143,8 @@ the in-session image rebuild, when enabled, shares one CodeBuild project and
 image across owners; `RUNTIME_DATA_BUCKET_ARN` is shared by every owner; every
 session of a `role:` entry is one owner; a removed principal's plane may still
 be returned by the registry for up to 60 seconds; the managed-policy size caps
-the Bedrock allow-list at about 20 exact model IDs.
+the Bedrock allow-list at about 20 exact model IDs; the Telegram-bound
+principal's agent holds the bot token and the Telegram policy.
 
 ## The image is part of the contract
 

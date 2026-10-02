@@ -231,7 +231,11 @@ no-prompt behavior while attached, detached and headless.
   secret token (verified on every request); everything else — wrong secret,
   foreign chats, unmapped topics — is dropped with an empty 200 and zero
   detail. Update rate is bounded by API Gateway's default throttling.
-- Only the single configured chat id is accepted (single user).
+- Only the single configured chat id is accepted (single user). On an isolated
+  stack that user is the listed principal `TELEGRAM_PRINCIPAL` names: only its
+  plane carries the token and the table permissions, and only its workspaces can
+  be routed — [Per-principal
+  isolation](deploy.md#per-principal-isolation-isolated_principals).
 - The Lambda can only enqueue commands and read the routing table; the
   runtime role gains only `Query`/`DeleteItem` on its command queue and
   `PutItem` on the routing table. The bot token stays in the runtime and

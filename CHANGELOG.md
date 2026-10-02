@@ -111,5 +111,12 @@ minor versions).
   to add; `sch` uses the caller's plane with no fallback to the shared
   runtime. Checked by tests, IAM Access Analyzer, the policy simulator and
   the live two-principal check `bin/verify-isolation.sh` (IAM users). Task prompts are no longer written to the runtime logs.
+- Telegram on an isolated stack: `TELEGRAM_PRINCIPAL=<entry>` binds the channel
+  to one listed principal, whose plane alone receives the bot token, the chat
+  id and, with the inbound router, the table names and the Telegram policy
+  (earlier the deploy refused Telegram with isolation on). The deploy refuses
+  the Telegram switches without it, and the task watchdog never announces
+  another owner's workspace in the bound chat. The Telegram session policy is
+  now a customer managed policy.
 
 [Unreleased]: https://github.com/c-daniele/sch/commits/main

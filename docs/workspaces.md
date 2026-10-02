@@ -118,8 +118,11 @@ Run it on your stack (below) before you rely on the boundary.
   registry table and the bucket but are not listed or reachable through the
   isolated registry; turning isolation off again makes them reachable as
   before. Finish, fetch or push what you need before the switch.
-- Telegram is not available on an isolated stack (the deploy refuses the
-  combination).
+- Telegram works for one listed principal only: the operator names it with
+  `TELEGRAM_PRINCIPAL` at deploy time
+  ([Deploying](deploy.md#per-principal-isolation-isolated_principals)). Every
+  other plane has no Telegram channel, and the deploy refuses the Telegram
+  switches without that variable.
 - The caller permissions each listed user needs are listed in
   [Getting started](getting-started.md#caller-permissions-on-an-isolated-stack).
 
@@ -135,7 +138,8 @@ runtime configuration; A's and B's own workflow (`sch task`, `status`, `list`,
 `list --remote-check`, the dashboard data path) must keep working. It deletes
 its test workspaces at the end and masks account IDs in its output
 (`--help` for the options). The other `bin/verify-*.sh` scripts run on an
-isolated stack as a listed user; the Telegram checks print `SKIP` there.
+isolated stack as a listed user; the Telegram checks print `SKIP` there unless
+`TELEGRAM_PRINCIPAL` is exported, and then they must run as that principal.
 
 Trimmed output of the run that verified the feature (2026-09-29, profiles
 `alice` and `bob` listed, `carol` not):

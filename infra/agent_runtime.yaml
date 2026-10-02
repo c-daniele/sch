@@ -906,11 +906,16 @@ Resources:
   # consume the commands of its own scope (Query is already granted by
   # ReadOnlyAccess; DeleteItem is the consumption fence) and publish the
   # thread->workspace routing mapping written next to the topic creation.
-  TelegramInteractionSessionPolicy:
-    Type: AWS::IAM::Policy
+  # A customer managed policy (per-principal-isolation R18/R44): with
+  # isolation on, the one Telegram-bound plane role attaches the same
+  # document through the TelegramInteractionPolicyArn output; it is never part
+  # of SharedRuntimePolicyArns, so no other plane role gets it.
+  TelegramInteractionSessionManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
     Condition: TelegramInteractionEnabled
     Properties:
-      PolicyName: !Sub '${ProjectName}-${Environment}-telegram-interaction-session-policy'
+      ManagedPolicyName: !Sub '${ProjectName}-${Environment}-telegram-interaction-session-policy'
+      Description: Consume the inbound Telegram commands of the session's workspaces and publish the topic routing
       Roles:
         - !Ref AgentRuntimeRole
       PolicyDocument:
@@ -2011,6 +2016,12 @@ Outputs:
     Condition: TelegramInteractionEnabled
     Description: DynamoDB table mapping message_thread_id to workspace
     Value: !Ref TelegramRoutingTable
+  # per-principal-isolation R44: attached by deploy.sh to the one plane role
+  # TELEGRAM_PRINCIPAL names, besides the shared role above.
+  TelegramInteractionPolicyArn:
+    Condition: TelegramInteractionEnabled
+    Description: Managed policy consuming the inbound Telegram commands and publishing the topic routing (shared role and the Telegram-bound plane role)
+    Value: !Ref TelegramInteractionSessionManagedPolicy
   TaskWatchdogFunctionName:
     Condition: TaskWatchdogEnabled
     Description: Lambda reconciling orphaned running task statuses (its log group is /aws/lambda/<name>)

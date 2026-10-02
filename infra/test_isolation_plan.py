@@ -1,6 +1,6 @@
 """Tests of infra/isolation_plan.py, the isolation preflight of deploy.sh.
 
-Spec: docs/specs/security/per-principal-isolation.md R1-R7, R12, X9.
+Spec: docs/specs/security/per-principal-isolation.md R1-R7, R12, R44, X9.
 
 The helper runs against a stub `aws` executable put first on PATH: the stub
 answers from a JSON table keyed by "<service> <command>" and logs every
@@ -205,7 +205,8 @@ class PlanTest(unittest.TestCase):
         proc, lines = stub.run(ISOLATED_PRINCIPALS="user:alice")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         key = key_of(f"user:{ALICE_ID}")
-        self.assertEqual(lines, [["PLANE", "user:alice", "user", key, ALICE_ID, f"sch-dev-plane-{key}", "NEW"]])
+        self.assertEqual(lines, [["PLANE", "user:alice", "user", key, ALICE_ID, f"sch-dev-plane-{key}", "NEW",
+                                  "false"]])
         self.validate_requests(stub.calls())
 
     def test_sso_entry_binds_role_id_and_username_and_warns(self):
@@ -283,15 +284,53 @@ class PlanTest(unittest.TestCase):
         self.assertIn("ENABLE_WORKSPACE_REGISTRY=true", proc.stderr)
         self.assertEqual(stub.calls(), [])
 
-    def test_telegram_is_refused(self):
+    def test_telegram_without_a_bound_principal_is_refused(self):
+        """R44: the Telegram switches need TELEGRAM_PRINCIPAL with isolation on."""
         for env in ({"TELEGRAM_BOT_TOKEN": "t"}, {"TELEGRAM_CHAT_ID": "1"},
                     {"ENABLE_TELEGRAM_INTERACTION": "true"}):
             with self.subTest(env=env):
                 stub = self.stub()
                 proc, _ = stub.run(ISOLATED_PRINCIPALS="user:alice", **env)
                 self.assertEqual(proc.returncode, 2)
-                self.assertIn("Telegram is not available", proc.stderr)
+                self.assertIn("set TELEGRAM_PRINCIPAL", proc.stderr)
                 self.assertEqual(stub.calls(), [])
+
+    def test_telegram_principal_must_be_listed_and_single(self):
+        telegram = {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1"}
+        for principal, message in (("user:bob", "is not in ISOLATED_PRINCIPALS"),
+                                   ("user:alice,user:carol", "exactly one entry"),
+                                   ("alice", "expected user:")):
+            with self.subTest(principal=principal):
+                stub = self.stub()
+                proc, _ = stub.run(ISOLATED_PRINCIPALS="user:alice,user:carol",
+                                   TELEGRAM_PRINCIPAL=principal, **telegram)
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn(message, proc.stderr)
+                self.assertEqual(stub.calls(), [])
+
+    def test_telegram_principal_needs_telegram_and_isolation(self):
+        stub = self.stub()
+        proc, _ = stub.run(ISOLATED_PRINCIPALS="user:alice", TELEGRAM_PRINCIPAL="user:alice")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("TELEGRAM_PRINCIPAL requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID", proc.stderr)
+        self.assertEqual(stub.calls(), [])
+        stub = self.stub()
+        proc, _ = stub.run(ISOLATED_PRINCIPALS="", TELEGRAM_PRINCIPAL="user:alice",
+                           TELEGRAM_BOT_TOKEN="t", TELEGRAM_CHAT_ID="1")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("ISOLATED_PRINCIPALS is empty", proc.stderr)
+        self.assertEqual(stub.calls(), [])
+
+    def test_the_bound_plane_is_marked_in_the_plan(self):
+        stub = self.stub()
+        proc, lines = stub.run(ISOLATED_PRINCIPALS="user:alice, user:carol", TELEGRAM_PRINCIPAL=" user:alice ",
+                               TELEGRAM_BOT_TOKEN="t", TELEGRAM_CHAT_ID="1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([(line[1], line[7]) for line in lines], [("user:alice", "true"), ("user:carol", "false")])
+        # Without Telegram no plane is bound, whatever else is set.
+        proc, lines = stub.run(ISOLATED_PRINCIPALS="user:alice, user:carol")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([line[7] for line in lines], ["false", "false"])
 
     def test_quota_counts_existing_new_orphans_and_the_shared_runtime(self):
         runtimes = [{"agentRuntimeName": f"other_{i}"} for i in range(98)]

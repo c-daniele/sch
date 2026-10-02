@@ -875,13 +875,52 @@ class OwnerLayoutTests(WatchdogTestCase):
         self.assertEqual(self.s3.stored_json(self.status_key("ws-flat"))["state"], "running")
         self.assertTrue(all(put["Key"] == key for put in self.s3.puts))
 
+    TOPIC = {"chat_id": "-10042", "thread_id": 148, "fallback": False}
+
     def test_pending_terminal_in_an_owner_tree_is_resent_and_marked(self):
         workspace = OWNER + "/ws-a"
-        self.seed(_terminal(), workspace=workspace)
+        self.seed(_terminal(), workspace=workspace, topic=self.TOPIC)
         summary = watchdog.handler()
         self.assertEqual(summary["resent"], 1)
         key = "checkpoints/{}/ws-a/task-status.json".format(OWNER)
         self.assertEqual(self.s3.stored_json(key)["notification_status"], "delivered")
+        _method, payload = self.sent[0]
+        self.assertEqual(payload["message_thread_id"], 148)
+
+    def test_owner_tree_workspace_without_a_topic_mapping_is_never_announced(self):
+        """per-principal-isolation R44: Telegram is bound to one owner; a
+        workspace of another owner has no topic mapping and must not fall
+        back to the bound owner's plain chat."""
+        workspace = OTHER_OWNER + "/ws-c"
+        self.seed(_running(heartbeat_ago=1800), workspace=workspace)
+        summary = watchdog.handler()
+        self.assertEqual(summary["reconciled"], 1)
+        self.assertEqual(summary["notified"], 0)
+        self.assertEqual(self.sent, [])
+        key = "checkpoints/{}/ws-c/task-status.json".format(OTHER_OWNER)
+        stored = self.s3.stored_json(key)
+        self.assertEqual(stored["state"], "interrupted")
+        # The next tick sees the still-pending promise and stays silent too.
+        summary = watchdog.handler()
+        self.assertEqual(summary["resent"], 0)
+        self.assertEqual(self.sent, [])
+        self.seed(_terminal(), workspace=OTHER_OWNER + "/ws-d")
+        summary = watchdog.handler()
+        self.assertEqual(summary["resent"], 0)
+        self.assertEqual(self.sent, [])
+        # The isolation-off layout keeps the [<workspace>] prefix fallback.
+        self.seed(_running(heartbeat_ago=1800), workspace="ws-flat")
+        watchdog.handler()
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(self.sent[0][1]["text"].startswith("[ws-flat] "))
+
+    def test_owner_tree_workspace_with_a_topic_mapping_is_announced_in_its_topic(self):
+        self.seed(_running(heartbeat_ago=1800), workspace=OWNER + "/ws-a", topic=self.TOPIC)
+        summary = watchdog.handler()
+        self.assertEqual(summary["notified"], 1)
+        _method, payload = self.sent[0]
+        self.assertEqual(payload["message_thread_id"], 148)
+        self.assertFalse(payload["text"].startswith("["))
 
     def test_paginated_owner_tree(self):
         pages = {

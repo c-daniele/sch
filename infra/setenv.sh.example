@@ -9,6 +9,10 @@
 
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+# With ISOLATED_PRINCIPALS: the one listed entry whose plane gets the Telegram
+# channel (per-principal-isolation R44); required with the two values above
+# and refused without isolation. See `infra/deploy.sh -h`.
+TELEGRAM_PRINCIPAL=
 
 # --- Provider API keys: NOT deploy variables any more -------------------------
 # add-user-provider-keys (BREAKING): the four provider API keys used to live

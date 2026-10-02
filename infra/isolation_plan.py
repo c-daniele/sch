@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deploy-time planning of per-principal isolation (infra/deploy.sh helper).
 
-Spec: docs/specs/security/per-principal-isolation.md (R1-R7, R10, R12, X9).
+Spec: docs/specs/security/per-principal-isolation.md (R1-R7, R10, R12, R44, X9).
 
 `infra/deploy.sh` calls this helper before it changes any stack:
 
@@ -12,8 +12,9 @@ Spec: docs/specs/security/per-principal-isolation.md (R1-R7, R10, R12, X9).
 with IAM read calls, computes the owner keys, finds the existing plane stacks
 of the deployment (name prefix AND sch:deployment tag), checks the AgentCore
 runtime quota, and writes one tab-separated line per plane to create or
-update and per orphan plane to delete. Any error exits non-zero before the
-deploy has touched anything.
+update and per orphan plane to delete. The plane line ends with the Telegram
+binding (`true` on the one plane TELEGRAM_PRINCIPAL names, R44). Any error
+exits non-zero before the deploy has touched anything.
 
 `policy-size` checks that the customer managed policies the deploy is about
 to create stay within the 6,144-character IAM limit (residual risk X9).
@@ -306,28 +307,61 @@ def existing_runtimes(aws):
 
 # --- plan ---------------------------------------------------------------------
 
+def telegram_configured(env):
+    return bool(env.get("TELEGRAM_BOT_TOKEN") or env.get("TELEGRAM_CHAT_ID")
+                or env.get("ENABLE_TELEGRAM_INTERACTION", "false") == "true")
+
+
 def check_switches(env):
-    """R2 and R6 (Telegram refusal); returns the raw allow-list."""
+    """R2, R6 and R44 (Telegram binding); returns the raw allow-list."""
     raw = env.get("ISOLATED_PRINCIPALS", "")
+    principal = env.get("TELEGRAM_PRINCIPAL", "").strip()
     if not raw.strip():
+        if principal:
+            raise PlanError(
+                "TELEGRAM_PRINCIPAL is set but ISOLATED_PRINCIPALS is empty: Telegram binds to a"
+                " listed principal only with isolation on (per-principal-isolation R44); unset it")
         return ""
     if env.get("ENABLE_WORKSPACE_REGISTRY", "false") != "true":
         raise PlanError("ISOLATED_PRINCIPALS requires ENABLE_WORKSPACE_REGISTRY=true")
-    refused = [name for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if env.get(name)]
-    if env.get("ENABLE_TELEGRAM_INTERACTION", "false") == "true":
-        refused.append("ENABLE_TELEGRAM_INTERACTION=true")
-    if refused:
+    if telegram_configured(env) and not principal:
         raise PlanError(
-            "Telegram is not available with isolation on (per-principal-isolation R44);"
-            " unset " + ", ".join(refused) + " or ISOLATED_PRINCIPALS")
+            "Telegram on an isolated stack binds to one listed principal (per-principal-isolation"
+            " R44): set TELEGRAM_PRINCIPAL to one ISOLATED_PRINCIPALS entry, or unset"
+            " TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID and ENABLE_TELEGRAM_INTERACTION")
+    if principal and not telegram_configured(env):
+        raise PlanError("TELEGRAM_PRINCIPAL requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
     return raw
+
+
+def telegram_entry(env, entries):
+    """R44: the listed entry TELEGRAM_PRINCIPAL names, or None without Telegram.
+
+    Matched on the entry text after the same parsing as ISOLATED_PRINCIPALS,
+    so `user: alice` and `user:alice` are the same entry; the match happens
+    before any AWS call."""
+    principal = env.get("TELEGRAM_PRINCIPAL", "").strip()
+    if not principal or not telegram_configured(env):
+        return None
+    parsed = parse_entries(principal)
+    if len(parsed) != 1:
+        raise PlanError(f"TELEGRAM_PRINCIPAL must name exactly one entry, got {principal!r}")
+    for entry in entries:
+        if entry.text == parsed[0].text:
+            return entry
+    listed = ", ".join(entry.text for entry in entries)
+    raise PlanError(
+        f"TELEGRAM_PRINCIPAL {parsed[0].text!r} is not in ISOLATED_PRINCIPALS ({listed});"
+        " Telegram binds to a listed principal (per-principal-isolation R44)")
 
 
 def build_plan(env, aws, warn=print):
     project = env.get("PROJECT_NAME", "sch")
     environment = env.get("ENVIRONMENT", "dev")
     raw = check_switches(env)
-    entries = resolve_entries(parse_entries(raw), aws) if raw else []
+    parsed = parse_entries(raw) if raw else []
+    bound = telegram_entry(env, parsed)
+    entries = resolve_entries(parsed, aws) if raw else []
     for entry in entries:
         if entry.warning:
             warn(f"deploy: WARNING — {entry.warning}")
@@ -352,7 +386,8 @@ def build_plan(env, aws, warn=print):
         stack = plane_stack_prefix(project, environment) + entry.owner_key
         status = existing.get(entry.owner_key, (stack, "NEW"))[1]
         lines.append("\t".join(["PLANE", entry.text, entry.kind, entry.owner_key,
-                                entry.pattern, stack, status]))
+                                entry.pattern, stack, status,
+                                "true" if entry is bound else "false"]))
     for key, (stack, status) in sorted(orphans.items()):
         lines.append("\t".join(["ORPHAN", stack, key, status]))
     return lines
