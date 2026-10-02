@@ -40,7 +40,6 @@ def _cfg(tmp, registry=True):
         region="eu-west-1", project="sch", env="dev", default_harness="opencode",
         default_storage="s3", workspace_registry_url=URL if registry else "",
         ws_dir=base / "workspaces", config_dir=base,
-        runtime_arn_cache=base / "runtime-arn", checkpoint_bucket_cache=base / "checkpoint-bucket",
         runtime_arn_override=SHARED_ARN, checkpoint_bucket_override="bucket",
         acp_mirror_root=base / "mirrors", provider_keys={},
         stack_name=lambda: "sch-dev-runtime", isolation=None, plane=None,

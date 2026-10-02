@@ -15,8 +15,7 @@ class Cfg:
     env = "dev"
 
     def __init__(self, tmp):
-        self.runtime_arn_cache = Path(tmp) / "runtime-arn"
-        self.checkpoint_bucket_cache = Path(tmp) / "checkpoint-bucket"
+        self.config_dir = Path(tmp)
 
     def stack_name(self):
         return "{}-{}-runtime".format(self.project, self.env)
@@ -131,8 +130,20 @@ class DestroyExecutionTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.cfg = Cfg(self._tmp.name)
-        self.cfg.runtime_arn_cache.write_text("arn:aws:...:runtime/stale")
-        self.cfg.checkpoint_bucket_cache.write_text("stale-bucket")
+        root = Path(self._tmp.name) / "stack-outputs"
+        # This deployment's entry, the same stack in another account and
+        # another environment of this account, and the account-blind flat
+        # files of the earlier layout.
+        self.destroyed = root / "111122223333" / "eu-west-1" / "sch-dev-runtime"
+        self.other_account = root / "444455556666" / "eu-west-1" / "sch-dev-runtime"
+        self.other_env = root / "111122223333" / "eu-west-1" / "sch-poc-runtime"
+        for entry in (self.destroyed, self.other_account, self.other_env):
+            entry.mkdir(parents=True)
+            (entry / "runtime-arn").write_text("arn:aws:...:runtime/x\n")
+            (entry / "checkpoint-bucket").write_text("bucket\n")
+        self.legacy = [Path(self._tmp.name) / "runtime-arn", Path(self._tmp.name) / "checkpoint-bucket"]
+        for path in self.legacy:
+            path.write_text("stale\n")
 
     def _patches(self, **overrides):
         base = {
@@ -158,8 +169,13 @@ class DestroyExecutionTests(unittest.TestCase):
         rc, out, _ = run_destroy(self.cfg, ["--yes"])
         self.assertEqual(rc, 0)
         self.assertIn("teardown complete", out)
-        self.assertFalse(self.cfg.runtime_arn_cache.exists())
-        self.assertFalse(self.cfg.checkpoint_bucket_cache.exists())
+        self.assertFalse(self.destroyed.exists())
+        self.assertIn("removed stale cache {}".format(self.destroyed), out)
+        for path in self.legacy:
+            self.assertFalse(path.exists())
+        # Only the destroyed deployment's entry goes (cli-cross-platform R9a).
+        self.assertTrue((self.other_account / "runtime-arn").exists())
+        self.assertTrue((self.other_env / "checkpoint-bucket").exists())
 
     def test_a_failed_step_is_reported_and_exits_non_zero(self):
         def boom(name, region, retain_resources=()):

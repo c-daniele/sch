@@ -16,9 +16,13 @@ The first-boot clone keeps `SCH_REPO_TOKEN` out of the workspace (TASK-10, runti
 
 The post-restore environment rebuild is lockfile-only and never changes the repository (TASK-21, decision-13, workspace-checkpointing R21): `npm ci`, `uv sync --frozen`, or a project-local `.venv` for `requirements.txt`; projects without a lockfile are skipped with `no-lockfile`, and a guard reverts any stray repo change. Optional extras and custom install commands are not reproduced. The outcome is in shim `info` (`checkpoint.env_rebuild`) and `sch status --live`.
 
+The CLI caches the runtime ARN and checkpoint bucket per AWS account, region and stack under `~/.config/sch/stack-outputs/` (TASK-25, decision-15, cli-cross-platform R9a). The account comes from one `sts get-caller-identity` per command, about 0.6 s, skipped when `SCH_RUNTIME_ARN`/`SCH_CHECKPOINT_BUCKET` are set. `sch status` reports `state: none` only for a missing status object; any other read failure exits 1 with the bucket, key and AWS error (headless-task-execution R17).
+
 This repository was published as a fresh history: the specifications under `docs/specs/` are the normative description of current behavior, the guides under `docs/` explain how to use and operate it, and this plan starts empty. New work begins with a Backlog task; completed work is recorded in the journal below and linked here.
 
 ## Active work
+
+TASK-25 (account-keyed stack-output cache, `sch status` read errors, English `sch-watch`) is done on branch `fix/stack-cache-account-keys`, not merged yet; a CLI installed with uv or pipx picks it up only after the merge and a reinstall.
 
 TASK-20 (per-user workspace isolation, runtimes provisioned at deploy time) is done: five slices (decision-14 and the spec [`per-principal-isolation.md`](../../docs/specs/security/per-principal-isolation.md), owner-scoped storage and shim, per-principal plane stacks and deploy, registry owner mapping and CLI, verify scripts and guides) and the operator-side live check on 2026-09-29: a stack deployed with two listed IAM users and one unlisted user passed `bin/verify-isolation.sh` with 37 checks (join, stop and exec on another user's session denied by the resource-based policies; cross-owner reads denied from the CLI and from inside the agent's microVM; unlisted caller refused with the entry to add). The spec is Implemented. Left open: an Identity Center (`sso:`) owner was never exercised live, and the registry DELETE times out (Lambda and client at 10 s) while AgentCore is still stopping a live microVM; the resumable deletion recovers on retry, and a follow-up task is proposed. The first deploy of the managed-policy template may give running sessions a few seconds of AccessDenied while the inline policy is replaced. On 2026-09-30 removing a principal was exercised live (plane deleted, nothing left), the documented minimal caller policy was confirmed as the only SCH grant of a listed user, and a stack update exposed a CloudFormation change unrelated to isolation (GetAtt Arn on a legacy AWS::Events::Rule fails; the watchdog permission now builds the ARN). TASK-7 (harness pins: OpenCode 2.0.18, Pi 0.87.1, Claude
 Code 2.1.282) is done and recorded below; its live-AWS follow-ups — first
@@ -52,16 +56,16 @@ Architecture decisions are recorded in [`.backlog/decisions/`](../decisions/) (`
 - [`decision-12`](../decisions/decision-12%20-%20Seed-an-explicit-Bedrock-output-cap-per-Claude-model-in-the-native-OpenCode-2-provider-shape.md): Seed an explicit Bedrock output cap per Claude model in the native OpenCode 2 provider shape
 - [`decision-13`](../decisions/decision-13%20-%20Post-restore-env-rebuild-is-lockfile-only-and-never-changes-the-repository.md): Post-restore env rebuild is lockfile-only and never changes the repository
 - [`decision-14`](../decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md): Per-principal isolation planes are provisioned at deploy time, one CloudFormation stack per listed principal
+- [`decision-15`](../decisions/decision-15%20-%20Key-the-local-stack-output-cache-by-the-STS-caller-account-region-and-stack.md): Key the local stack-output cache by the STS caller account, region and stack
 
 ## Open questions
 
-- **Disk cache invalidation**: `~/.config/sch/` runtime ARN and checkpoint bucket cache currently lacks account/region invalidation keys.
 - **Error surface fidelity**: `runtime.invoke_verified` discards `stderr`, obscuring real AWS API errors.
 - **Telegram webhook registration from restricted networks**: registering the webhook requires a network that reaches `api.telegram.org`; when registration fails, `deploy.sh` warns and the webhook must be re-registered from such a network, because each deploy regenerates the secret unless `TELEGRAM_WEBHOOK_SECRET` is pinned.
 
 ## Roadmap
 
-2. **Operational hardening** — account/region cache invalidation, stderr diagnostic preservation in CLI invocation, cost budgets and alarms in deploy.
+2. **Operational hardening** — stderr diagnostic preservation in CLI invocation, cost budgets and alarms in deploy.
 3. **Team features** — shared workspace registries across teams, multi-user onboarding, centralized image and audit management.
 4. **Future extensions** — `llms.txt` for the repository, MCP server exposing SCH state, runtime module decomposition if maintenance burden requires it.
 
@@ -93,3 +97,4 @@ Architecture decisions are recorded in [`.backlog/decisions/`](../decisions/) (`
 - [2026-09-27 Isolation: verify scripts and documentation](../docs/journal/doc-20%20-%202026-09-27-Isolation-verify-scripts-and-documentation.md) — verify scripts on registry and isolation stacks, `bin/verify-isolation.sh`, operator guides and security posture, spec Partially verified (TASK-20.5).
 - [2026-09-29 Per-user workspace isolation: live check and closure](../docs/journal/doc-21%20-%202026-09-29-Per-user-workspace-isolation-live-check-and-closure.md) — live two-principal check passed on a deployed stack (37/37), four tooling and client defects found and fixed on the way, registry DELETE timeout left as a follow-up; TASK-20 Done.
 - [2026-09-30 Isolation aftercare: removing a principal, watchdog rule ARN, minimal caller policy](../docs/journal/doc-22%20-%202026-09-30-Isolation-aftercare-removing-a-principal-watchdog-rule-ARN-minimal-caller-policy.md) — a removed principal's plane deleted by the next deploy as specified; GetAtt on a legacy AWS::Events::Rule broke every stack update and was replaced by a built ARN; the minimal caller policy confirmed live (TASK-20 aftercare, TASK-24 still open).
+- [2026-10-02 sch status reported no task while one was running](../docs/journal/doc-23%20-%202026-10-02-sch-status-reported-no-task-while-one-was-running.md) — an account-blind cache sent `sch status` to another account's bucket and the AccessDenied read as `state: none`; the cache is now keyed by STS account, region and stack, and only a missing object means `none` (TASK-25, decision-15).

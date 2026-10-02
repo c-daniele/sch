@@ -65,7 +65,6 @@ def _cfg(tmp, registry=True):
         region="eu-west-1", project="sch", env="dev", default_harness="opencode",
         default_storage="s3", workspace_registry_url=URL if registry else "",
         ws_dir=base / "workspaces", config_dir=base,
-        runtime_arn_cache=base / "runtime-arn", checkpoint_bucket_cache=base / "checkpoint-bucket",
         runtime_arn_override="", checkpoint_bucket_override="sch-dev-checkpoints-" + ACCOUNT,
         acp_mirror_root=base / "mirrors", provider_keys={},
         stack_name=lambda: "sch-dev-runtime",
@@ -281,11 +280,13 @@ class RegistryClientTests(Base):
 class RuntimeSelectionTests(Base):
     def test_plane_runtime_wins_over_override_cache_and_stack(self):
         self.cfg.runtime_arn_override = SHARED_ARN
-        self.cfg.runtime_arn_cache.write_text(SHARED_ARN + "\n")
+        cached = config_mod.stack_outputs_dir(self.cfg, ACCOUNT, "eu-west-1", "sch-dev-runtime")
+        cached.mkdir(parents=True)
+        (cached / "runtime-arn").write_text(SHARED_ARN + "\n")
         self.adopt()
         with patch("subprocess.run", side_effect=AssertionError("no AWS call expected")):
             self.assertEqual(config_mod.runtime_arn(self.cfg), RUNTIME_ARN)
-        self.assertEqual(self.cfg.runtime_arn_cache.read_text(), SHARED_ARN + "\n")
+        self.assertEqual((cached / "runtime-arn").read_text(), SHARED_ARN + "\n")
 
     def test_unknown_isolation_asks_the_registry_before_any_fallback(self):
         self.cfg.runtime_arn_override = SHARED_ARN
@@ -473,7 +474,8 @@ class IsolationOffGoldenTests(Base):
         self.assertEqual(argv[:9], ["aws", "s3api", "get-object", "--bucket",
                                     "sch-dev-checkpoints-" + ACCOUNT, "--key",
                                     "checkpoints/ws/task-status.json", "--region", "eu-west-1"])
-        self.assertEqual(set(kwargs), {"stdout", "stderr"})
+        # Isolation off: the caller's own credentials (no `env` override).
+        self.assertEqual(set(kwargs), {"stdout", "stderr", "text"})
         self.assertIsNone(getattr(cfg, "plane", None))
 
     def test_registry_off_dashboard_and_remote_check_use_flat_keys_and_own_credentials(self):

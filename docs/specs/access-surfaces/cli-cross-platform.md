@@ -11,7 +11,7 @@ The `sch` CLI provides a single implementation with identical observable behavio
 In scope:
 - Single Python implementation, entry-point shims, interpreter resolution.
 - Command parity across platforms, including Windows availability of editor and deletion commands.
-- stdout/stderr discipline, exit codes, environment variables, workspace index format compatibility with the previous bash/PowerShell implementation.
+- stdout/stderr discipline, exit codes, environment variables, workspace index format compatibility with the previous bash/PowerShell implementation, and the local cache of the runtime stack outputs.
 - Safe delegation to external processes.
 
 Out of scope:
@@ -44,7 +44,9 @@ Out of scope:
 
 ### Workspace index compatibility
 
-**R9.** The CLI SHALL read and write the workspace index in `~/.config/sch/` (honoring `XDG_CONFIG_HOME`) in the previous implementation's format: JSON files `workspaces/<ws>` with keys `runtimeSessionId` and `harness`; textual files `.status.<ws>` of the form `<status> <ISO-8601 UTC timestamp>`; plain-text caches `runtime-arn` and `checkpoint-bucket`. On read the CLI MUST tolerate the legacy formats (bare string, JSON scalar, `sessionId` key) without requiring any migration, applying the legacy harness reconciliation rules of the `harness-selection` capability.
+**R9.** The CLI SHALL read and write the workspace index in `~/.config/sch/` (honoring `XDG_CONFIG_HOME`) in the previous implementation's format: JSON files `workspaces/<ws>` with keys `runtimeSessionId` and `harness`; textual files `.status.<ws>` of the form `<status> <ISO-8601 UTC timestamp>`. On read the CLI MUST tolerate the legacy formats (bare string, JSON scalar, `sessionId` key) without requiring any migration, applying the legacy harness reconciliation rules of the `harness-selection` capability.
+
+**R9a.** The runtime ARN and the checkpoint bucket name read from the outputs of the runtime stack (`RuntimeArn`, `CheckpointBucketName` of `<project>-<env>-runtime`) SHALL be cached in the same directory as plain-text files `stack-outputs/<account>/<region>/<stack>/runtime-arn` and `.../checkpoint-bucket`, where `<account>` is the account of the current credentials (`sts get-caller-identity`, looked up at most once per command). A cached value MUST NOT be used for another account, region or stack. `SCH_RUNTIME_ARN` and `SCH_CHECKPOINT_BUCKET` take precedence and need no lookup; with isolation on, the runtime ARN is the plane's ([per-principal-isolation](../security/per-principal-isolation.md) R40). When the account cannot be determined, the command SHALL exit 1 with a message naming the AWS error and the two variables. The flat files `runtime-arn` and `checkpoint-bucket` of the earlier layout recorded no account: they MUST NOT be read, and they are removed when a keyed entry is written.
 
 ### Per-platform interactive semantics
 
@@ -62,6 +64,8 @@ Out of scope:
 - A prompt containing hostile characters (`"quote", $var, \`backtick\`, ; rm -rf`) reaches the remote shim byte-for-byte identical, encapsulated in the JSON payload, with no local execution or expansion.
 - `sch delete <ws> --yes` with all phases succeeding → empty stdout, completion report on stderr, exit 0. A failed mandatory phase → empty stdout, stderr identifies the workspace and failed phase (`quiesce`, `S3 purge`, `registry finalize`, or `local cleanup`), exit 1, without exposing credentials or sensitive payloads.
 - `sch delete --all` with mixed outcomes → empty stdout; stderr carries one outcome per workspace sorted by name, final counts, and the targets to retry.
+- One laptop, two AWS accounts that both deploy `sch-dev-runtime` → each account's credentials resolve and cache their own runtime ARN and bucket; switching `AWS_PROFILE` never reuses the other account's values, and switching back needs no new stack lookup.
+- Expired credentials without `SCH_RUNTIME_ARN`/`SCH_CHECKPOINT_BUCKET` → exit 1, `sch: cannot determine the AWS account of the current credentials (<AWS error>); ...` on stderr, no stack lookup.
 
 ## Invariants
 
@@ -73,10 +77,12 @@ Out of scope:
 
 **I4.** External processes are only ever launched with argv lists — never through a shell, never with interpolated command strings.
 
+**I5.** A cached stack output is only ever used for the account, region and stack it was resolved for.
+
 ## Cross-references
 
 - [MANIFESTO](../../../MANIFESTO.md) — project constitution and surface hierarchy.
-- Entry points and implementation: [bin/sch](../../../bin/sch), [cli/sch/](../../../cli/sch), [cli/sch/cli.py](../../../cli/sch/cli.py).
+- Entry points and implementation: [bin/sch](../../../bin/sch), [cli/sch/](../../../cli/sch), [cli/sch/cli.py](../../../cli/sch/cli.py); stack-output cache: [cli/sch/config.py](../../../cli/sch/config.py) (`caller_account`, `stack_outputs_dir`), tests in [cli/tests/test_stack_cache.py](../../../cli/tests/test_stack_cache.py).
 - Delegated processes: [tunnel/](../../../tunnel) (ACP and attach), `agentcore exec --it` (interactive shell, see [interactive-shell-access.md](interactive-shell-access.md)).
 - End-to-end checks: [bin/verify-headless-tasks.sh](../../../bin/verify-headless-tasks.sh) and the other `bin/verify-*.sh` scripts (R8).
 - Related capabilities (specs to be rationalized): `harness-selection`, `local-workspace-sync`, workspace deletion contract.

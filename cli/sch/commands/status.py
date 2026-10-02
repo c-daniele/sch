@@ -33,7 +33,15 @@ _HEARTBEAT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def read_offline_status(cfg, runtime_workspace, require_success=False):
-    """Read task status from S3 without contacting the AgentCore runtime."""
+    """Read task status from S3 without contacting the AgentCore runtime.
+
+    ``{"state":"none"}`` only when the status object does not exist
+    (headless-task-execution R17). Any other failure (access denied, missing
+    bucket, expired credentials) dies naming the bucket, the key and the AWS
+    error: reporting it as "no task" once hid a running task behind another
+    account's bucket (TASK-25). With ``require_success`` (dashboard) every
+    failure raises instead, the missing object included.
+    """
     bucket = checkpoint_bucket(cfg)
     # per-principal-isolation R26/R40: with isolation on the key carries the
     # owner segment and the read goes through the plane's access role.
@@ -44,28 +52,38 @@ def read_offline_status(cfg, runtime_workspace, require_success=False):
         if require_success:
             raise
         die(str(exc))
-    raw = '{"state":"none"}'
+    location = "s3://{}/{}".format(bucket, key)
     with procs.temp_json_file("status") as tmp_path:
-        result = subprocess.run(
-            [
-                "aws", "s3api", "get-object", "--bucket", bucket, "--key", key,
-                "--region", cfg.region, tmp_path,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **options
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "aws", "s3api", "get-object", "--bucket", bucket, "--key", key,
+                    "--region", cfg.region, tmp_path,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                **options
+            )
+        except FileNotFoundError:
+            if require_success:
+                raise RuntimeError("task status is unavailable")
+            die("cannot read the task status from {}: the aws CLI is not installed "
+                "or not on PATH".format(location))
         if result.returncode != 0:
             if require_success:
                 raise RuntimeError("task status is unavailable")
-            return raw
+            if "(NoSuchKey)" in (result.stderr or ""):
+                return '{"state":"none"}'
+            die("cannot read the task status from {}: {}".format(
+                location, procs.aws_error_detail(result.stderr)))
         try:
             with open(tmp_path, "r", encoding="utf-8") as fh:
                 return fh.read()
         except OSError as exc:
             if require_success:
                 raise RuntimeError("cannot read task status") from exc
-    return raw
+            die("cannot read the downloaded task status of {}: {}".format(location, exc))
 
 
 def heartbeat_age_seconds(value, now=None):
@@ -110,7 +128,7 @@ def running_stale_note(data, now=None):
     if age is None:
         return "STALE: no heartbeat"
     if age > STALE_AFTER_S:
-        return "STALE: ultimo heartbeat {} fa".format(humanize_age(age))
+        return "STALE: last heartbeat {} ago".format(humanize_age(age))
     return ""
 
 

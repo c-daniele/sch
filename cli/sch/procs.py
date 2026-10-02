@@ -6,6 +6,7 @@ output files.
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -318,3 +319,14 @@ def null_output_path():
     fd, path = tempfile.mkstemp(prefix="sch-null-")
     os.close(fd)
     return path
+
+
+def aws_error_detail(stderr):
+    """The last non-empty line of an AWS CLI error, without the CLI's own
+    ``aws: [ERROR]:`` prefix, e.g. ``An error occurred (AccessDenied) when
+    calling the GetObject operation: Access Denied``.
+    """
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    if not lines:
+        return "unknown AWS CLI error"
+    return re.sub(r"^aws:\s*(\[error\]|error):\s*", "", lines[-1], flags=re.IGNORECASE)

@@ -70,7 +70,7 @@ class RunningStaleNoteTests(unittest.TestCase):
         note = status_cmd.running_stale_note(
             {"state": "running", "heartbeat_utc": _stamp(1872)}, _NOW
         )
-        self.assertEqual(note, "STALE: ultimo heartbeat 31m 12s fa")
+        self.assertEqual(note, "STALE: last heartbeat 31m 12s ago")
 
     def test_fresh_running_has_no_note(self):
         for age in (0, 30, 149, status_cmd.STALE_AFTER_S):
@@ -87,7 +87,7 @@ class RunningStaleNoteTests(unittest.TestCase):
             {"state": "running", "heartbeat_utc": _stamp(status_cmd.STALE_AFTER_S + 1)},
             _NOW,
         )
-        self.assertTrue(note.startswith("STALE: ultimo heartbeat"))
+        self.assertTrue(note.startswith("STALE: last heartbeat"))
 
     def test_missing_heartbeat_is_suspect(self):
         self.assertEqual(
@@ -133,7 +133,7 @@ class StaleRenderingTests(unittest.TestCase):
         )
         self.assertEqual(
             out.splitlines()[0],
-            "state        : running (STALE: ultimo heartbeat 31m 12s fa)",
+            "state        : running (STALE: last heartbeat 31m 12s ago)",
         )
 
     def test_missing_heartbeat_state_line(self):
@@ -160,7 +160,7 @@ class StaleRenderingTests(unittest.TestCase):
         out = status_cmd.format_status(
             {"state": "running", "heartbeat_utc": "2020-01-01T00:00:00Z"}
         )
-        self.assertIn("(STALE: ultimo heartbeat ", out.splitlines()[0])
+        self.assertIn("(STALE: last heartbeat ", out.splitlines()[0])
 
 
 class CmdStatusExitCodeTests(unittest.TestCase):

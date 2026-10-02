@@ -99,6 +99,13 @@ def _read_workspace_snapshot(cfg, record, clock=time.time):
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("task status is not an object")
+    except SystemExit:
+        # die() from bucket or account resolution (TASK-25): the message is
+        # already on stderr, and letting SystemExit through would end the
+        # refresh thread instead of degrading this row (dashboard-tui R7).
+        return _unknown_workspace_snapshot(
+            record, RuntimeError("task status is unavailable"), manifest_age_s
+        )
     except Exception as exc:
         return _unknown_workspace_snapshot(record, exc, manifest_age_s)
     return WorkspaceSnapshot(

@@ -27,7 +27,6 @@ def _cfg(tmp_dir):
     return SimpleNamespace(
         ws_dir=root / "workspaces",
         config_dir=root,
-        checkpoint_bucket_cache=root / "bucket",
         checkpoint_bucket_override="test-bucket",
         region="eu-west-1",
         workspace_registry_url="",
@@ -209,18 +208,75 @@ class OfflineStatusTests(unittest.TestCase):
         self.assertIn("checkpoints/owner-ws/task-status.json", argv)
         self.assertFalse(os.path.exists(argv[-1]))
 
-    def test_default_mode_preserves_none_on_s3_failure(self):
-        with patch.object(
-            status_cmd.subprocess, "run", return_value=SimpleNamespace(returncode=1)
-        ):
+    @staticmethod
+    def _failed(stderr):
+        return SimpleNamespace(returncode=254, stderr=stderr)
+
+    def test_missing_object_is_state_none(self):
+        missing = self._failed(
+            "\naws: [ERROR]: An error occurred (NoSuchKey) when calling the GetObject "
+            "operation: The specified key does not exist.\n"
+        )
+        with patch.object(status_cmd.subprocess, "run", return_value=missing):
             self.assertEqual(status_cmd.read_offline_status(self.cfg, "ws"), '{"state":"none"}')
 
-    def test_strict_mode_surfaces_s3_failure(self):
-        with patch.object(
-            status_cmd.subprocess, "run", return_value=SimpleNamespace(returncode=1)
-        ):
-            with self.assertRaisesRegex(RuntimeError, "unavailable"):
-                status_cmd.read_offline_status(self.cfg, "ws", require_success=True)
+    def test_other_read_failures_die_naming_bucket_key_and_error(self):
+        # TASK-25: an AccessDenied on another account's bucket used to read as
+        # "no task" and hid a running one.
+        for code in ("AccessDenied", "NoSuchBucket", "ExpiredToken"):
+            with self.subTest(code=code):
+                failed = self._failed(
+                    "\naws: [ERROR]: An error occurred ({}) when calling the GetObject "
+                    "operation: refused\n".format(code)
+                )
+                err = io.StringIO()
+                with patch.object(status_cmd.subprocess, "run", return_value=failed), \
+                        contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
+                    status_cmd.read_offline_status(self.cfg, "ws")
+                self.assertEqual(caught.exception.code, 1)
+                self.assertEqual(
+                    err.getvalue(),
+                    "sch: cannot read the task status from "
+                    "s3://test-bucket/checkpoints/ws/task-status.json: An error occurred "
+                    "({}) when calling the GetObject operation: refused\n".format(code),
+                )
+
+    def test_missing_aws_cli_dies_instead_of_reporting_none(self):
+        err = io.StringIO()
+        with patch.object(status_cmd.subprocess, "run", side_effect=FileNotFoundError("aws")), \
+                contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            status_cmd.read_offline_status(self.cfg, "ws")
+        self.assertIn("aws CLI is not installed", err.getvalue())
+
+    def test_strict_mode_surfaces_every_s3_failure(self):
+        # dashboard-tui R7: the dashboard degrades even a missing object to an
+        # unknown row, so strict mode keeps raising on NoSuchKey.
+        for code in ("NoSuchKey", "AccessDenied"):
+            failed = self._failed("An error occurred ({}) when calling GetObject".format(code))
+            with self.subTest(code=code), patch.object(
+                status_cmd.subprocess, "run", return_value=failed
+            ):
+                with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                    status_cmd.read_offline_status(self.cfg, "ws", require_success=True)
+
+    def test_status_json_prints_nothing_on_a_read_failure(self):
+        denied = self._failed(
+            "An error occurred (AccessDenied) when calling the GetObject operation: Access Denied"
+        )
+        resolved = SimpleNamespace(sid="sid-1", harness="opencode", identity="", storage="s3",
+                                   epoch=1, was_created=False)
+        state = workspace.WorkspaceState(sid="sid-1", harness="opencode", storage="s3",
+                                         storage_present=True, epoch=1)
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(status_cmd.harness_mod, "resolve_harness", return_value=resolved), \
+                patch.object(status_cmd.workspace, "read_workspace_state", return_value=state), \
+                patch.object(status_cmd.subprocess, "run", return_value=denied), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                self.assertRaises(SystemExit) as caught:
+            status_cmd.cmd_status(self.cfg, ["ws", "--json"])
+        self.assertEqual(caught.exception.code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("AccessDenied", err.getvalue())
 
     def test_format_status_is_pure_and_render_wrapper_is_unchanged(self):
         data = {"state": "failed", "error": "x" * 501, "checkpoint_status": "failed"}
@@ -297,6 +353,17 @@ class DashboardAggregationTests(unittest.TestCase):
             snapshot = dashboard.aggregate_snapshot(self.cfg, records=(record,))
         self.assertEqual(snapshot.workspaces[0].task_state, "unknown")
         self.assertEqual(snapshot.workspaces[0].manifest_age_s, 17.0)
+
+    def test_failed_bucket_or_account_resolution_degrades_the_row(self):
+        # TASK-25: die() raises SystemExit, which used to escape the worker
+        # and end the refresh thread instead of marking the row unknown.
+        records = (_record("alpha"), _record("beta"))
+        with patch.object(dashboard, "read_offline_status", side_effect=SystemExit(1)), \
+                patch.object(dashboard, "read_manifest_age", return_value=5.0):
+            snapshot = dashboard.aggregate_snapshot(self.cfg, records=records, max_workers=2)
+        self.assertEqual([row.task_state for row in snapshot.workspaces], ["unknown", "unknown"])
+        self.assertEqual(snapshot.workspaces[0].error, "task status is unavailable")
+        self.assertEqual(snapshot.workspaces[1].manifest_age_s, 5.0)
 
 
 class ManifestAgeTests(unittest.TestCase):
