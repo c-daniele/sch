@@ -48,11 +48,12 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCH="${SCRIPT_DIR}/sch"
 SCH_REGION="${SCH_REGION:-eu-west-1}"
-# Telegram is refused on isolation stacks (per-principal-isolation R44):
-# skip with a clear message instead of failing on the missing channel.
+# Telegram on an isolation stack is bound to one listed principal
+# (per-principal-isolation R44): skip unless TELEGRAM_PRINCIPAL says who, and
+# then the caller must be that principal.
 # shellcheck source=lib/verify-target.sh
 . "${SCRIPT_DIR}/lib/verify-target.sh"
-sch_target_skip_if_isolated "Telegram is not available with per-principal isolation on (per-principal-isolation R44); run this check on an isolation-off stack"
+sch_target_telegram_preflight
 SCH_PROJECT="${SCH_PROJECT:-sch}"
 SCH_ENV="${SCH_ENV:-dev}"
 

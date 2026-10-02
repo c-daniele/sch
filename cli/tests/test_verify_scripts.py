@@ -353,7 +353,8 @@ class VerifyTargetLibTests(unittest.TestCase):
         self.assertNotIn("reached", result.stdout)
         self.assertIn("add user:c to ISOLATED_PRINCIPALS", result.stderr)
 
-    def test_telegram_scripts_skip_on_isolation_stacks(self):
+    def test_telegram_scripts_skip_on_isolation_stacks_without_a_bound_principal(self):
+        """per-principal-isolation R44: Telegram is bound to TELEGRAM_PRINCIPAL."""
         with tempfile.TemporaryDirectory() as tmp:
             world = _FakeWorld(tmp)
             for script, args in (("verify-telegram-notifications.sh", ["ws-a", "ws-b"]),
@@ -361,8 +362,19 @@ class VerifyTargetLibTests(unittest.TestCase):
                 result = subprocess.run([str(BIN / script), *args], capture_output=True, text=True,
                                         env=world.env(AWS_PROFILE="a"), timeout=60)
                 self.assertEqual(result.returncode, 0, script + result.stdout + result.stderr)
-                self.assertIn("SKIP: Telegram is not available with per-principal isolation on",
-                              result.stdout)
+                self.assertIn("SKIP: isolated stack and TELEGRAM_PRINCIPAL not exported", result.stdout)
+
+    def test_telegram_preflight_continues_for_the_bound_principal(self):
+        result = self._bash("sch_target_telegram_preflight\necho reached\n", AWS_PROFILE="a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SKIP: isolated stack and TELEGRAM_PRINCIPAL not exported", result.stdout)
+        self.assertNotIn("reached", result.stdout)
+        result = self._bash("sch_target_telegram_preflight\necho reached\n", AWS_PROFILE="a",
+                            TELEGRAM_PRINCIPAL="user:a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("reached", result.stdout)
+        self.assertNotIn("SKIP", result.stdout)
+        self.assertIn("Telegram is bound to user:a", result.stderr)
 
 
 class ScriptSyntaxTests(unittest.TestCase):

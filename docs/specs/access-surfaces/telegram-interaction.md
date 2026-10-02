@@ -36,7 +36,10 @@ a secret token on a central endpoint (a single instance per bot token, as requir
 by the Telegram Bot API). The router MUST discard, with no side effects: requests
 lacking the correct secret token, updates originating from chats other than the
 configured one (single user), and messages in topics with no mapping to a known
-workspace.
+workspace. On an isolated stack the single user is the principal
+`TELEGRAM_PRINCIPAL` names ([per-principal-isolation](../security/per-principal-isolation.md)
+R44): only its plane polls the command queue, so a topic can only route to one of
+that principal's workspaces.
 
 **R2.** Accepted updates SHALL be transformed into commands queued for the workspace
 resolved from the `message_thread_id` (or from the fallback chat when operating

@@ -1,6 +1,6 @@
 """Tests of the isolation part of infra/deploy.sh (TASK-20.3).
 
-Spec: docs/specs/security/per-principal-isolation.md R2, R6, R10-R12, R17, R48.
+Spec: docs/specs/security/per-principal-isolation.md R2, R6, R10-R12, R17, R44, R48.
 
 - The plane helper block is sourced against a stub `aws`: one stack per
   plane with the runtime stack's configuration, a failed plane does not stop
@@ -37,6 +37,9 @@ case "$1 $2" in
       *WorkspaceRegistryRoleArn*) echo "arn:aws:iam::111122223333:role/sch-dev-workspace-registry-role" ;;
       *CheckpointBucketName*) echo "sch-dev-checkpoints-111122223333" ;;
       *ImageRebuildProjectName*) echo "None" ;;
+      *TelegramInteractionPolicyArn*) echo "${STUB_TELEGRAM_POLICY:-None}" ;;
+      *TelegramCommandsTableName*) echo "${STUB_TELEGRAM_POLICY:+sch-dev-telegram-commands}" ;;
+      *TelegramRoutingTableName*) echo "${STUB_TELEGRAM_POLICY:+sch-dev-telegram-routing}" ;;
       *"'ApplicationVersion'"*) echo "v7" ;;
       *"'ImageDigest'"*) echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ;;
       *IdleRuntimeSessionTimeoutSeconds*) echo "1200" ;;
@@ -102,6 +105,7 @@ class PlaneHelpersTest(unittest.TestCase):
             "PLANE_FAILURES=0\nPLANE_SUMMARY=()\n"
             f"{body}\n"
             'echo "FAILURES=${PLANE_FAILURES}"\n'
+            'echo "BOUND=${TELEGRAM_BOUND_ENTRY:-}"\n'
             'for l in "${PLANE_SUMMARY[@]}"; do echo "SUMMARY=${l}"; done\n'
         )
         return subprocess.run(["bash", "-c", script], env=base, capture_output=True, text=True)
@@ -109,8 +113,8 @@ class PlaneHelpersTest(unittest.TestCase):
     def calls(self):
         return self.log.read_text().splitlines()
 
-    def plane_line(self, key, entry="user:alice", status="NEW"):
-        return ["PLANE", entry, "user", key, "AIDAEXAMPLEALICE0001", f"sch-dev-plane-{key}", status]
+    def plane_line(self, key, entry="user:alice", status="NEW", telegram="false"):
+        return ["PLANE", entry, "user", key, "AIDAEXAMPLEALICE0001", f"sch-dev-plane-{key}", status, telegram]
 
     def test_each_plane_is_one_stack_with_the_runtime_stack_configuration(self):
         self.write_plan([self.plane_line(KEY_A), self.plane_line(KEY_B, "role:bots")])
@@ -130,11 +134,44 @@ class PlaneHelpersTest(unittest.TestCase):
             "SharedPolicyArns=arn:aws:iam::111122223333:policy/sch-dev-agentcore-policy,arn:aws:iam::111122223333:policy/sch-dev-runtime-cap-polly",
             "RegistryRoleArn=arn:aws:iam::111122223333:role/sch-dev-workspace-registry-role",
             "CheckpointBucket=sch-dev-checkpoints-111122223333",
+            "TelegramBinding=false", "TelegramBotToken= ", "TelegramChatId= ", "TelegramCommandsTable= ",
+            "TelegramRoutingTable= ", "TelegramPolicyArn= ",
             f"--tags sch:deployment=sch-dev sch:owner-key={KEY_A}",
             "--capabilities CAPABILITY_NAMED_IAM", "--no-fail-on-empty-changeset",
         ):
             self.assertIn(token, first)
         self.assertEqual(sum(1 for l in proc.stdout.splitlines() if l.startswith("SUMMARY=") and l.endswith("OK")), 2)
+        self.assertIn("BOUND=\n", proc.stdout)
+
+    def test_the_bound_plane_alone_receives_the_telegram_values(self):
+        """R44: token and chat from the deploy environment, tables and policy from the runtime stack."""
+        policy = "arn:aws:iam::111122223333:policy/sch-dev-telegram-interaction-session-policy"
+        self.write_plan([self.plane_line(KEY_A, telegram="true"), self.plane_line(KEY_B, "role:bots")])
+        proc = self.run_helpers(f'deploy_planes "{self.plan}"', STUB_TELEGRAM_POLICY=policy,
+                                TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_ID="-100")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        deploys = [c for c in self.calls() if c.startswith("cloudformation deploy")]
+        bound, other = deploys
+        self.assertIn(f"--stack-name sch-dev-plane-{KEY_A}", bound)
+        for token in ("TelegramBinding=true", "TelegramBotToken=123:abc", "TelegramChatId=-100",
+                      "TelegramCommandsTable=sch-dev-telegram-commands",
+                      "TelegramRoutingTable=sch-dev-telegram-routing", f"TelegramPolicyArn={policy}"):
+            self.assertIn(token, bound)
+        for token in ("TelegramBinding=false", "TelegramBotToken= ", "TelegramChatId= ",
+                      "TelegramCommandsTable= ", "TelegramRoutingTable= ", "TelegramPolicyArn= "):
+            self.assertIn(token, other)
+        self.assertNotIn("123:abc", other)
+        self.assertIn("BOUND=user:alice\n", proc.stdout)
+        self.assertIn("Telegram bound", proc.stdout)
+
+    def test_notifications_only_binding_passes_no_table_and_no_policy(self):
+        self.write_plan([self.plane_line(KEY_A, telegram="true")])
+        proc = self.run_helpers(f'deploy_planes "{self.plan}"', TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_ID="-100")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        deploy = next(c for c in self.calls() if c.startswith("cloudformation deploy"))
+        for token in ("TelegramBinding=true", "TelegramBotToken=123:abc", "TelegramChatId=-100",
+                      "TelegramCommandsTable= ", "TelegramRoutingTable= ", "TelegramPolicyArn= "):
+            self.assertIn(token, deploy)
 
     def test_a_failed_plane_does_not_stop_the_others(self):
         self.write_plan([self.plane_line(KEY_A), self.plane_line(KEY_B, "role:bots")])
@@ -224,7 +261,15 @@ class DeployScriptTest(unittest.TestCase):
         for env, message in (
             ({"ISOLATED_PRINCIPALS": "user:alice"}, "ENABLE_WORKSPACE_REGISTRY=true"),
             ({"ISOLATED_PRINCIPALS": "user:alice", "ENABLE_WORKSPACE_REGISTRY": "true",
-              "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1"}, "Telegram is not available"),
+              "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1"}, "set TELEGRAM_PRINCIPAL"),
+            ({"ISOLATED_PRINCIPALS": "user:alice", "ENABLE_WORKSPACE_REGISTRY": "true",
+              "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1", "TELEGRAM_PRINCIPAL": "user:bob"},
+             "is not in ISOLATED_PRINCIPALS"),
+            ({"ISOLATED_PRINCIPALS": "user:alice", "ENABLE_WORKSPACE_REGISTRY": "true",
+              "TELEGRAM_PRINCIPAL": "user:alice"}, "TELEGRAM_PRINCIPAL requires TELEGRAM_BOT_TOKEN"),
+            # Isolation off: the helper's verdict still stops the deploy (R44).
+            ({"TELEGRAM_PRINCIPAL": "user:alice", "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1"},
+             "ISOLATED_PRINCIPALS is empty"),
             ({"ISOLATED_PRINCIPALS": "bogus", "ENABLE_WORKSPACE_REGISTRY": "true"}, "expected user:"),
         ):
             with self.subTest(env=env):

@@ -114,7 +114,7 @@ sourced it.
 | Telegram remote interaction | the two above + `ENABLE_TELEGRAM_INTERACTION` | [Telegram interaction](telegram.md#telegram-interaction) |
 | Runtime IAM posture | `RUNTIME_CAPABILITIES`, `RUNTIME_BEDROCK_ACCESS`, `RUNTIME_BEDROCK_MODEL_ALLOWLIST`, `RUNTIME_AWS_API_READ`, `RUNTIME_DATA_BUCKET_ARN`, `RUNTIME_EXTRA_POLICY_JSON` | [docs/runtime-capability-tuning.md](runtime-capability-tuning.md) |
 | IAM workspace registry | `ENABLE_WORKSPACE_REGISTRY` | [IAM Workspace Registry](workspaces.md#iam-workspace-registry) |
-| Per-principal isolation | `ISOLATED_PRINCIPALS` (needs the registry) | [below](#per-principal-isolation-isolated_principals) and [Workspaces](workspaces.md#per-principal-isolation) |
+| Per-principal isolation | `ISOLATED_PRINCIPALS` (needs the registry); `TELEGRAM_PRINCIPAL` when Telegram is on | [below](#per-principal-isolation-isolated_principals) and [Workspaces](workspaces.md#per-principal-isolation) |
 | In-session image rebuild | `ENABLE_SESSION_IMAGE_REBUILD` | [Image Rebuild from a Session](image-rebuild.md#image-rebuild-from-a-session-codebuild) |
 | External task watchdog | `ENABLE_TASK_WATCHDOG` (on by default), `TASK_WATCHDOG_STALE_SECONDS`, `TASK_WATCHDOG_NOTIFY_AFTER_SECONDS` | [Headless tasks](headless-tasks.md#headless-tasks) |
 
@@ -147,15 +147,24 @@ stops on an unknown, malformed or ambiguous entry. An `sso:` username cannot
 be checked without Identity Center access: the deploy accepts it with a
 warning, so write it exactly as Identity Center shows it (the comparison is
 case-sensitive; a typo binds the plane to nobody or to someone else).
-Isolation refuses `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` and
-`ENABLE_TELEGRAM_INTERACTION=true`.
+**Telegram** stays a single-operator channel (one bot, one chat). With isolation
+on, the Telegram switches need `TELEGRAM_PRINCIPAL=<entry>`, one of the listed
+entries: only that principal's plane receives the bot token, the chat id and,
+with `ENABLE_TELEGRAM_INTERACTION=true`, the table names and the Telegram
+policy on its execution role; every other plane has no Telegram at all. The
+deploy refuses, before any stack changes, the Telegram switches without
+`TELEGRAM_PRINCIPAL`, and `TELEGRAM_PRINCIPAL` without them, without isolation
+or naming an entry that is not listed. The bound principal's agent can read the
+bot token, as the operator's agent does without isolation
+([Security posture](security.md#isolation-between-users)), so the chat must be
+that principal's. The deploy summary names the bound entry.
 
 Example `infra/setenv.sh` for two IAM users (the operator included):
 
 ```bash
 export ENABLE_WORKSPACE_REGISTRY=true
 export ISOLATED_PRINCIPALS="user:alice, user:bob"
-# no TELEGRAM_* / ENABLE_TELEGRAM_INTERACTION exports with isolation on
+# Telegram on this stack needs TELEGRAM_PRINCIPAL as well (see above)
 ```
 
 then `source infra/setenv.sh && infra/deploy.sh`. The entry is the IAM user
@@ -167,10 +176,11 @@ quota, managed-policy sizes; read-only), the bootstrap stack and image build,
 deletion of plane stacks whose entry left the list, the runtime stack (bucket
 policy, shared-runtime lock, registry with isolation on), then one
 `<project>-<env>-plane-<owner key>` stack per entry with the image and
-configuration read back from the runtime stack. A failed plane does not stop
+configuration read back from the runtime stack, and the Telegram binding on
+the one plane `TELEGRAM_PRINCIPAL` names. A failed plane does not stop
 or roll back the others; the deploy prints one line per entry (entry, owner
-key, runtime ARN, status) and exits non-zero if any plane failed: fix the
-cause and re-run the deploy.
+key, runtime ARN, status), names the Telegram-bound entry, and exits non-zero
+if any plane failed: fix the cause and re-run the deploy.
 
 **Adding a principal** is a new entry and a deploy. **Removing one** is
 deleting its entry and deploying: its plane stack is deleted, its storage is

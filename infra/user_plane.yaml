@@ -93,11 +93,59 @@ Parameters:
     Type: String
     Description: Registry Lambda role (WorkspaceRegistryRoleArn output), the only non-owner allowed to stop sessions
     AllowedPattern: ^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$
+  # R44: Telegram on an isolated stack binds to the one plane TELEGRAM_PRINCIPAL
+  # names. deploy.sh sets TelegramBinding='true' and the five values below on
+  # that plane only; every other plane keeps the defaults (no token, no table,
+  # no policy: its runtime environment and role are the R21/R18 ones).
+  TelegramBinding:
+    Type: String
+    Description: >-
+      'true' on the plane of the TELEGRAM_PRINCIPAL entry (spec R44): its
+      runtime receives the Telegram environment and its execution role the
+      Telegram interaction policy. 'false' everywhere else.
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  TelegramBotToken:
+    Type: String
+    NoEcho: true
+    Description: Bot token of the runtime stack (TelegramBotToken), bound plane only
+    Default: ''
+  TelegramChatId:
+    Type: String
+    Description: Chat id of the runtime stack (TelegramChatId), bound plane only
+    Default: ''
+  TelegramCommandsTable:
+    Type: String
+    Description: TelegramCommandsTableName output of the runtime stack, bound plane with interaction only
+    Default: ''
+  TelegramRoutingTable:
+    Type: String
+    Description: TelegramRoutingTableName output of the runtime stack, bound plane with interaction only
+    Default: ''
+  TelegramPolicyArn:
+    Type: String
+    Description: TelegramInteractionPolicyArn output of the runtime stack, bound plane with interaction only
+    Default: ''
+    AllowedPattern: ^(arn:aws[a-z-]*:iam::[0-9]{12}:policy/.+)?$
 
 Conditions:
   ImageDigestPinned: !Not [!Equals [!Ref ImageDigest, '']]
   AwsApiReadEnabled: !Equals [!Ref AwsApiRead, 'true']
   ImageRebuildSet: !Not [!Equals [!Ref ImageRebuildProject, '']]
+  # R44: the notification channel needs the binding and both credentials; the
+  # inbound channel additionally needs both tables and the policy. Half a
+  # configuration stays inert, as on the shared runtime.
+  TelegramBound: !And
+    - !Equals [!Ref TelegramBinding, 'true']
+    - !Not [!Equals [!Ref TelegramBotToken, '']]
+    - !Not [!Equals [!Ref TelegramChatId, '']]
+  TelegramInteractionBound: !And
+    - !Condition TelegramBound
+    - !Not [!Equals [!Ref TelegramCommandsTable, '']]
+    - !Not [!Equals [!Ref TelegramRoutingTable, '']]
+    - !Not [!Equals [!Ref TelegramPolicyArn, '']]
 
 Resources:
   # R20: allows everything the role's own policies allow, except SCH-owned
@@ -117,10 +165,18 @@ Resources:
             Effect: Allow
             Action: '*'
             Resource: '*'
+          # R20/R44: every SCH table, except on the Telegram-bound plane with
+          # the inbound channel, where the deny names the registry table so
+          # the Telegram policy can reach the two Telegram tables. An IAM Deny
+          # cannot say "every SCH table but these two" in one statement.
           - Sid: DenySchTables
             Effect: Deny
             Action: 'dynamodb:*'
-            Resource: !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/${ProjectName}-${Environment}-*'
+            Resource: !If
+              - TelegramInteractionBound
+              - - !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/${ProjectName}-${Environment}-workspace-registry'
+                - !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/${ProjectName}-${Environment}-workspace-registry/*'
+              - !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/${ProjectName}-${Environment}-*'
           # Every CloudWatch Logs read-level action that accepts a log-group
           # or log-stream resource (service reference, checked 2026-09-27);
           # list-level actions (DescribeLogStreams, DescribeMetricFilters,
@@ -187,9 +243,11 @@ Resources:
             Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${Environment}-*'
 
   # R18/R19: the shared role's trust and managed policies (one definition in
-  # the runtime stack), capped by the boundary. Never the Telegram session
-  # policy (R44). The name contains BedrockAgentCore so the deploy
-  # principal's iam:PassRole scope still applies (R15).
+  # the runtime stack), capped by the boundary. The Telegram session policy
+  # only on the Telegram-bound plane with the inbound channel (R44). The name
+  # contains BedrockAgentCore so the deploy principal's iam:PassRole scope
+  # still applies (R15). Empty strings instead of AWS::NoValue keep Fn::Join
+  # well-defined.
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -197,15 +255,13 @@ Resources:
       Description: !Sub 'Execution role of the ${ProjectName}/${Environment} plane ${OwnerKey}'
       Path: /
       PermissionsBoundary: !Ref PlaneBoundary
-      ManagedPolicyArns: !If
-        - AwsApiReadEnabled
-        - !Split
-          - ','
-          - !Join
-            - ','
-            - - !Join [',', !Ref SharedPolicyArns]
-              - arn:aws:iam::aws:policy/ReadOnlyAccess
-        - !Ref SharedPolicyArns
+      ManagedPolicyArns: !Split
+        - ','
+        - !Join
+          - ''
+          - - !Join [',', !Ref SharedPolicyArns]
+            - !If [AwsApiReadEnabled, ',arn:aws:iam::aws:policy/ReadOnlyAccess', '']
+            - !If [TelegramInteractionBound, !Sub ',${TelegramPolicyArn}', '']
       # No sts:TagSession (R19/R25): a session tag sch-owner would override
       # the role tag the bucket policy relies on.
       AssumeRolePolicyDocument:
@@ -245,7 +301,9 @@ Resources:
         IdleRuntimeSessionTimeout: !Ref IdleRuntimeSessionTimeoutSeconds
         MaxLifetime: !Ref MaxLifetimeSeconds
       # R21: the shared runtime's environment minus every SCH_TELEGRAM_*
-      # variable, plus the owner prefix the shim writes under (R29).
+      # variable, plus the owner prefix the shim writes under (R29). The
+      # Telegram-bound plane alone gets the SCH_TELEGRAM_* variables back
+      # (R44); the shim's opt-in gates are the ones of the shared runtime.
       EnvironmentVariables:
         LOG_LEVEL: INFO
         AGENT_PORT: '8080'
@@ -264,6 +322,22 @@ Resources:
         SCH_NODE_HEAP_MB: !Ref NodeHeapMb
         SCH_BUILD_JOBS: !Ref BuildJobs
         SCH_OWNER_PREFIX: !Sub 'o.${OwnerKey}'
+        SCH_TELEGRAM_BOT_TOKEN: !If
+          - TelegramBound
+          - !Ref TelegramBotToken
+          - !Ref AWS::NoValue
+        SCH_TELEGRAM_CHAT_ID: !If
+          - TelegramBound
+          - !Ref TelegramChatId
+          - !Ref AWS::NoValue
+        SCH_TELEGRAM_COMMANDS_TABLE: !If
+          - TelegramInteractionBound
+          - !Ref TelegramCommandsTable
+          - !Ref AWS::NoValue
+        SCH_TELEGRAM_ROUTING_TABLE: !If
+          - TelegramInteractionBound
+          - !Ref TelegramRoutingTable
+          - !Ref AWS::NoValue
       Tags:
         Name: !Sub '${ProjectName}-${Environment}-plane-${OwnerKey}'
         Environment: !Ref Environment

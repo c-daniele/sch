@@ -56,7 +56,9 @@ workspace registry. The final defaults of TASK-20 are:
 8. **Shim.** The owner prefix comes only from `SCH_OWNER_PREFIX` in the runtime environment;
    a disagreeing payload is rejected; nothing is written into the workspace root before the
    bootstrap restore; runtimes without the variable behave as today.
-9. **Telegram.** Refused with isolation on; it stays a single-operator feature.
+9. **Telegram.** Refused with isolation on; it stays a single-operator feature. *Superseded on
+   2026-10-02 by [decision-17](decision-17%20-%20Telegram-on-an-isolated-stack-binds-to-exactly-one-listed-principal.md):
+   Telegram stays single-operator but binds to one listed principal (`TELEGRAM_PRINCIPAL`).*
 10. **Migration.** None; owners start with empty namespaces.
 11. **Removing a principal.** The next deploy deletes its plane; its storage is retained.
 12. **Logs.** Task prompts are no longer written to the runtime logs, in every mode.
@@ -93,8 +95,9 @@ Choices made while writing the spec (TASK-20.1), within those defaults:
   runtime-capability-tuning R1 and I1 no longer holds and is amended when TASK-20.3 lands.
   A managed policy holds 6,144 characters, less than the 10,240 of inline role policies, which
   caps the Bedrock allow-list length.
-- With isolation on, Telegram, registry-off use and the shared runtime are unavailable on
-  that stack, and existing records and checkpoints are not migrated.
+- With isolation on, registry-off use and the shared runtime are unavailable on that stack,
+  and existing records and checkpoints are not migrated. Telegram, refused here, binds to one
+  listed principal since decision-17.
 - Residual risks are listed in the spec: ReadOnlyAccess configuration reads, the plane
   creation window, unverified `sso:` usernames, simulator limits, shared image rebuild,
   shared data bucket, `role:` entries, the registry mapping cache, the managed-policy size.

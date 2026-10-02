@@ -455,10 +455,24 @@ def format_terminal_message(workspace, data, thread_id):
 
 def send_telegram(workspace, data, formatter=format_message):
     """Best-effort notification; never raises. ``formatter`` renders the
-    message from the record (the reconciliation message by default)."""
+    message from the record (the reconciliation message by default).
+
+    An owner-tree workspace (``o.<k>/<ws>``, per-principal isolation) without
+    a topic mapping is never announced: with isolation on the channel is bound
+    to one owner (per-principal-isolation R44), and only that owner's shim
+    writes topic mappings, so the plain-chat fallback would announce another
+    owner's workspace in the bound owner's chat. The fallback stays for the
+    isolation-off layout, whose workspaces all belong to the one operator."""
     if not telegram_enabled():
         return False
-    state = read_topic_state(workspace) or {}
+    state = read_topic_state(workspace)
+    if state is None and "/" in workspace:
+        logger.info(
+            "workspace '%s' has no topic mapping on an isolation plane; not notifying",
+            workspace,
+        )
+        return False
+    state = state or {}
     thread_id = state.get("thread_id")
     if state.get("fallback") or not isinstance(thread_id, int):
         thread_id = None

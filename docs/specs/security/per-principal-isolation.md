@@ -1,6 +1,6 @@
 # Per-Principal Workspace Isolation
 
-> Domain: [Security](../README.md) · Status: Implemented (TASK-20; design TASK-20.1; runtime side R26–R35 by TASK-20.2; templates, deploy and teardown R1–R6, R10–R25, R27, R39, R44–R48 by TASK-20.3; registry and CLI R7–R9, R36–R38, R40–R43 by TASK-20.4; verify scripts and guides by TASK-20.5. Every requirement is implemented and covered by unit tests, Access Analyzer and simulator evidence. Live check 2026-09-29 on a deployed stack with two IAM users and one unlisted IAM user: `bin/verify-isolation.sh` 37 passed, 0 failed, which covers CloudFormation acceptance of the locks, the joint runtime and endpoint lock evaluation (R16, R17), the principal-ID field of R36, the 403 text of R37 and the bucket policy against real callers (R24). Not exercised live: an Identity Center (`sso:`) owner) · Decision: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
+> Domain: [Security](../README.md) · Status: Implemented (TASK-20; design TASK-20.1; runtime side R26–R35 by TASK-20.2; templates, deploy and teardown R1–R6, R10–R25, R27, R39, R44–R48 by TASK-20.3; registry and CLI R7–R9, R36–R38, R40–R43 by TASK-20.4; verify scripts and guides by TASK-20.5. Every requirement is implemented and covered by unit tests, Access Analyzer and simulator evidence. Live check 2026-09-29 on a deployed stack with two IAM users and one unlisted IAM user: `bin/verify-isolation.sh` 37 passed, 0 failed, which covers CloudFormation acceptance of the locks, the joint runtime and endpoint lock evaluation (R16, R17), the principal-ID field of R36, the 403 text of R37 and the bucket policy against real callers (R24). Not exercised live: an Identity Center (`sso:`) owner. Telegram bound to one listed principal (R44, TASK-29): template, preflight, deploy and watchdog tests; not exercised live yet) · Decisions: [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md), [decision-17](../../../.backlog/decisions/decision-17%20-%20Telegram-on-an-isolated-stack-binds-to-exactly-one-listed-principal.md)
 
 ## Purpose
 
@@ -36,7 +36,8 @@ Out of scope:
 
 - Isolation across AWS accounts, OAuth inbound authorization
 - Repository-token handling in `image/scripts/init-workspace.sh`
-- Per-owner Telegram (a follow-up; Telegram is refused with isolation on, R44)
+- Per-owner Telegram, one bot and one chat per principal (a follow-up; with isolation on the
+  one channel binds to one listed principal, R44)
 - Migration of existing registry records or checkpoints (none, R47)
 - Behavior with isolation off: unchanged, see [owner-scoped-workspace-storage](owner-scoped-workspace-storage.md),
   [workspace-registry](workspace-registry.md) and [iam-workspace-registry](iam-workspace-registry.md)
@@ -76,9 +77,9 @@ Out of scope:
   shared runtime when it does not exist yet, MUST NOT exceed the account quota: the
   Service Quotas value of `Total Agents per Account` (service `bedrock-agentcore`, code
   `L-F4575653`) when readable, first as applied then as the AWS default, else the
-  documented default of 100. It SHALL also refuse
-  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` and `ENABLE_TELEGRAM_INTERACTION=true` together
-  with isolation (R44).
+  documented default of 100. It SHALL also check the Telegram binding (R44): the Telegram
+  switches need `TELEGRAM_PRINCIPAL`, and `TELEGRAM_PRINCIPAL` needs them, isolation, and one
+  listed entry.
 
 ### Owner identity
 
@@ -157,14 +158,20 @@ Out of scope:
   Bedrock and bedrock-mantle grants, checkpoint read/write), each enabled capability policy,
   the escape-hatch policy, and the image-rebuild session policy. The runtime stack SHALL
   output their ARNs (`SharedRuntimePolicyArns`). `ReadOnlyAccess` SHALL be attached to plane
-  roles exactly when it is attached to the shared role. The Telegram session policy SHALL
-  NOT be attached to plane roles. Nothing is copied at run time.
+  roles exactly when it is attached to the shared role. The Telegram session policy is a
+  customer managed policy too, exported as `TelegramInteractionPolicyArn` and never part of
+  `SharedRuntimePolicyArns`: it SHALL be attached to the Telegram-bound plane role only, and
+  only with the inbound channel on (R44). Nothing is copied at run time.
 - **R19.** The plane execution role trust SHALL be the shared role's trust
   (`bedrock-agentcore.amazonaws.com`, `aws:SourceAccount`, `aws:SourceArn` in the account) and
   SHALL NOT allow `sts:TagSession`.
 - **R20.** Each plane execution role SHALL have a CloudFormation-managed permissions boundary
   that allows `*` and denies only SCH-owned shared resources of the deployment:
-  - `dynamodb:*` on `table/<project>-<env>-*` and its sub-resources (registry and Telegram tables);
+  - `dynamodb:*` on `table/<project>-<env>-*` and its sub-resources (registry and Telegram
+    tables); on the Telegram-bound plane with the inbound channel on (R44), on the registry
+    table `table/<project>-<env>-workspace-registry` and its sub-resources instead, so the
+    Telegram policy reaches the two Telegram tables (one IAM Deny cannot name every SCH table
+    but two);
   - log reads, i.e. every read-level CloudWatch Logs action that accepts a log-group or
     log-stream resource (service reference checked 2026-09-27): `logs:FilterLogEvents`,
     `GetDataProtectionPolicy`, `GetLogEvents`, `GetLogGroupFields`, `GetLogRecord`,
@@ -188,7 +195,9 @@ Out of scope:
   R24), so build-source uploads, data-bucket writes and every other grant of the shared role
   keep working.
 - **R21.** Each plane runtime environment SHALL equal the shared runtime's environment minus
-  every `SCH_TELEGRAM_*` variable, plus `SCH_OWNER_PREFIX=<ownerPrefix>`.
+  every `SCH_TELEGRAM_*` variable, plus `SCH_OWNER_PREFIX=<ownerPrefix>`. The one
+  Telegram-bound plane (R44) SHALL equal the shared runtime's environment, `SCH_TELEGRAM_*`
+  included, plus `SCH_OWNER_PREFIX`.
 
 ### Access role
 
@@ -334,10 +343,28 @@ Out of scope:
 
 ### Telegram, removal, migration, teardown
 
-- **R44.** Telegram notifications and interaction SHALL NOT be available with isolation on:
-  no bot token, chat ID or table name reaches a user runtime, no Telegram session policy is
-  attached to a plane role, and `infra/deploy.sh` refuses the combination (R6). Telegram
-  remains a single-operator feature of isolation-off stacks.
+- **R44.** Telegram stays a single-operator channel: one bot, one chat
+  ([telegram-notifications](../access-surfaces/telegram-notifications.md),
+  [telegram-interaction](../access-surfaces/telegram-interaction.md)). With isolation on it
+  SHALL bind to exactly one listed principal, named by the deploy-time variable
+  `TELEGRAM_PRINCIPAL=<entry>` (one `ISOLATED_PRINCIPALS` entry, matched after the same
+  parsing as the list). Only that principal's plane receives `SCH_TELEGRAM_BOT_TOKEN` and
+  `SCH_TELEGRAM_CHAT_ID` and, with `ENABLE_TELEGRAM_INTERACTION=true`, the two table names
+  and the Telegram session policy on its execution role (R18, R20, R21); no other plane
+  receives any of them. `infra/deploy.sh` SHALL refuse, before any stack changes (R6): the
+  Telegram switches with isolation on and no `TELEGRAM_PRINCIPAL`; `TELEGRAM_PRINCIPAL`
+  without the Telegram switches, without isolation, naming more than one entry, or naming an
+  entry that is not listed. The plane stack SHALL treat a half binding (flag without
+  credentials, credentials without the flag, inbound values without the policy ARN) as off.
+  The bound principal's agent can read the token, exactly as the operator's agent on an
+  isolation-off stack (X10): the chat is that principal's. The webhook router, the tables and
+  the shim are unchanged: topic routing and command queues are keyed by workspace identity,
+  unique within the one bound owner. The task watchdog SHALL NOT use the plain-chat fallback
+  for an owner-tree workspace (`checkpoints/o.<k>/<ws>/`) without a persisted topic mapping:
+  only the bound owner's shim writes mappings, so an unbound owner's stale task is reconciled
+  silently (its `pending` promise ages out unsent) instead of being announced in the bound
+  chat; a bound-owner workspace that never notified is not announced either. Per-owner
+  Telegram (one bot per principal) is out of scope.
 - **R45.** Removing a principal from `ISOLATED_PRINCIPALS` deletes its plane on the next deploy
   (R12). Its storage SHALL be retained (the bucket has `DeletionPolicy: Retain` and the
   owner trees are not touched).
@@ -358,7 +385,7 @@ Out of scope:
 
 ### Deploy flow with isolation on
 
-1. Validate switches (R2, R6 Telegram) and the managed-policy sizes (X9), resolve every
+1. Validate switches (R2, R6, the Telegram binding of R44) and the managed-policy sizes (X9), resolve every
    entry (R3–R5), compute owner keys (R7), compute planes to create, update and delete,
    check the runtime quota (R6) (`infra/isolation_plan.py`, IAM, CloudFormation, AgentCore
    and Service Quotas reads only). Any failure stops here; no stack has changed.
@@ -373,10 +400,13 @@ Out of scope:
    with the owner pattern and the configuration read back from the runtime stack as deployed
    (its image tag and digest, lifecycle, Pi model, heap and build-job caps, `ReadOnlyAccess`
    toggle, `SharedRuntimePolicyArns`, image-rebuild project, registry role), so the shared
-   and user runtimes cannot drift. A plane left in `ROLLBACK_COMPLETE` by an earlier failed
-   creation is deleted and created again.
-6. Print one line per entry: entry, owner key, runtime ARN, stack status. Exit non-zero if any
-   plane operation failed.
+   and user runtimes cannot drift, and with the Telegram binding (R44) on the one plane
+   `TELEGRAM_PRINCIPAL` names: `TelegramBinding=true`, the token and chat id from the deploy
+   environment (the stack parameter is `NoEcho`, so it cannot hand the token back), the table
+   names and the policy ARN from the runtime stack outputs; empty on every other plane. A plane
+   left in `ROLLBACK_COMPLETE` by an earlier failed creation is deleted and created again.
+6. Print one line per entry: entry, owner key, runtime ARN, stack status, and the entry Telegram
+   is bound to, if any. Exit non-zero if any plane operation failed.
 
 With `ISOLATED_PRINCIPALS` empty, step 1 only looks for plane stacks of the deployment; if
 that lookup fails, the deploy warns and continues (nothing of this spec is created).
@@ -452,12 +482,14 @@ The same call by an unlisted user `carol` answers
 
 - **Assets.** Each owner's live sessions (shell, agent, provider keys staged in the microVM),
   checkpoints and generations (source code, harness state), writer claims, task status and
-  prompts, build sources, registry records; SCH configuration secrets (Telegram token and
-  webhook secret in runtime and Lambda environments).
+  prompts, build sources, registry records; SCH configuration secrets (Telegram token in the
+  shared and the Telegram-bound plane runtime environments, webhook secret in the Lambda
+  environment).
 - **Listed users and their agents** are untrusted with respect to each other. A user's agent
   runs with the plane execution role and may be prompt-injected; it holds everything the
   shared role holds, `ReadOnlyAccess` included, capped by the boundary (R20) and the bucket
-  policy (R24).
+  policy (R24). The Telegram-bound principal's agent also holds the bot token and the
+  Telegram policy (R44, X10).
 - **Other principals of the account** without boundary-administrator rights are untrusted:
   they cannot join a plane (R16, R17) or read owner trees (R24.1), whatever their identity
   policies allow.
@@ -512,6 +544,12 @@ The same call by an unlisted user `carol` answers
   exact model IDs; wildcard entries cover many models each); the deploy fails on an oversized base
   policy (conservative estimate) or escape-hatch policy before changing any stack, rather
   than truncating it.
+- **X10. Telegram-bound agent.** The bound principal's agent reads the bot token from its
+  environment and holds the Telegram policy: it can post as the bot, read and consume the
+  commands queued for its own workspaces and rewrite routing rows. This is the isolation-off
+  exposure of the single operator, confined to one listed principal; every other plane has
+  neither token nor policy. Everyone in the chat sees that principal's milestones and
+  prompts, so the chat must be that principal's.
 
 ### Evidence each slice produces
 
@@ -526,6 +564,11 @@ The same call by an unlisted user `carol` answers
   session, each holding `bedrock-agentcore:*` on `*`, and no denial for the owner; the X4
   limits recorded next to the output.
 - AWS requests built by new code: botocore `ParamValidator` in tests.
+- Telegram binding (R44, TASK-29): template tests on the bound and unbound plane shapes
+  (environment, managed policies, boundary), preflight tests on every refused combination and
+  on the plan column, deploy tests on the per-plane parameters, watchdog tests on the
+  owner-tree fallback. Not exercised live yet: a deploy with `TELEGRAM_PRINCIPAL` and the
+  Telegram verify scripts run as the bound principal are operator-side.
 - Live: `bin/verify-isolation.sh` with two principals, operator-side (parent task).
 - Design-time check (TASK-20.1, placeholder account): the R16 lock and R24 bucket policy
   shapes shown in this spec validate with Access Analyzer without findings, and custom-mode
@@ -551,6 +594,9 @@ The same call by an unlisted user `carol` answers
   image-rebuild service roles within their identity policies.
 - **I7.** The owner prefix a runtime writes under comes only from its deploy-time environment.
 - **I8.** A command with isolation on never falls back to the shared runtime.
+- **I9.** With isolation on, at most one plane carries the Telegram token, chat id, table names
+  and policy, and only the deploy chooses it; the watchdog never announces an owner-tree
+  workspace without a topic mapping.
 
 ## Cross-references
 
@@ -561,9 +607,12 @@ The same call by an unlisted user `carol` answers
 - [runtime-provisioning](../platform/runtime-provisioning.md): runtime stack, versions, R15d
 - [session-image-rebuild](../platform/session-image-rebuild.md): build sources, CodeBuild role
 - [headless-task-execution](../access-surfaces/headless-task-execution.md): task status and the watchdog
+- [telegram-notifications](../access-surfaces/telegram-notifications.md),
+  [telegram-interaction](../access-surfaces/telegram-interaction.md): the channel R44 binds to one principal
 - [decision-4](../../../.backlog/decisions/decision-4%20-%20Optional-features-are-deploy-time-switches-with-inert-defaults.md),
   [decision-9](../../../.backlog/decisions/decision-9%20-%20Reference-the-runtime-image-by-digest-every-image-building-deploy-is-a-new-runtime-version.md),
-  [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md)
+  [decision-14](../../../.backlog/decisions/decision-14%20-%20Per-principal-isolation-planes-are-provisioned-at-deploy-time-one-CloudFormation-stack-per-listed-principal.md),
+  [decision-17](../../../.backlog/decisions/decision-17%20-%20Telegram-on-an-isolated-stack-binds-to-exactly-one-listed-principal.md)
 - AWS: [AgentCore resource-based policies](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/resource-based-policies.html),
   [AgentCore actions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_bedrock-agentcore.html),
   [`AWS::BedrockAgentCore::ResourcePolicy`](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-bedrockagentcore-resourcepolicy.html),

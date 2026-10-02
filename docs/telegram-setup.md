@@ -160,6 +160,11 @@ AgentCore only accepts `linux/arm64`; `-l` builds locally with Docker instead).
 are non-empty; the deploy rejects a half-configured pair rather than deploying a
 stack whose notifications are silently off.
 
+**On an isolated stack** (`ISOLATED_PRINCIPALS`) also set `TELEGRAM_PRINCIPAL`
+to the listed entry whose plane gets the channel; the deploy refuses the
+credentials without it, and no other plane receives them — [Per-principal
+isolation](deploy.md#per-principal-isolation-isolated_principals).
+
 **They must be re-supplied on every deploy.** Like every other deploy-time
 switch (see [Deploy-time switches](deploy.md#deploy-time-switches-optional-features)),
 an omitted value is deployed as empty and turns the feature off. Keep them in
@@ -378,7 +383,8 @@ Where the moving parts live:
 - Anyone holding the token can post as the bot; anyone in the chat sees the
   notifications, which include prompts and assistant text. Treat the chat as
   having the same confidentiality as the workspaces it reports on.
-- This phase is deliberately single-user and single-chat. The notifications
+- This phase is deliberately single-user and single-chat; on an isolated stack
+  the user is the principal `TELEGRAM_PRINCIPAL` names. The notifications
   are **outbound only**; enabling `ENABLE_TELEGRAM_INTERACTION` adds one
   inbound surface — the webhook endpoint — authenticated by the `setWebhook`
   secret token, restricted to the configured chat id, and limited to
