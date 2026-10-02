@@ -339,21 +339,32 @@ else  # claude
     # Model aliases (fable/opus/sonnet/haiku) all pinned to Bedrock inference
     # profiles so every Anthropic model slot in Claude Code's /model picker
     # resolves through an inference profile available in-region; _NAME vars
-    # give the picker friendly labels. Opus 5 (Global) rides the single
+    # give the picker friendly labels. Opus 5.5 (Global) rides the single
     # ANTHROPIC_CUSTOM_MODEL_OPTION slot (one alias slot per family). Any
     # other profile ID can still be selected with `/model <profile-id>` — on
     # Bedrock, Claude Code passes the string through unchecked.
+    # TASK-26: an Opus/Sonnet/Haiku pin older than the Bedrock alias target
+    # baked into the pinned Claude Code makes a fresh workspace show a
+    # "Newer ... model available" dialog whose "Yes" restarts Claude Code,
+    # which ends an AgentCore session; image/scripts/check-claude-model-pins.mjs
+    # fails the image build when that can happen.
     export ANTHROPIC_DEFAULT_FABLE_MODEL="${ANTHROPIC_DEFAULT_FABLE_MODEL:-global.anthropic.claude-fable-5}"
     export ANTHROPIC_DEFAULT_FABLE_MODEL_NAME="${ANTHROPIC_DEFAULT_FABLE_MODEL_NAME:-Fable 5 (Global)}"
-    export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-eu.anthropic.claude-opus-5}"
-    export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME:-Opus 5 (EU)}"
+    export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-eu.anthropic.claude-opus-5-5}"
+    export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME:-Opus 5.5 (EU)}"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-global.anthropic.claude-sonnet-5}"
     export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="${ANTHROPIC_DEFAULT_SONNET_MODEL_NAME:-Sonnet 5 (Global)}"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL:-eu.anthropic.claude-haiku-4-5-20251001-v1:0}"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="${ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME:-Haiku 4.5 (EU)}"
-    export ANTHROPIC_CUSTOM_MODEL_OPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION:-global.anthropic.claude-opus-5}"
-    export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="${ANTHROPIC_CUSTOM_MODEL_OPTION_NAME:-Opus 5 (Global)}"
-    export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION:-Opus 5 via the global cross-region inference profile}"
+    export ANTHROPIC_CUSTOM_MODEL_OPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION:-global.anthropic.claude-opus-5-5}"
+    export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="${ANTHROPIC_CUSTOM_MODEL_OPTION_NAME:-Opus 5.5 (Global)}"
+    export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION:-Opus 5.5 via the global cross-region inference profile}"
+    # TASK-26: Claude Code is installed system-wide by root at a pinned
+    # version, so self-update can never succeed for the runtime user and is
+    # unwanted anyway; without this switch every start queries the npm
+    # registry, tries `npm install -g` and shows an "Auto-update failed"
+    # warning. `:-` keeps an explicit operator value.
+    export DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"
     # add-provider-api-keys (tasks 2.2/2.3, design D3): the PRESENCE of an
     # Anthropic key expresses the intent to use the provider's own API, so this
     # branch switches Claude Code off Bedrock for the whole deployment. The

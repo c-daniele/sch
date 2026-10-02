@@ -35,6 +35,10 @@
 #      clients); (10b) OpenSpec /opsx:* commands + skills seeded per-file
 #      into the user scope (CLAUDE_CONFIG_DIR) and the OpenSpec global
 #      config seeded only-if-absent (v26 add-claude-openspec-commands)
+#  10a. Claude launch environment (TASK-26): Opus 5.5 pins and
+#      DISABLE_AUTOUPDATER=1 in the container ENV and in a login shell, the
+#      build-time pin check re-run on both, and a workspace settings.json pin
+#      kept across a re-seed
 #  11. dev-environment autonomy (v29 add-dev-env-autonomy): native toolchain and
 #      jq on the runtime user's PATH (also in a login shell), uv pinned, uv
 #      Python policy effective (bare `uv venv` -> system python3.11, no managed
@@ -482,6 +486,24 @@ echo "merged settings.json: ${MERGED}"
 echo "${MERGED}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["env"]["FOO"] == "bar"; assert d["cleanupPeriodDays"] == 30; assert "other-server" in d["disabledMcpjsonServers"]; assert "context7" in d["disabledMcpjsonServers"]; assert d["disabledMcpjsonServers"].count("context7") == 1' 2>/dev/null \
     && { echo "PASS: settings.json merge is idempotent (FOO/cleanupPeriodDays/other-server preserved, context7 added once)"; PASS=$((PASS+1)); } \
     || { echo "FAIL: settings.json merge lost or duplicated fields"; FAIL=$((FAIL+1)); }
+
+echo "== 10a. claude launch environment: model pins + updater off (TASK-26) =="
+# Same container as section 10. Login shells opened by `agentcore exec` see
+# only /etc/profile.d, so the pins and the updater switch are asserted there
+# and in the container ENV; the build-time pin check is re-run on both.
+CL="${CLAUDE_CONTAINER:-sch-test-claude-shim}"
+check "claude pins + DISABLE_AUTOUPDATER in a login shell" docker exec "${CL}" bash --login -c '[ "$ANTHROPIC_DEFAULT_OPUS_MODEL" = "eu.anthropic.claude-opus-5-5" ] && [ "$ANTHROPIC_CUSTOM_MODEL_OPTION" = "global.anthropic.claude-opus-5-5" ] && [ "$DISABLE_AUTOUPDATER" = "1" ]'
+check "claude pins + DISABLE_AUTOUPDATER in the container ENV" docker exec "${CL}" sh -c '[ "$ANTHROPIC_DEFAULT_OPUS_MODEL" = "eu.anthropic.claude-opus-5-5" ] && [ "$DISABLE_AUTOUPDATER" = "1" ]'
+check "pins not behind the pinned Claude Code (container ENV)" docker exec "${CL}" node /usr/local/lib/sch/check-claude-model-pins.mjs
+check "pins not behind the pinned Claude Code (login shell)" docker exec "${CL}" bash --login -c 'node /usr/local/lib/sch/check-claude-model-pins.mjs'
+# A pin stored in the workspace settings.json is the operator's: re-seeding
+# must keep it (section 10 already proved custom env fields survive).
+docker exec "${CL}" sh -c 'python3 - <<PY
+import json; p="/home/sch/.claude/settings.json"; d=json.load(open(p))
+d.setdefault("env", {})["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "eu.anthropic.claude-opus-5"; json.dump(d, open(p, "w"))
+PY'
+docker exec -e SCH_HARNESS=claude "${CL}" bash /app/init-workspace.sh >/dev/null 2>&1
+check "workspace Opus pin in settings.json survives a re-seed" docker exec "${CL}" python3 -c 'import json; assert json.load(open("/home/sch/.claude/settings.json"))["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "eu.anthropic.claude-opus-5"'
 
 echo "== 10b. claude harness seed: OpenSpec /opsx:* commands + skills + global config (v26) =="
 # Same container/volume as section 10 — init-workspace.sh has already run
