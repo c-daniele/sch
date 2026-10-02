@@ -3,7 +3,7 @@ id: doc-24
 title: 2026-10-02 Fresh Claude workspaces closed after the first-run dialogs
 type: other
 created_date: '2026-10-02 12:37'
-updated_date: '2026-10-02 12:37'
+updated_date: '2026-10-02 19:30'
 tags:
   - journal
 ---
@@ -25,7 +25,7 @@ The first interactive Claude Code launch in a new workspace closed the remote se
 
 With the old pins, a pty-driven fresh launch of the real binary reproduced the dialog. With the new environment it showed no dialog, no restart and no update attempt, and the TUI stayed at the prompt for two minutes. A headless run used Opus 5.5. A workspace override to Opus 5 still won and triggered no dialog. Unit suites and the documentation check pass.
 
-No image could be built from this session, so the in-image test (`image/test-local.sh`, section 10a) and a live `sch run` on a fresh workspace remain operator-side. The development account's execution role cannot call Opus 5.5 yet. A deployment in that situation needs model access, or an Opus override, before the new default works.
+No image could be built from that session, so the final check was a live one. On the built image, which by then carried Claude Code 2.1.287, a fresh workspace went through the first-run dialogs with no upgrade question and no restart, and the session stayed open. The build-time pin check also passed inside that image. The development account's execution role cannot call Opus 5.5 yet. A deployment in that situation needs model access, or an Opus override, before the new default works.
 
 Why a Claude Code restart ends an AgentCore session is still unknown. It is tracked in TASK-27, because other restart prompts could hit it too. TASK-28 cleans up older code references that cite "TASK-26" for the GitHub access work, which belongs to decision-7.
 

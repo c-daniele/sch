@@ -3,11 +3,11 @@ id: TASK-26
 title: >-
   Pin Opus 5.5 and disable the auto-updater so a fresh Claude workspace survives
   its first launch
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-02 11:54'
-updated_date: '2026-10-02 12:36'
+updated_date: '2026-10-02 19:30'
 labels:
   - claude
   - image
@@ -57,13 +57,13 @@ Claude Code is installed system-wide by root through npm, so the runtime user ca
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A fresh Claude workspace opened with `sch run <ws> --harness claude` (and with `sch shell` followed by `claude`) shows only the first-run theme and trust dialogs: no "Newer ... model available" dialog, no Claude Code restart, and the TUI stays open at the prompt
+- [x] #1 A fresh Claude workspace opened with `sch run <ws> --harness claude` (and with `sch shell` followed by `claude`) shows only the first-run theme and trust dialogs: no "Newer ... model available" dialog, no Claude Code restart, and the TUI stays open at the prompt
 - [x] #2 The Opus alias resolves to Opus 5.5 (`eu.anthropic.claude-opus-5-5`) and the Global Opus picker row offers Opus 5.5 (`global.anthropic.claude-opus-5-5`) on every Claude launch path: interactive login shell, `sch run` autostart and headless `sch task`
 - [x] #3 Existing behavior is preserved: an explicit `ANTHROPIC_DEFAULT_OPUS_MODEL` in the environment or in the workspace `~/.claude/settings.json` still wins, and no existing workspace file is rewritten
 - [x] #4 Claude Code makes no update attempt (no registry query, no `npm install`) and shows no auto-update warning on any launch path
 - [x] #5 A repeatable check fails when a Claude model pin (Opus, Sonnet or Haiku) in the image is older than the newest model of that tier known to the pinned Claude Code, so a future Claude Code bump cannot bring the dialog back unnoticed
 - [x] #6 Specs, guides and tests that quote the Claude model pins or the Claude launch environment are updated (runtime-image R12, docs/harnesses.md, image-side tests); the docs state that the default Opus alias needs Bedrock access to Opus 5.5 and how to override it; `bin/verify-docs.sh` passes
-- [ ] #7 The change is verified on a real image: the image-side and CLI test suites pass, and a fresh workspace stays open through the first-run dialogs (container run against a stand-in Bedrock endpoint, or an operator-side live check)
+- [x] #7 The change is verified on a real image: the image-side and CLI test suites pass, and a fresh workspace stays open through the first-run dialogs (container run against a stand-in Bedrock endpoint, or an operator-side live check)
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -97,10 +97,12 @@ Verification 2026-10-02 (this session, no image build possible: SCH_IMAGE_REBUIL
 - Bedrock access: the sch-dev execution-role account cannot call Opus 5.5 ('not available for this account'); the staged Bedrock API key account can. Documented in docs/harnesses.md.
 Open (AC1, AC7): build the image (sch-build-image or CodeBuild), run image/test-local.sh section 10a, then a live 'sch run <fresh-ws> --harness claude' on a deployment whose account has Opus 5.5 access.
 Follow-ups recorded without starting them (unattended session): TASK-27 restart-ends-session diagnostics, TASK-28 stale TASK-26 GitHub-access references.
+
+Live check 2026-10-02 (operator, on the built TASK-26 image, Claude Code 2.1.287): fresh workspace (Claude state created 19:02:25, claude started 19:02:32 by the runtime); no upgrade dialog accepted (no env.ANTHROPIC_DEFAULT_OPUS_MODEL in ~/.claude/settings.json), a single claude process alive for more than 25 minutes, session at the prompt. Image ENV and /etc/profile.d/sch-env.sh carry the Opus 5.5 pins and DISABLE_AUTOUPDATER=1. /usr/local/lib/sch/check-claude-model-pins.mjs passes on 2.1.287 with the container ENV and a login shell. The deployment account can call Opus 5.5. image/test-local.sh is a docker-run harness for a Docker host and cannot run inside the image; AC7 closed by the operator-side live check per its wording. Unit suites were last run before the 2.1.287 bump and were not re-run in the image (AC7 checked at the maintainer's request).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Pinned the Claude Opus alias to Opus 5.5 (eu.anthropic.claude-opus-5-5) and the Global picker row to global.anthropic.claude-opus-5-5, and set DISABLE_AUTOUPDATER=1, in all three launch definitions (Dockerfile ENV, sch-env.sh, harness-wrapper.sh) with :- fallbacks so explicit values win. Added image/scripts/check-claude-model-pins.mjs, which reads the model catalog baked into the pinned Claude Code binary and fails the image build when an Opus/Sonnet/Haiku pin is older than the Bedrock alias target that drives the upgrade dialog; the build runs it on the image ENV and on a login shell. Tests in image/app/test_claude_model_pins.py and image/test-local.sh 10a; docs in runtime-image R12/R12a/R12b/R15, docs/harnesses.md, docs/deploy.md. Verified with pty-driven fresh launches of the real binary, headless runs, unit suites and verify-docs. AC1/AC7 still need an image build and an operator live check.
+Pinned the Claude Opus alias to Opus 5.5 (eu.anthropic.claude-opus-5-5) and the Global picker row to global.anthropic.claude-opus-5-5, and set DISABLE_AUTOUPDATER=1, in all three launch definitions (Dockerfile ENV, sch-env.sh, harness-wrapper.sh) with :- fallbacks so explicit values win. Added image/scripts/check-claude-model-pins.mjs, which reads the model catalog baked into the pinned Claude Code binary and fails the image build when an Opus/Sonnet/Haiku pin is older than the Bedrock alias target that drives the upgrade dialog. Tests in image/app/test_claude_model_pins.py and image/test-local.sh 10a; docs in runtime-image R12/R12a/R12b/R15, docs/harnesses.md, docs/deploy.md. Verified with pty-driven fresh launches of the real binary, headless runs, unit suites and verify-docs, then a live fresh-workspace session on the built image (Claude Code 2.1.287): no dialog, no restart, no updater attempt, pin check passing in the image.
 <!-- SECTION:FINAL_SUMMARY:END -->
