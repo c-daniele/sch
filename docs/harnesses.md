@@ -299,7 +299,7 @@ provider has configured auth** → otherwise *the first entry of its own
 hardcoded `defaultModelPerProvider` table that happens to be authenticated* →
 otherwise the first available model at all.
 
-Measured on 0.84.2 (the pin at measurement time; the current 0.99.1 pin
+Measured on 0.84.2 (the pin at measurement time; the current 1.0.0 pin
 re-verified the CLI flags and session layout unchanged) inside a real SCH
 microVM, with an empty `PI_CODING_AGENT_DIR` and no flags:
 
