@@ -158,8 +158,10 @@ task) in addition to `task_id`, `state`, `exit_code`, `prompt`, `started_utc`,
 local AWS credentials, without invoking the microVM and without depending on the
 checkpoint manifest. No new AWS permissions SHALL be required beyond those already used
 by `sch deploy` and checkpoint fetching. A workspace that never executed headless tasks
-SHALL report the canonical `state=none`, distinguishable from "missing object" and "task
-in progress". If the forced checkpoint on task completion failed, the sibling object
+(no sibling object: S3 answers `NoSuchKey`) SHALL report the canonical `state=none`
+instead of a missing-object error; any other read failure is an error, never `state=none`
+([headless-task-execution](../access-surfaces/headless-task-execution.md) R17). If the
+forced checkpoint on task completion failed, the sibling object
 SHALL still be persisted with the terminal state and `checkpoint_status=failed` plus a
 warning, so `sch status` distinguishes the harness outcome from checkpoint durability.
 

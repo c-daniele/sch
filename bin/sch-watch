@@ -6,8 +6,9 @@
 # (infrastructure reap, not an application error) nothing ever rewrites
 # that field, so a dead task keeps reporting `state: running` forever.
 # Both in-VM stall detectors are structurally unable to catch this case:
-#   - the heartbeat-staleness check runs INSIDE the heartbeat loop
-#     (image/app/main.py:2472), which stops running when the VM dies;
+#   - the heartbeat-staleness check (`_check_task_stall`) runs INSIDE the
+#     heartbeat loop (`_run_task_heartbeat`, image/app/main.py), which
+#     stops running when the VM dies;
 #   - the milestone-staleness check needs harness milestones, which a
 #     headless claude task never emits before the end of the turn.
 # So liveness MUST be judged from outside, by heartbeat freshness: the
@@ -17,6 +18,11 @@
 # client-side definition of staleness and reports it through its exit code
 # (3 = running but stale, add-task-liveness-safety task 1.4). This script
 # only polls, renders and reacts.
+#
+# The retrieval hint follows the workspace mode: `session_mode: git-native`
+# in `sch status --json` means a `--branch` workspace, collected with
+# `sch fetch`; any other workspace is reopened with `sch run`, which first
+# reconciles a saved `--sync` binding.
 #
 # usage: bin/sch-watch <workspace> [interval_s]
 set -uo pipefail
@@ -43,23 +49,24 @@ while :; do
     raw="$("${SCRIPT_DIR}/sch" status "${WS}" --json 2>/dev/null)"
     status_rc=$?
 
-    # The env assignment must apply to python3 itself, so feed the payload
+    # The env assignments must apply to python3 itself, so feed the payload
     # with a here-string instead of a pipeline (in `VAR=v cmd1 | cmd2` the
     # assignment reaches cmd1 only).
-    SCH_STATUS_RC="${status_rc}" python3 -c '
+    SCH_STATUS_RC="${status_rc}" SCH_WATCH_WS="${WS}" python3 -c '
 import datetime, json, os, sys
 
 TERMINAL = ("succeeded", "failed", "timed-out", "interrupted")
 
 # Classification delegated to `sch status`: 3 == running but stale.
 stale = os.environ.get("SCH_STATUS_RC", "0") == "3"
+ws = os.environ["SCH_WATCH_WS"]
 now = datetime.datetime.now(datetime.timezone.utc)
 stamp = now.strftime("%H:%M:%SZ")
 
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print(stamp + "  status non leggibile (S3/credenziali?)")
+    print(stamp + "  status unreadable (S3 or credentials?)")
     sys.exit(0)
 
 state = d.get("state", "?")
@@ -81,30 +88,38 @@ if age is not None:
 
 if state == "running":
     if stale:
-        line += "  *** STALE: il task NON sta girando (VM morta) ***"
+        line += "  *** STALE: the task is NOT running (microVM dead) ***"
     else:
-        line += "  vivo"
+        line += "  alive"
 elif state in TERMINAL:
-    line += "  <- stato terminale, watch finito"
+    line += "  <- terminal state, watch finished"
 
 print(line, flush=True)
+
+if d.get("session_mode") == "git-native":
+    retrieve = "bin/sch fetch {}".format(ws)
+    retrieve_note = "retrieve the completed work"
+else:
+    retrieve = "bin/sch run {}".format(ws)
+    retrieve_note = "reopen it; a saved --sync binding downloads the remote changes first"
+
 if state in TERMINAL:
+    print("sch-watch: task finished; next: {}  ({})".format(retrieve, retrieve_note))
     sys.exit(10)
 if stale:
+    print("sch-watch: \"sch status\" classifies the task as STALE: the microVM is dead.")
+    print("sch-watch: 1) {}  # {}".format(retrieve, retrieve_note))
+    print("sch-watch: 2) bin/sch reset-session {}  # if the problem recurs".format(ws))
     sys.exit(11)
 ' <<<"${raw}"
     rc=$?
     case "${rc}" in
         10)
             printf '\a'
-            echo "sch-watch: task finished — retrieve the work with: bin/sch fetch ${WS}"
             exit 0
             ;;
         11)
             printf '\a'
-            echo "sch-watch: 'sch status' classifies the task as STALE: the microVM is dead."
-            echo "sch-watch: 1) bin/sch fetch ${WS}          # retrieve the completed work"
-            echo "sch-watch: 2) bin/sch reset-session ${WS}  # if the problem recurs"
             exit 1
             ;;
     esac

@@ -53,7 +53,7 @@ Out of scope:
 ### Teardown & uninstall (`sch destroy`, `sch uninstall`)
 
 - **R14.** `sch destroy` SHALL delete all AWS deployment resources in a single idempotent pass: isolation plane stacks (before the runtime stack, [per-principal-isolation](../security/per-principal-isolation.md) R48), runtime stack, ECR repository images, bootstrap stack, legacy ECR stack, build-sources bucket, CloudFormation bootstrap bucket, and checkpoint bucket (unless `--keep-checkpoints`).
-- **R15.** `sch destroy` SHALL verify STS caller identity at runtime, require typed confirmation (unless `--yes`), support `--dry-run`, deregister Telegram webhooks, and invalidate local runtime ARN and checkpoint bucket caches.
+- **R15.** `sch destroy` SHALL verify STS caller identity at runtime, require typed confirmation (unless `--yes`), support `--dry-run`, deregister Telegram webhooks, and invalidate the destroyed deployment's cached runtime ARN and checkpoint bucket (its `stack-outputs/<account>/<region>/<stack>/` entry, [cli-cross-platform](../access-surfaces/cli-cross-platform.md) R9a) together with the flat cache files of the earlier layout; entries of other accounts, regions and stacks are kept.
 - **R16.** `sch uninstall` SHALL remove local state (`~/.config/sch`), managed support checkout, per-user keys (`~/.sch/env` unless `--keep-keys`), temporary artifacts, and the installed CLI package (detecting pipx, uv, or pip).
 - **R17.** `sch uninstall` SHALL refuse to execute while a runtime stack remains deployed unless `--force` is supplied.
 

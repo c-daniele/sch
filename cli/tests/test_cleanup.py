@@ -26,8 +26,10 @@ class CleanupScriptTests(unittest.TestCase):
         (self.config / "workspaces" / "beta").write_text("{}\n")
         (self.config / "workspaces" / ".status.alpha").write_text("created\n")
         (self.config / "sync" / "bindings" / "one.json").write_text("{}\n")
-        (self.config / "runtime-arn").write_text("arn\n")
-        (self.config / "checkpoint-bucket").write_text("bucket\n")
+        self.cache = self.config / "stack-outputs" / "111122223333" / "eu-west-1" / "sch-dev-runtime"
+        self.cache.mkdir(parents=True)
+        (self.cache / "runtime-arn").write_text("arn\n")
+        (self.cache / "checkpoint-bucket").write_text("bucket\n")
         self.tmp = self.root / "tmp"
         (self.tmp / "sch-old" / "nested").mkdir(parents=True)
         self.stops = self.root / "stops"
@@ -63,8 +65,9 @@ class CleanupScriptTests(unittest.TestCase):
         self.assertFalse((self.config / "sync").exists())
         self.assertFalse((self.config / "mirrors").exists())
         self.assertFalse((self.tmp / "sch-old").exists())
-        self.assertTrue((self.config / "runtime-arn").exists())
-        self.assertTrue((self.config / "checkpoint-bucket").exists())
+        self.assertTrue((self.cache / "runtime-arn").exists())
+        self.assertTrue((self.cache / "checkpoint-bucket").exists())
+        self.assertIn("preserve: {}".format(self.config / "stack-outputs"), result.stdout)
 
 
 if __name__ == "__main__":

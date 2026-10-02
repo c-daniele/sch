@@ -38,7 +38,6 @@ def _cfg(tmp_dir):
     return SimpleNamespace(
         ws_dir=root / "workspaces",
         config_dir=root,
-        checkpoint_bucket_cache=root / "bucket",
         checkpoint_bucket_override="test-bucket",
         region="eu-west-1",
         workspace_registry_url="",

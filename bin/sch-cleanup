@@ -68,7 +68,7 @@ else
 fi
 echo "  remove: ${CONFIG_ROOT}/{workspaces,sync,mirrors}"
 echo "  remove: ${TMP_ROOT}/sch-*"
-echo "  preserve: ${CONFIG_ROOT}/{runtime-arn,checkpoint-bucket} and S3 checkpoints"
+echo "  preserve: ${CONFIG_ROOT}/stack-outputs (runtime ARN and bucket caches) and S3 checkpoints"
 
 if [ "${APPLY}" != true ]; then
     echo "Dry run only. Re-run with --yes to apply."

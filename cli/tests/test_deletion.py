@@ -23,7 +23,6 @@ class DeletionPrimitiveTests(unittest.TestCase):
             config_dir=root / "config", ws_dir=root / "config" / "workspaces",
             acp_mirror_root=root / "managed-mirrors", region="eu-west-1",
             checkpoint_bucket_override="bucket",
-            checkpoint_bucket_cache=root / "bucket-cache",
         )
         self.addCleanup(self.tmp.cleanup)
 

@@ -17,10 +17,12 @@ Two properties matter more than brevity here:
 """
 
 import argparse
+import shutil
 import sys
 
 from .. import awsteardown as teardown
 from .. import cli as cli_mod
+from .. import config as config_mod
 from .. import repo
 
 
@@ -223,12 +225,22 @@ def cmd_destroy(cfg, args):
             target.kind, target.name, target.outcome
         ))
 
-    # The cached runtime ARN and bucket name now point at deleted resources.
-    # Leaving them would make the next command in another account invoke this
-    # one's ARN — the exact failure this client already suffered once.
-    for cache in (cfg.runtime_arn_cache, cfg.checkpoint_bucket_cache):
+    # The cached stack outputs of this deployment now point at deleted
+    # resources (installation R15). The cache is keyed by account, region and
+    # stack (cli-cross-platform R9a), so only this deployment's entry goes,
+    # together with the flat files of the earlier, account-blind layout.
+    stale = [config_mod.stack_outputs_dir(
+        cfg, account, region, "{}-{}-runtime".format(project, env)
+    )]
+    stale.extend(config_mod.legacy_cache_paths(cfg))
+    for cache in stale:
+        if cache is None:
+            continue
         try:
-            cache.unlink()
+            if cache.is_dir():
+                shutil.rmtree(cache)
+            else:
+                cache.unlink()
             print("sch: removed stale cache {}".format(cache))
         except FileNotFoundError:
             pass
