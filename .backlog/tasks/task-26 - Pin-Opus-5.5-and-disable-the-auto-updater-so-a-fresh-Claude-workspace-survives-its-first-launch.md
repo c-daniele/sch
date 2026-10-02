@@ -3,9 +3,11 @@ id: TASK-26
 title: >-
   Pin Opus 5.5 and disable the auto-updater so a fresh Claude workspace survives
   its first launch
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-10-02 11:54'
+updated_date: '2026-10-02 12:18'
 labels:
   - claude
   - image
@@ -63,3 +65,25 @@ Claude Code is installed system-wide by root through npm, so the runtime user ca
 - [ ] #6 Specs, guides and tests that quote the Claude model pins or the Claude launch environment are updated (runtime-image R12, docs/harnesses.md, image-side tests); the docs state that the default Opus alias needs Bedrock access to Opus 5.5 and how to override it; `bin/verify-docs.sh` passes
 - [ ] #7 The change is verified on a real image: the image-side and CLI test suites pass, and a fresh workspace stays open through the first-run dialogs (container run against a stand-in Bedrock endpoint, or an operator-side live check)
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Pin ANTHROPIC_DEFAULT_OPUS_MODEL=eu.anthropic.claude-opus-5-5 ("Opus 5.5 (EU)") and ANTHROPIC_CUSTOM_MODEL_OPTION=global.anthropic.claude-opus-5-5 ("Opus 5.5 (Global)") in the Dockerfile ENV, the generated sch-env.sh and harness-wrapper.sh; keep the :- fallbacks so an explicit env or settings.json value still wins; no init-workspace change (no workspace file rewritten).
+2. Add DISABLE_AUTOUPDATER=1 in the same three places (fallback form).
+3. Add image/scripts/check-claude-model-pins.mjs: extract the baked model catalog from the pinned Claude Code binary and fail when an Opus/Sonnet/Haiku pin is older than the Bedrock alias target the upgrade dialog uses (aliases.<tier>.per_provider.bedrock, else default; rule established empirically, see notes). Run it at image build time against the image ENV and a login shell.
+4. Tests: new image/app/test_claude_model_pins.py (three definitions agree, checker logic on synthetic catalogs, checker against the installed binary when present); update test_provider_api_keys fixtures.
+5. Docs: runtime-image R12 (+ updater requirement), docs/harnesses.md (table, Bedrock access note, override), docs/deploy.md row; verify-docs.
+6. Verify: image + CLI suites; pty-driven fresh-launch run of the real 2.1.285 binary through the modified wrapper (no dialog, no restart, no updater attempt, TUI at prompt).
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Investigation 2026-10-02 (inside the SCH image, Claude Code 2.1.285, pty-driven fresh CLAUDE_CONFIG_DIR):
+- Reproduced the dialog with the current pins: 'Newer Opus model available ... Opus 5.5 (eu.anthropic.claude-opus-5-5)' about 6 s after the trust dialog.
+- The binary embeds a plain-JS model catalog (anchor: the '//' key 'Hand-maintained baked-in model catalog'). aliases.opus.per_provider.bedrock=claude-opus-5-5, aliases.sonnet.per_provider.bedrock=claude-sonnet-4-5, aliases.haiku.default=claude-haiku-4-5; latest_per_family also lists sonnet 5.5 and fable 5.1.
+- Discriminating runs: Sonnet pinned to 4.6 -> no dialog; Sonnet 4 -> 'Newer Sonnet model available ... Sonnet 4.5'; Opus 5.5 + Sonnet 5 + Fable 5 + custom option Opus 5 -> no dialog. So the dialog compares each Opus/Sonnet/Haiku pin with the tier's Bedrock alias target, not with the newest model of the tier; Fable and ANTHROPIC_CUSTOM_MODEL_OPTION are not checked.
+- Assumption for AC5: 'newest model of that tier known to the pinned Claude Code' is read as that Bedrock alias target (what triggers the dialog). Newer models beyond it (Sonnet 5.5) are reported as an informational note, not a failure.
+- DISABLE_AUTOUPDATER=1: debug log shows no 'AutoUpdater: Using global update method' / 'Insufficient permissions for global npm install' and the TUI shows no 'Auto-update failed' line; without it both appear.
+<!-- SECTION:NOTES:END -->

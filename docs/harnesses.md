@@ -232,10 +232,10 @@ All Claude Code model aliases are pinned to Bedrock inference profiles
 | `/model` entry     | alias env                        | inference profile                              |
 | ------------------ | -------------------------------- | ---------------------------------------------- |
 | Fable 5 (Global)   | `ANTHROPIC_DEFAULT_FABLE_MODEL`  | `global.anthropic.claude-fable-5`              |
-| Opus 5 (EU)        | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | `eu.anthropic.claude-opus-5`                   |
+| Opus 5.5 (EU)      | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | `eu.anthropic.claude-opus-5-5`                 |
 | Sonnet 5 (Global)  | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `global.anthropic.claude-sonnet-5`             |
 | Haiku 4.5 (EU)     | `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | `eu.anthropic.claude-haiku-4-5-20251001-v1:0`  |
-| Opus 5 (Global)    | `ANTHROPIC_CUSTOM_MODEL_OPTION`  | `global.anthropic.claude-opus-5`               |
+| Opus 5.5 (Global)  | `ANTHROPIC_CUSTOM_MODEL_OPTION`  | `global.anthropic.claude-opus-5-5`             |
 
 Any other profile in the account can be selected with
 `/model <inference-profile-id>` (on Bedrock the string is passed through
@@ -245,6 +245,32 @@ in the [runtime-image spec](specs/platform/runtime-image.md));
 keeping the picker current over time means bumping that pin. The execution
 role's Bedrock grant already covers all inference profiles and foundation
 models, so no new `bedrock:InvokeModel` grant is needed.
+
+The default Opus alias and the Global Opus row need Bedrock access to Opus 5.5
+in the account and region the session calls. Where it is not enabled yet, or
+when `RUNTIME_BEDROCK_MODEL_ALLOWLIST` ([deploy guide](deploy.md)) has no entry
+that covers Opus 5.5, selecting Opus fails at the first request with
+"not available for this account". Override the pins in two ways:
+
+- per workspace, in `~/.claude/settings.json` under `env`, for example
+  `"ANTHROPIC_DEFAULT_OPUS_MODEL": "eu.anthropic.claude-opus-5"`. Claude Code
+  applies these values on top of the image values and does not ask to
+  upgrade them; SCH never rewrites the file;
+- per image, by changing the values in `image/Dockerfile` (the ENV block and
+  the generated `/etc/profile.d/sch-env.sh`) and in
+  `image/scripts/harness-wrapper.sh`, then rebuilding.
+
+An image pin for Opus, Sonnet or Haiku that is older than the model the pinned
+Claude Code proposes for Bedrock brings back a one-time "Newer ... model
+available" dialog on fresh workspaces. Accepting it restarts Claude Code, and
+in the AgentCore microVM the restart ends the session (TASK-26). The image
+build therefore runs `image/scripts/check-claude-model-pins.mjs`, which fails
+when an image pin is behind the pinned Claude Code.
+
+Claude Code's self-update is off (`DISABLE_AUTOUPDATER=1`): the binary is
+installed by root at the pinned version, so the runtime user could never
+update it, and the image pins it on purpose. Without the switch every start
+queried the npm registry and showed "Auto-update failed".
 
 ### Pi harness (`--harness pi`)
 

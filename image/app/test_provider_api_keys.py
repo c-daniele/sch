@@ -143,15 +143,15 @@ class ProviderKeyBridgeTests(unittest.TestCase):
             "CLAUDE_CODE_USE_BEDROCK": "1",
             "ANTHROPIC_DEFAULT_FABLE_MODEL": "global.anthropic.claude-fable-5",
             "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "Fable 5 (Global)",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "eu.anthropic.claude-opus-5",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Opus 5 (EU)",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "eu.anthropic.claude-opus-5-5",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Opus 5.5 (EU)",
             "ANTHROPIC_DEFAULT_SONNET_MODEL": "global.anthropic.claude-sonnet-5",
             "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Sonnet 5 (Global)",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Haiku 4.5 (EU)",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION": "global.anthropic.claude-opus-5",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Opus 5 (Global)",
-            "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Opus 5 via the global profile",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": "global.anthropic.claude-opus-5-5",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Opus 5.5 (Global)",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Opus 5.5 via the global profile",
         }
         if provider_keys and inherited:
             env.update({f"SCH_{k}": v for k, v in provider_keys.items()})
@@ -285,7 +285,7 @@ class ProviderKeyBridgeTests(unittest.TestCase):
         })
         self.assertEqual(env["CLAUDE_CODE_USE_BEDROCK"], "1")
         self.assertEqual(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "global.anthropic.claude-sonnet-5")
-        self.assertEqual(env["ANTHROPIC_CUSTOM_MODEL_OPTION"], "global.anthropic.claude-opus-5")
+        self.assertEqual(env["ANTHROPIC_CUSTOM_MODEL_OPTION"], "global.anthropic.claude-opus-5-5")
         self.assertNotIn("ANTHROPIC_API_KEY", env)
         for name in GATEWAY_KEYS:
             self.assertNotIn(name, env)

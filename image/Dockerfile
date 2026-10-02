@@ -282,6 +282,15 @@
 # `provider` block drops the V1 block) and sets a per-model maxTokens for the
 # default model and the main global/EU Claude profiles. Fresh workspaces only:
 # an existing opencode.json is never overwritten.
+# v35: Claude first launch (TASK-26) — the Opus alias and the Global Opus
+# picker row move to Opus 5.5. With Opus 5 pinned, Claude Code 2.1.285 asked
+# once per fresh workspace to switch to Opus 5.5 and restarted itself on
+# "Yes", and in the AgentCore microVM that restart ended the session. The
+# dialog compares the Opus/Sonnet/Haiku pins with the Bedrock alias targets
+# baked into the binary's model catalog; check-claude-model-pins.mjs (run
+# below) fails the build when a pin falls behind them. DISABLE_AUTOUPDATER=1
+# stops the per-start npm registry query and the "Auto-update failed"
+# warning (the runtime user can never update the root-installed pin).
 
 # Must stay in the GLOBAL ARG scope (before the first FROM): an ARG declared
 # after a FROM belongs to that build stage and expands to "" in later FROM
@@ -840,15 +849,16 @@ ENV HOME=/home/sch \
     CLAUDE_CODE_USE_BEDROCK=1 \
     ANTHROPIC_DEFAULT_FABLE_MODEL=global.anthropic.claude-fable-5 \
     ANTHROPIC_DEFAULT_FABLE_MODEL_NAME="Fable 5 (Global)" \
-    ANTHROPIC_DEFAULT_OPUS_MODEL=eu.anthropic.claude-opus-5 \
-    ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="Opus 5 (EU)" \
+    ANTHROPIC_DEFAULT_OPUS_MODEL=eu.anthropic.claude-opus-5-5 \
+    ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="Opus 5.5 (EU)" \
     ANTHROPIC_DEFAULT_SONNET_MODEL=global.anthropic.claude-sonnet-5 \
     ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="Sonnet 5 (Global)" \
     ANTHROPIC_DEFAULT_HAIKU_MODEL=eu.anthropic.claude-haiku-4-5-20251001-v1:0 \
     ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="Haiku 4.5 (EU)" \
-    ANTHROPIC_CUSTOM_MODEL_OPTION=global.anthropic.claude-opus-5 \
-    ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Opus 5 (Global)" \
-    ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="Opus 5 via the global cross-region inference profile" \
+    ANTHROPIC_CUSTOM_MODEL_OPTION=global.anthropic.claude-opus-5-5 \
+    ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Opus 5.5 (Global)" \
+    ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="Opus 5.5 via the global cross-region inference profile" \
+    DISABLE_AUTOUPDATER=1 \
     AGENT_PORT=8080
 
 # --- Shim + init script --------------------------------------------------------
@@ -1059,19 +1069,33 @@ RUN printf '%s\n' \
         'export CLAUDE_CODE_USE_BEDROCK="${CLAUDE_CODE_USE_BEDROCK:-1}"' \
         'export ANTHROPIC_DEFAULT_FABLE_MODEL="${ANTHROPIC_DEFAULT_FABLE_MODEL:-global.anthropic.claude-fable-5}"' \
         'export ANTHROPIC_DEFAULT_FABLE_MODEL_NAME="${ANTHROPIC_DEFAULT_FABLE_MODEL_NAME:-Fable 5 (Global)}"' \
-        'export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-eu.anthropic.claude-opus-5}"' \
-        'export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME:-Opus 5 (EU)}"' \
+        'export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-eu.anthropic.claude-opus-5-5}"' \
+        'export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="${ANTHROPIC_DEFAULT_OPUS_MODEL_NAME:-Opus 5.5 (EU)}"' \
         'export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-global.anthropic.claude-sonnet-5}"' \
         'export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="${ANTHROPIC_DEFAULT_SONNET_MODEL_NAME:-Sonnet 5 (Global)}"' \
         'export ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL:-eu.anthropic.claude-haiku-4-5-20251001-v1:0}"' \
         'export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="${ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME:-Haiku 4.5 (EU)}"' \
-        'export ANTHROPIC_CUSTOM_MODEL_OPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION:-global.anthropic.claude-opus-5}"' \
-        'export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="${ANTHROPIC_CUSTOM_MODEL_OPTION_NAME:-Opus 5 (Global)}"' \
-        'export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION:-Opus 5 via the global cross-region inference profile}"' \
+        'export ANTHROPIC_CUSTOM_MODEL_OPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION:-global.anthropic.claude-opus-5-5}"' \
+        'export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="${ANTHROPIC_CUSTOM_MODEL_OPTION_NAME:-Opus 5.5 (Global)}"' \
+        'export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="${ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION:-Opus 5.5 via the global cross-region inference profile}"' \
+        'export DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"' \
         > /etc/profile.d/sch-env.sh \
     && chmod 644 /etc/profile.d/sch-env.sh \
     && cat /etc/profile.d/sch-env.sh >> /home/sch/.bashrc \
     && chown sch:sch /home/sch/.bashrc
+
+# Claude model pins vs the pinned Claude Code (TASK-26, v35 banner above): fail
+# the BUILD when an Opus/Sonnet/Haiku pin is older than the Bedrock alias
+# target baked into the binary, because a fresh workspace would then show the
+# "Newer ... model available" dialog whose restart ends the AgentCore session.
+# Checked twice: against the image ENV (shim, headless tasks) and against a
+# clean login shell (`sch shell` / `sch run`, which only see sch-env.sh). The
+# updater switch is asserted on both paths for the same reason.
+COPY scripts/check-claude-model-pins.mjs /usr/local/lib/sch/check-claude-model-pins.mjs
+RUN node /usr/local/lib/sch/check-claude-model-pins.mjs \
+    && test "${DISABLE_AUTOUPDATER}" = 1 \
+    && env -i HOME=/home/sch PATH=/usr/local/bin:/usr/bin:/bin bash -lc \
+        'node /usr/local/lib/sch/check-claude-model-pins.mjs && test "${DISABLE_AUTOUPDATER}" = 1'
 
 # Run-once harness autostart for `sch run` (v13): sourced by login shells
 # AFTER sch-env.sh ('e' < 'r' in profile.d ordering). Consumes the marker
