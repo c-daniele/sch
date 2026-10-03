@@ -17,10 +17,10 @@
     "sch-tunnel-sync": "./sync.js"
   },
   "dependencies": {
-    "ws": "^8.21.3",
-    "@smithy/signature-v4": "^5.7.3",
+    "ws": "^8.22.0",
+    "@smithy/signature-v4": "^5.7.4",
     "@smithy/protocol-http": "^5.6.2",
     "@aws-crypto/sha256-js": "^5.2.0",
-    "@aws-sdk/credential-providers": "^3.1133.0"
+    "@aws-sdk/credential-providers": "^3.1143.0"
   }
 }
