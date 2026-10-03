@@ -1,0 +1,1285 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "startedAt": "2026-10-03T16:03:54.773Z",
+  "specification": {
+    "path": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/candidate.json",
+    "sha256": "e6f5ee9ed42b5d7b2de5b9c55639dda887998a5e19a637aa5b7cc66b622ae4ab",
+    "bytes": 9029
+  },
+  "artifact": {
+    "path": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.html",
+    "sha256": "ab0cd3bcb316ad9cea38a5e81d186c3252616ebb33c46514bf7205587dd9fc19",
+    "bytes": 788263
+  },
+  "stages": {
+    "validate": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": null,
+      "execution": "embedded-in-deliver",
+      "command": [
+        "/home/cd4n1/.local/share/mise/installs/node/26.7.0/bin/node",
+        "/home/cd4n1/.agents/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/candidate.json",
+        "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.html",
+        "--quality",
+        "showcase",
+        "--repo-root",
+        "/home/cd4n1/dev/myRepos/sch",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "validate",
+        "specification": {
+          "sha256": "e6f5ee9ed42b5d7b2de5b9c55639dda887998a5e19a637aa5b7cc66b622ae4ab",
+          "bytes": 9029
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "showcase",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    "deliver": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 347,
+      "command": [
+        "/home/cd4n1/.local/share/mise/installs/node/26.7.0/bin/node",
+        "/home/cd4n1/.agents/skills/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/candidate.json",
+        "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.html",
+        "--quality",
+        "showcase",
+        "--repo-root",
+        "/home/cd4n1/dev/myRepos/sch",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "receiptId": "b830817c-6221-4a27-993f-a6c1bbc6282a",
+        "ok": true,
+        "command": "deliver",
+        "type": "architecture",
+        "input": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/candidate.json",
+        "output": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.html",
+        "specification": {
+          "sha256": "e6f5ee9ed42b5d7b2de5b9c55639dda887998a5e19a637aa5b7cc66b622ae4ab",
+          "bytes": 9029
+        },
+        "artifact": {
+          "sha256": "ab0cd3bcb316ad9cea38a5e81d186c3252616ebb33c46514bf7205587dd9fc19",
+          "bytes": 788263
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "showcase",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 0
+        },
+        "evidence": {
+          "verified": true,
+          "repository": "git@github.com:c-daniele/sch",
+          "revision": "50b3b4cc822676a3838aee82585aabbff1d98ea2",
+          "references": 31,
+          "linkMode": "local-only"
+        },
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      }
+    },
+    "check": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 99,
+      "command": [
+        "/home/cd4n1/.local/share/mise/installs/node/26.7.0/bin/node",
+        "/home/cd4n1/.agents/skills/archify/bin/archify.mjs",
+        "check",
+        "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.html",
+        "--require-provenance"
+      ],
+      "receipt": {
+        "ok": true,
+        "file": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.html",
+        "artifact": {
+          "sha256": "ab0cd3bcb316ad9cea38a5e81d186c3252616ebb33c46514bf7205587dd9fc19",
+          "bytes": 788263
+        },
+        "checks": [
+          {
+            "name": "single_svg",
+            "ok": true,
+            "details": [
+              "found 1 <svg> block(s)"
+            ]
+          },
+          {
+            "name": "finite_svg",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "orthogonal_arrows",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "label_route_clearance",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "relationship_crossings",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "relationship_corridors",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "container_border_runs",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "route_rhythm",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "legend_clearance",
+            "ok": true,
+            "details": []
+          }
+        ],
+        "composition": {
+          "schemaVersion": 1,
+          "profile": "showcase",
+          "status": "pass",
+          "summary": {
+            "errors": 0,
+            "warnings": 0
+          },
+          "metrics": {
+            "properCrossings": 0,
+            "resolvedCrossovers": 11,
+            "ambiguousCorridors": 0,
+            "arrowheadCollisions": 0,
+            "containerBorderRuns": 0,
+            "labelRouteClearanceIssues": 0,
+            "labelCanvasOverflowIssues": 0,
+            "minLabelRouteClearance": 4,
+            "desktopReadabilityIssues": 0,
+            "viewportHeightIssues": 0,
+            "minProjectedNodeTextPx": 6.613333333333333,
+            "maxBends": 4,
+            "routesOverSuggestedBends": 3,
+            "maxStretch": 1.211,
+            "routesOverSuggestedStretch": 0,
+            "minSegmentPx": 22,
+            "minInteriorSegmentPx": 22,
+            "shortSegmentCount": 0,
+            "shortEndpointSegmentCount": 0,
+            "shortInteriorSegmentCount": 0,
+            "microSegmentCount": 0
+          },
+          "suggestedLimits": {
+            "bendsPerRelationship": 2,
+            "stretch": 1.35,
+            "segmentPx": 16,
+            "microSegmentPx": 8
+          },
+          "routeReview": {
+            "crossings": [
+              {
+                "left": {
+                  "from": "operator",
+                  "to": "image_build",
+                  "label": "deploy.sh build + push",
+                  "collectionIndex": 0,
+                  "artifactIndex": 1
+                },
+                "right": {
+                  "from": "iam_planes",
+                  "to": "agent_runtime",
+                  "label": "ResourcePolicy deny + boundary",
+                  "collectionIndex": 18,
+                  "artifactIndex": 19
+                },
+                "point": [
+                  130,
+                  671
+                ]
+              },
+              {
+                "left": {
+                  "from": "image_build",
+                  "to": "agent_runtime",
+                  "label": "digest-pinned pull",
+                  "collectionIndex": 1,
+                  "artifactIndex": 2
+                },
+                "right": {
+                  "from": "agent_runtime",
+                  "to": "github",
+                  "label": "clone fetch push PAT",
+                  "collectionIndex": 10,
+                  "artifactIndex": 11
+                },
+                "point": [
+                  352.99999999999994,
+                  505.9999999999997
+                ],
+                "sharedNode": "agent_runtime"
+              },
+              {
+                "left": {
+                  "from": "image_build",
+                  "to": "agent_runtime",
+                  "label": "digest-pinned pull",
+                  "collectionIndex": 1,
+                  "artifactIndex": 2
+                },
+                "right": {
+                  "from": "operator",
+                  "to": "github",
+                  "label": "fetch --push local creds",
+                  "collectionIndex": 11,
+                  "artifactIndex": 12
+                },
+                "point": [
+                  332,
+                  572
+                ]
+              },
+              {
+                "left": {
+                  "from": "operator",
+                  "to": "apigw",
+                  "label": "HTTPS IAM SigV4 lookup",
+                  "collectionIndex": 2,
+                  "artifactIndex": 3
+                },
+                "right": {
+                  "from": "agent_runtime",
+                  "to": "bedrock_models",
+                  "label": "InvokeModel profile",
+                  "collectionIndex": 9,
+                  "artifactIndex": 10
+                },
+                "point": [
+                  340.05,
+                  197
+                ]
+              },
+              {
+                "left": {
+                  "from": "operator",
+                  "to": "apigw",
+                  "label": "HTTPS IAM SigV4 lookup",
+                  "collectionIndex": 2,
+                  "artifactIndex": 3
+                },
+                "right": {
+                  "from": "agent_runtime",
+                  "to": "telegram_api",
+                  "label": "sendMessage per workspace",
+                  "collectionIndex": 14,
+                  "artifactIndex": 15
+                },
+                "point": [
+                  208,
+                  197
+                ]
+              },
+              {
+                "left": {
+                  "from": "registry_fn",
+                  "to": "registry_db",
+                  "label": "CRUD",
+                  "collectionIndex": 4,
+                  "artifactIndex": 5
+                },
+                "right": {
+                  "from": "apigw",
+                  "to": "webhook_fn",
+                  "label": "proxy /telegram-webhook",
+                  "collectionIndex": 5,
+                  "artifactIndex": 6
+                },
+                "point": [
+                  694,
+                  200
+                ]
+              },
+              {
+                "left": {
+                  "from": "operator",
+                  "to": "agent_runtime",
+                  "label": "WS tunnel frames",
+                  "collectionIndex": 7,
+                  "artifactIndex": 8
+                },
+                "right": {
+                  "from": "operator",
+                  "to": "github",
+                  "label": "fetch --push local creds",
+                  "collectionIndex": 11,
+                  "artifactIndex": 12
+                },
+                "point": [
+                  120,
+                  396
+                ],
+                "sharedNode": "operator"
+              },
+              {
+                "left": {
+                  "from": "agent_runtime",
+                  "to": "github",
+                  "label": "clone fetch push PAT",
+                  "collectionIndex": 10,
+                  "artifactIndex": 11
+                },
+                "right": {
+                  "from": "operator",
+                  "to": "github",
+                  "label": "fetch --push local creds",
+                  "collectionIndex": 11,
+                  "artifactIndex": 12
+                },
+                "point": [
+                  353,
+                  572
+                ],
+                "sharedNode": "github"
+              },
+              {
+                "left": {
+                  "from": "operator",
+                  "to": "github",
+                  "label": "fetch --push local creds",
+                  "collectionIndex": 11,
+                  "artifactIndex": 12
+                },
+                "right": {
+                  "from": "iam_planes",
+                  "to": "agent_runtime",
+                  "label": "ResourcePolicy deny + boundary",
+                  "collectionIndex": 18,
+                  "artifactIndex": 19
+                },
+                "point": [
+                  130,
+                  572
+                ]
+              },
+              {
+                "left": {
+                  "from": "watchdog_fn",
+                  "to": "checkpoint_s3",
+                  "label": "scan + mark interrupted",
+                  "collectionIndex": 13,
+                  "artifactIndex": 14
+                },
+                "right": {
+                  "from": "agent_runtime",
+                  "to": "telegram_cmd",
+                  "label": "poll + consume cmds",
+                  "collectionIndex": 17,
+                  "artifactIndex": 18
+                },
+                "point": [
+                  643,
+                  501
+                ]
+              },
+              {
+                "left": {
+                  "from": "agent_runtime",
+                  "to": "telegram_api",
+                  "label": "sendMessage per workspace",
+                  "collectionIndex": 14,
+                  "artifactIndex": 15
+                },
+                "right": {
+                  "from": "telegram_api",
+                  "to": "apigw",
+                  "label": "POST webhook + secret",
+                  "collectionIndex": 15,
+                  "artifactIndex": 16
+                },
+                "point": [
+                  129.5,
+                  86
+                ],
+                "sharedNode": "telegram_api"
+              }
+            ],
+            "crowdedSides": [
+              {
+                "node": "operator",
+                "label": "Operator laptop",
+                "side": "right",
+                "relationships": 4,
+                "sidePx": 64,
+                "neededPx": 74
+              }
+            ],
+            "detours": [
+              {
+                "relationship": {
+                  "from": "operator",
+                  "to": "apigw",
+                  "label": "HTTPS IAM SigV4 lookup",
+                  "collectionIndex": 2,
+                  "artifactIndex": 3
+                },
+                "bends": 4,
+                "stretch": 1.071
+              },
+              {
+                "relationship": {
+                  "from": "apigw",
+                  "to": "webhook_fn",
+                  "label": "proxy /telegram-webhook",
+                  "collectionIndex": 5,
+                  "artifactIndex": 6
+                },
+                "bends": 4,
+                "stretch": 1
+              },
+              {
+                "relationship": {
+                  "from": "agent_runtime",
+                  "to": "telegram_api",
+                  "label": "sendMessage per workspace",
+                  "collectionIndex": 14,
+                  "artifactIndex": 15
+                },
+                "bends": 4,
+                "stretch": 1.12
+              }
+            ]
+          },
+          "leadingSpace": {
+            "measured": true,
+            "emptyTopPx": 52,
+            "emptyTopRatio": 0.057,
+            "occupiedTop": 52,
+            "viewBoxTop": 0,
+            "canvasHeight": 906,
+            "typicalNodeHeight": 62,
+            "reviewSuggested": false
+          },
+          "desktopReadability": {
+            "budgetBasis": "legacy-930",
+            "readerContract": "declared-wide-v1",
+            "availableDiagramWidth": 930,
+            "actualBudgetPx": 930,
+            "limit": "legacy",
+            "requestedTargetPx": 7.5,
+            "requestedTargetMet": false,
+            "hardFloorPx": 6,
+            "hardFloorMet": true,
+            "minimumOwner": {
+              "kind": "edge",
+              "id": null,
+              "from": "operator",
+              "to": "image_build"
+            },
+            "minimumSourceTextPx": 8,
+            "minimumProjectedTextPx": 6.613333333333333,
+            "semanticTextCount": 51
+          },
+          "issues": []
+        },
+        "provenance": "current",
+        "deliveryReceiptId": "b830817c-6221-4a27-993f-a6c1bbc6282a"
+      }
+    },
+    "browser-check": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 1275,
+      "command": [
+        "/home/cd4n1/.local/share/mise/installs/node/26.7.0/bin/node",
+        "/home/cd4n1/.agents/skills/archify/bin/archify.mjs",
+        "browser-check",
+        "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.html",
+        "--json",
+        "--require-provenance"
+      ],
+      "execution": "in-process",
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "browser-check",
+        "evidenceKind": "automated-browser",
+        "status": "pass",
+        "visualReview": "not-requested",
+        "provenance": "current",
+        "deliveryReceiptId": "b830817c-6221-4a27-993f-a6c1bbc6282a",
+        "artifact": {
+          "path": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.html",
+          "sha256": "ab0cd3bcb316ad9cea38a5e81d186c3252616ebb33c46514bf7205587dd9fc19",
+          "bytes": 788263
+        },
+        "state": {
+          "detail": "read",
+          "motion": "still"
+        },
+        "chrome": {
+          "status": "available",
+          "executable": "/usr/bin/chromium"
+        },
+        "diagnostics": [],
+        "containment": {
+          "status": "pass",
+          "policy": "fit-or-reader-declared-readable-vertical-scroll",
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "theme": "light",
+              "innerWidth": 1440,
+              "innerHeight": 900,
+              "scrollWidth": 1440,
+              "scrollHeight": 914,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 968,
+              "diagramWidth": 938,
+              "pageComposition": {
+                "bodyPaddingPx": 12,
+                "headerPx": 68,
+                "diagramChromePx": 78,
+                "svgPx": 755,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 6.670222222222222,
+              "minimumProjectedNonEdgeTextPx": 7.504,
+              "minimumProjectedEdgeTextPx": 6.670222222222222,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "theme": "light",
+              "innerWidth": 1600,
+              "innerHeight": 1000,
+              "scrollWidth": 1600,
+              "scrollHeight": 1000,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 979,
+              "diagramWidth": 949,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 76,
+                "diagramChromePx": 84,
+                "svgPx": 764,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 6.748444444444444,
+              "minimumProjectedNonEdgeTextPx": 7.592,
+              "minimumProjectedEdgeTextPx": 6.748444444444444,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "theme": "light",
+              "innerWidth": 1920,
+              "innerHeight": 1080,
+              "scrollWidth": 1920,
+              "scrollHeight": 1080,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1078,
+              "diagramWidth": 1048,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 76,
+                "diagramChromePx": 84,
+                "svgPx": 844,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 7.452444444444445,
+              "minimumProjectedNonEdgeTextPx": 8.384,
+              "minimumProjectedEdgeTextPx": 7.452444444444445,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "theme": "light",
+              "innerWidth": 2048,
+              "innerHeight": 1320,
+              "scrollWidth": 2048,
+              "scrollHeight": 1320,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1394,
+              "diagramWidth": 1344,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 68,
+                "diagramChromePx": 94,
+                "svgPx": 1082,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 8,
+              "minimumProjectedNonEdgeTextPx": 9,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 44,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            }
+          ]
+        },
+        "themeStates": {
+          "status": "pass",
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "requestedTheme": "light",
+              "resolvedTheme": "light",
+              "ok": true
+            },
+            {
+              "width": 1440,
+              "height": 900,
+              "requestedTheme": "dark",
+              "resolvedTheme": "dark",
+              "ok": true
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "requestedTheme": "dark",
+              "resolvedTheme": "dark",
+              "ok": true
+            }
+          ]
+        },
+        "readability": {
+          "status": "pass",
+          "minimumProjectedNodeTextPx": 6,
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "theme": "light",
+              "innerWidth": 1440,
+              "innerHeight": 900,
+              "scrollWidth": 1440,
+              "scrollHeight": 914,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 968,
+              "diagramWidth": 938,
+              "pageComposition": {
+                "bodyPaddingPx": 12,
+                "headerPx": 68,
+                "diagramChromePx": 78,
+                "svgPx": 755,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 6.670222222222222,
+              "minimumProjectedNonEdgeTextPx": 7.504,
+              "minimumProjectedEdgeTextPx": 6.670222222222222,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "theme": "light",
+              "innerWidth": 1600,
+              "innerHeight": 1000,
+              "scrollWidth": 1600,
+              "scrollHeight": 1000,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 979,
+              "diagramWidth": 949,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 76,
+                "diagramChromePx": 84,
+                "svgPx": 764,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 6.748444444444444,
+              "minimumProjectedNonEdgeTextPx": 7.592,
+              "minimumProjectedEdgeTextPx": 6.748444444444444,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "theme": "light",
+              "innerWidth": 1920,
+              "innerHeight": 1080,
+              "scrollWidth": 1920,
+              "scrollHeight": 1080,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1078,
+              "diagramWidth": 1048,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 76,
+                "diagramChromePx": 84,
+                "svgPx": 844,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 7.452444444444445,
+              "minimumProjectedNonEdgeTextPx": 8.384,
+              "minimumProjectedEdgeTextPx": 7.452444444444445,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "theme": "light",
+              "innerWidth": 2048,
+              "innerHeight": 1320,
+              "scrollWidth": 2048,
+              "scrollHeight": 1320,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1394,
+              "diagramWidth": 1344,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 68,
+                "diagramChromePx": 94,
+                "svgPx": 1082,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 8,
+              "minimumProjectedNonEdgeTextPx": 9,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 44,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            }
+          ]
+        },
+        "viewerChrome": {
+          "status": "pass",
+          "viewports": [
+            {
+              "width": 1440,
+              "height": 900,
+              "theme": "light",
+              "innerWidth": 1440,
+              "innerHeight": 900,
+              "scrollWidth": 1440,
+              "scrollHeight": 914,
+              "overflowX": false,
+              "overflowY": true,
+              "verticalScrollAccepted": true,
+              "overflowDisposition": "readable-vertical-scroll",
+              "readerLayout": "adaptive",
+              "readerOverflow": "authored",
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 968,
+              "diagramWidth": 938,
+              "pageComposition": {
+                "bodyPaddingPx": 12,
+                "headerPx": 68,
+                "diagramChromePx": 78,
+                "svgPx": 755,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 6.670222222222222,
+              "minimumProjectedNonEdgeTextPx": 7.504,
+              "minimumProjectedEdgeTextPx": 6.670222222222222,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1600,
+              "height": 1000,
+              "theme": "light",
+              "innerWidth": 1600,
+              "innerHeight": 1000,
+              "scrollWidth": 1600,
+              "scrollHeight": 1000,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 979,
+              "diagramWidth": 949,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 76,
+                "diagramChromePx": 84,
+                "svgPx": 764,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 6.748444444444444,
+              "minimumProjectedNonEdgeTextPx": 7.592,
+              "minimumProjectedEdgeTextPx": 6.748444444444444,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 1920,
+              "height": 1080,
+              "theme": "light",
+              "innerWidth": 1920,
+              "innerHeight": 1080,
+              "scrollWidth": 1920,
+              "scrollHeight": 1080,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1078,
+              "diagramWidth": 1048,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 76,
+                "diagramChromePx": 84,
+                "svgPx": 844,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 7.452444444444445,
+              "minimumProjectedNonEdgeTextPx": 8.384,
+              "minimumProjectedEdgeTextPx": 7.452444444444445,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 54,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            },
+            {
+              "width": 2048,
+              "height": 1320,
+              "theme": "light",
+              "innerWidth": 2048,
+              "innerHeight": 1320,
+              "scrollWidth": 2048,
+              "scrollHeight": 1320,
+              "overflowX": false,
+              "overflowY": false,
+              "verticalScrollAccepted": false,
+              "overflowDisposition": "contained",
+              "readerLayout": "adaptive",
+              "readerOverflow": null,
+              "readerFit": "intrinsic-height",
+              "ok": true,
+              "readerWidth": 1394,
+              "diagramWidth": 1344,
+              "pageComposition": {
+                "bodyPaddingPx": 64,
+                "headerPx": 68,
+                "diagramChromePx": 94,
+                "svgPx": 1082,
+                "cardsPx": 0,
+                "viewBoxHeight": 906
+              },
+              "viewBoxWidth": 1125,
+              "minimumProjectedNodeTextPx": 8,
+              "minimumProjectedNonEdgeTextPx": 9,
+              "minimumProjectedEdgeTextPx": 8,
+              "minimumProjectedNodeText": "deploy.sh build + push",
+              "minimumProjectedNodeTextDetail": "edge",
+              "minimumProjectedNodeTextOwner": {
+                "kind": "edge",
+                "id": null,
+                "from": "operator",
+                "to": "image_build"
+              },
+              "minimumRequiredNodeTextPx": 6,
+              "readabilityOk": true,
+              "hasLegend": true,
+              "hasNavigationDock": true,
+              "legendDockIntersectionArea": 0,
+              "dockStageIntersectionArea": 0,
+              "dockStageGap": 10,
+              "requiredDockStageGap": 10,
+              "viewerChromeStageOk": true,
+              "viewerChromeReserve": 44,
+              "viewerChromeActive": true,
+              "viewerChromeOk": true,
+              "resolvedTheme": "light"
+            }
+          ]
+        },
+        "captures": {
+          "status": "not-requested",
+          "screenshots": [],
+          "contactSheet": null
+        },
+        "sidecars": {
+          "receipt": "sch-architecture.browser-check.json",
+          "files": []
+        }
+      }
+    }
+  },
+  "diagnostics": [],
+  "evidence": {
+    "receipt": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.finalize.json",
+    "summaryReceipt": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.browser-check.json"
+  },
+  "visualReview": "not-requested",
+  "finishedAt": "2026-10-03T16:03:56.679Z",
+  "durationMs": 1905,
+  "update": {
+    "status": "current",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.0.1",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-03T15:55:50.665Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  }
+}
