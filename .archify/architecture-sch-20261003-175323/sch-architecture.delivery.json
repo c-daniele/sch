@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "b830817c-6221-4a27-993f-a6c1bbc6282a",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/candidate.json",
+  "output": "/home/cd4n1/dev/myRepos/sch/.archify/architecture-sch-20261003-175323/sch-architecture.html",
+  "specification": {
+    "sha256": "e6f5ee9ed42b5d7b2de5b9c55639dda887998a5e19a637aa5b7cc66b622ae4ab",
+    "bytes": 9029
+  },
+  "artifact": {
+    "sha256": "ab0cd3bcb316ad9cea38a5e81d186c3252616ebb33c46514bf7205587dd9fc19",
+    "bytes": 788263
+  }
+}

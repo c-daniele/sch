@@ -19,6 +19,18 @@ Regenerate after editing:
 d2 --layout elk --pad 24 docs/architecture/architecture.d2 docs/architecture/architecture.svg
 ```
 
+## Interactive system map
+
+[`sch-system-architecture.html`](sch-system-architecture.html) is an explorable
+map of every AWS and external component: AgentCore runtimes, the three Lambda
+functions, API Gateway, DynamoDB tables, the checkpoint bucket, ECR/CodeBuild,
+EventBridge, IAM planes, Bedrock, GitHub and the Telegram Bot API. Arrow
+styles distinguish data flows (thick solid), control calls (thin solid), async
+events and streams (dashed), and auth/policy gates (red). It also offers guided
+views (invoke and checkpoint, registry and isolation, Telegram supervision).
+Like the static diagram above it is descriptive; the specs stay normative.
+Open it in a browser (no server needed).
+
 ## The three planes
 
 | Plane | Where | What it does |
